@@ -1,7 +1,7 @@
 from tqdm import tqdm
 import torch
 from transformers import get_cosine_schedule_with_warmup
-from torch.amp import GradScaler, autocast
+from torch.amp import autocast
 import wandb
 from .configs import config 
 from ..models.model import GPT
@@ -48,12 +48,10 @@ def train(config):
             logits = model(inputs)
             loss = criterion(logits.view(-1,logits.shape[-1]),targets.view(-1))
             loss = loss / grad_accumulation_step
-        scaler.scale(loss).backward()
+        loss.backward()
         if (step+1) % grad_accumulation_step == 0:
-            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(),1.0)
-            scaler.step(optimizer)
-            scaler.update()
+            optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
         wandb_run.log({
@@ -78,7 +76,6 @@ def train(config):
                     model_data=model.state_dict(),
                     optimizer_data=optimizer.state_dict(),
                     scheduler_data=scheduler.state_dict(),
-                    scaler_data=scaler.state_dict(),
                     meta_data=meta_data,
                     artifact=artifact,
                     wandb_run=wandb_run,
@@ -103,7 +100,6 @@ if __name__ == '__main__' :
     criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.eos_token_id)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate,betas=(0.9, 0.95),weight_decay=0.01)
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=2000, num_training_steps=1000000)
-    scaler = GradScaler()
     wandb_run = wandb.init(
         entity = "akshithmarepally-akai",
         project = "828_testing_5090",
