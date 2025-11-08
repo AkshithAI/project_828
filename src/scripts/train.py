@@ -39,18 +39,6 @@ def train(config):
     best_val_loss = float('inf')
     patience_counter = 0
     patience = 8
-    save_path = os.path.join(config.model_dir,f"model_{step:05d}.pth") 
-    torch.save({
-                    "step" : step,
-                    "model_state_dict" : model.state_dict(),
-                    "optimizer_state_dict" : optimizer.state_dict(),
-                    "scheduler_state_dict" : scheduler.state_dict(),
-                    "scaler_state_dict" : scaler.state_dict(),
-                    "train_loss" : loss.item(),
-                    "val_loss" : val_loss,
-                },save_path)        
-    artifact.add_file(save_path)
-    wandb_run.log_artifact(artifact)
     for step,batch in enumerate(tqdm(train_data)):
         batch = batch.to(config.device,non_blocking=True).long()
         inputs = batch[:,:-1].contiguous()
@@ -105,7 +93,7 @@ def count_params(model):
 
 if __name__ == '__main__' : 
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    model = GPT(config,"cuda")
+    model = GPT(config,"cpu")
     criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.eos_token_id)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate,betas=(0.9, 0.95),weight_decay=0.01)
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=2000, num_training_steps=1000000)

@@ -32,6 +32,7 @@ class ModelConfig:
         self.learning_rate = 3e-4
         self.batch_size = 64
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.dtype = torch.float16
 
 
 class RMS_Norm(nn.Module):
@@ -48,7 +49,7 @@ class RMS_Norm(nn.Module):
     def forward(self,x : torch.Tensor) -> torch.Tensor:
         t,dtype = x.float(),x.dtype
         t = t * torch.rsqrt(torch.mean(t**2,dim = -1,keepdim=True) + self.eps)
-        return (t * self.scale).to(torch.bfloat16)
+        return (t * self.scale).to(dtype)
     
 
 def swiglu(x, alpha: float = 1.702, limit: float = 7.0):
@@ -66,13 +67,13 @@ class MLPBlock(nn.Module):
     ) -> None:
         super().__init__()
         self.w1 = nn.Linear(
-            config.hidden_dim, 2 * config.intermediate_size, device = device, dtype=torch.bfloat16
+            config.hidden_dim, 2 * config.intermediate_size, device = device, dtype=config.dtype
         )
         self.w2 = nn.Linear(
-            config.intermediate_size, config.hidden_dim, device = device, dtype=torch.bfloat16
+            config.intermediate_size, config.hidden_dim, device = device, dtype=config.dtype
         )
         self.w3 = nn.Linear(
-            config.hidden_dim, 2 * config.intermediate_size, device = device, dtype=torch.bfloat16
+            config.hidden_dim, 2 * config.intermediate_size, device = device, dtype=config.dtype
         )
         
         self.dropout = nn.Dropout(config.ffn_dropout)
@@ -89,13 +90,13 @@ class Expert(nn.Module):
     ) -> None:
         super().__init__()
         self.w1 = nn.Linear(
-            config.hidden_dim, 2 * config.intermediate_size, device = device, dtype=torch.bfloat16
+            config.hidden_dim, 2 * config.intermediate_size, device = device, dtype=config.dtype
         )
         self.w2 = nn.Linear(
-            config.intermediate_size, config.hidden_dim, device = device, dtype=torch.bfloat16
+            config.intermediate_size, config.hidden_dim, device = device, dtype=config.dtype
         )
         self.w3 = nn.Linear(
-            config.hidden_dim, 2 * config.intermediate_size, device = device, dtype=torch.bfloat16
+            config.hidden_dim, 2 * config.intermediate_size, device = device, dtype=config.dtype
         )
         
         self.dropout = nn.Dropout(config.ffn_dropout)
@@ -295,19 +296,19 @@ class Attention(nn.Module):
         self.head_dim = config.head_dim
         
         self.sinks = torch.nn.Parameter(
-            torch.empty(config.num_attn_heads, device=device, dtype=torch.bfloat16)
+            torch.empty(config.num_attn_heads, device=device, dtype=config.dtype)
         )
         self.wq = nn.Linear(
-            config.hidden_dim, config.num_attn_heads * config.head_dim, device = device, dtype = torch.bfloat16
+            config.hidden_dim, config.num_attn_heads * config.head_dim, device = device, dtype = config.dtype
         )
         self.wk = nn.Linear(
-            config.hidden_dim,config.num_key_value_heads * config.head_dim , device = device, dtype = torch.bfloat16
+            config.hidden_dim,config.num_key_value_heads * config.head_dim , device = device, dtype = config.dtype
         )
         self.wv = nn.Linear(
-            config.hidden_dim,config.num_key_value_heads * config.head_dim , device = device, dtype = torch.bfloat16
+            config.hidden_dim,config.num_key_value_heads * config.head_dim , device = device, dtype = config.dtype
         )
         self.wo = nn.Linear(
-            config.num_attn_heads * config.head_dim, config.hidden_dim, device = device, dtype = torch.bfloat16
+            config.num_attn_heads * config.head_dim, config.hidden_dim, device = device, dtype = config.dtype
         )
 
         self.rope = RotaryEmbedding(
