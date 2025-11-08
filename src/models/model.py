@@ -282,7 +282,7 @@ def expand_kv(
     V = V[:,:,None,:].expand(n_tokens,n_heads,q_mult,head_dim)
     S = S.reshape(n_heads,q_mult,1,1).expand(-1,-1,n_tokens,-1)
     
-    return K,V,S
+    return K.contiguous(),V.contiguous(),S.contiguous()
 
 
 class Attention(nn.Module):
