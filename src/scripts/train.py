@@ -99,7 +99,7 @@ def count_params(model):
 if __name__ == '__main__' : 
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     base_dir = get_base_dir()
-    model = GPT(config,"cpu")
+    model = GPT(config,"cuda")
     criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.eos_token_id)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate,betas=(0.9, 0.95),weight_decay=0.01)
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=2000, num_training_steps=1000000)
