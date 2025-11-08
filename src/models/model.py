@@ -117,8 +117,8 @@ class Gate(nn.Module):
         self.topk_groups = config.topk_groups
         self.n_groups = config.n_groups
         self.route_scale = config.route_scale
-        self.weight = nn.Parameter(torch.empty(config.num_experts, config.hidden_dim))
-        self.bias = nn.Parameter(torch.empty(config.num_experts, dtype=torch.float32))
+        self.weight = nn.Parameter(torch.empty((config.num_experts, config.hidden_dim),device = device))
+        self.bias = nn.Parameter(torch.empty((config.num_experts, dtype=torch.float32),device = device))
 
     def forward(self,x : torch.Tensor) -> Tuple[torch.Tensor,torch.Tensor] :
         scores = F.linear(x,self.weight)
@@ -383,7 +383,7 @@ class GPT(nn.Module):
             [TransformerDecoderBLK(config,device)
              for _ in range(config.num_hidden_layers)]
         )
-        self.unembedding = nn.Linear(config.hidden_dim,config.vocab_size)
+        self.unembedding = nn.Linear(config.hidden_dim,config.vocab_size,device = device)
 
     def forward(self,
                 x : torch.Tensor
