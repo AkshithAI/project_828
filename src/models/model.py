@@ -325,30 +325,57 @@ class Attention(nn.Module):
     def forward(self,
                 x : torch.Tensor
         ) -> torch.Tensor:
-        input_shape = x.shape
-        Q,K,V = self.wq(x),self.wk(x),self.wv(x)
+        # input_shape = x.shape
+        # Q,K,V = self.wq(x),self.wk(x),self.wv(x)
         
+        # Q = Q.view(-1,self.n_kv_heads,self.n_heads // self.n_kv_heads,self.head_dim)
+        # K = K.view(-1,self.n_kv_heads,self.head_dim)
+        # V = V.view(-1,self.n_kv_heads,self.head_dim)
+        # n_tokens = Q.shape[0]
+        
+        # Q,K = self.rope(Q,K)
+        # K,V,S = expand_kv(K,V,self.sinks,Q.shape)
+        # mask = torch.triu(Q.new_full((n_tokens,n_tokens),-float('inf')),diagonal = 1)
+
+        # scores = torch.einsum("qhmd,khmd->hmqk",Q,K) / math.sqrt(self.head_dim)
+        # scores += mask[None,None,:,:]
+        # scores = torch.cat([scores,S],dim = -1)
+        
+        # attn_scores = torch.softmax(scores,dim = -1)
+        # attn_scores = attn_scores[...,:-1]
+
+        # attn_out = torch.einsum("hmqk,vhmd->qhmd",attn_scores,V)
+        # attn_out = attn_out.reshape(n_tokens,-1)
+        # attn_out = self.wo(attn_out) 
+        
+        # return attn_out.reshape(input_shape)
+        batch_size,seq_len,hidden_dim = x.shape
+        Q,K,V = self.wq(x),self.wk(x),self.wv(x)
         Q = Q.view(-1,self.n_kv_heads,self.n_heads // self.n_kv_heads,self.head_dim)
         K = K.view(-1,self.n_kv_heads,self.head_dim)
         V = V.view(-1,self.n_kv_heads,self.head_dim)
-        n_tokens = Q.shape[0]
         
         Q,K = self.rope(Q,K)
         K,V,S = expand_kv(K,V,self.sinks,Q.shape)
-        mask = torch.triu(Q.new_full((n_tokens,n_tokens),-float('inf')),diagonal = 1)
-
-        scores = torch.einsum("qhmd,khmd->hmqk",Q,K) / math.sqrt(self.head_dim)
+        
+        Q = Q.view(batch_size,seq_len,-1,self.head_dim).transpose(1,2)
+        K = K.view(batch_size,seq_len,-1,self.head_dim).transpose(1,2)
+        V = V.view(batch_size,seq_len,-1,self.head_dim).transpose(1,2)
+        S = S.view(-1,batch_size,seq_len,1)
+        mask = torch.triu(Q.new_full((seq_len,seq_len),float('-inf')),diagonal = 1)
+        
+        scores = torch.matmul(Q,K.transpose(-2,-1)) / math.sqrt(self.head_dim)
         scores += mask[None,None,:,:]
         scores = torch.cat([scores,S],dim = -1)
-        
+
         attn_scores = torch.softmax(scores,dim = -1)
         attn_scores = attn_scores[...,:-1]
 
-        attn_out = torch.einsum("hmqk,vhmd->qhmd",attn_scores,V)
-        attn_out = attn_out.reshape(n_tokens,-1)
+        attn_out = torch.matmul(attn_scores,V).transpose(1,2) 
+        attn_out = attn_out.reshape(batch_size,seq_len,-1)
         attn_out = self.wo(attn_out) 
         
-        return attn_out.reshape(input_shape)
+        return attn_out.reshape(batch_size,seq_len,hidden_dim)
     
 class TransformerDecoderBLK(nn.Module):
     def __init__(self,
