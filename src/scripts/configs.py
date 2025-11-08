@@ -27,7 +27,6 @@ class ModelConfig:
         self.learning_rate = 3e-4
         self.batch_size = 8
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.dtype = torch.float16
-        self.model_dir = "/Users/apple/Documents/project_828/assets/ckpts" 
+        self.dtype = torch.bfloat16
 
 config = ModelConfig()

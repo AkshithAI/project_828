@@ -8,6 +8,7 @@ from ..models.model import GPT
 import torch.nn as nn
 from .dataloader import train_data,val_data
 from .tokenizer import tokenizer
+from .helper_funcs import get_base_dir,save_checkpoint
 import os
 
 @torch.inference_mode()
@@ -66,18 +67,22 @@ def train(config):
             model.train()
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                save_path = os.path.join(config.model_dir,f"model_{step:05d}.pth")
-                torch.save({
+                meta_data = {
                     "step" : step,
-                    "model_state_dict" : model.state_dict(),
-                    "optimizer_state_dict" : optimizer.state_dict(),
-                    "scheduler_state_dict" : scheduler.state_dict(),
-                    "scaler_state_dict" : scaler.state_dict(),
-                    "train_loss" : loss.item(),
-                    "val_loss" : val_loss,
-                },save_path)
-                artifact.add_file(save_path)
-                wandb_run.log_artifact(artifact)
+                    "train_loss" : loss,
+                    "val_loss" : val_loss
+                }
+                save_checkpoint(
+                    base_dir,
+                    step,
+                    model_data=model.state_dict(),
+                    optimizer_data=optimizer.state_dict(),
+                    scheduler_data=scheduler.state_dict(),
+                    scaler_data=scaler.state_dict(),
+                    meta_data=meta_data,
+                    artifact=artifact,
+                    wandb_run=wandb_run,
+                )
                 patience_counter = 0
             else:
                 patience_counter += 1
@@ -93,6 +98,7 @@ def count_params(model):
 
 if __name__ == '__main__' : 
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    base_dir = get_base_dir()
     model = GPT(config,"cpu")
     criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.eos_token_id)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate,betas=(0.9, 0.95),weight_decay=0.01)
