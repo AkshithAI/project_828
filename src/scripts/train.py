@@ -5,6 +5,8 @@ from torch.amp import autocast
 import wandb
 from .configs import config 
 from ..models.model import GPT
+from ..models.model_flash_attn import GPT_FLASH
+from ..models.weight_init import init_gpt_model, count_parameters
 import torch.nn as nn
 from .dataloader import train_data,val_data
 from .tokenizer import tokenizer
@@ -36,6 +38,7 @@ def validation(model,criterion):
   return total_val_loss / max(1,steps)
 
 def train(config):
+    model.train()
     grad_accumulation_step = 16
     best_val_loss = float('inf')
     patience_counter = 0
@@ -67,7 +70,7 @@ def train(config):
                 best_val_loss = val_loss
                 meta_data = {
                     "step" : step,
-                    "train_loss" : loss,
+                    "train_loss" : loss.item(),
                     "val_loss" : val_loss
                 }
                 save_checkpoint(
@@ -76,9 +79,8 @@ def train(config):
                     model_data=model.state_dict(),
                     optimizer_data=optimizer.state_dict(),
                     scheduler_data=scheduler.state_dict(),
-                    meta_data=meta_data,
-                    artifact=artifact,
                     wandb_run=wandb_run,
+                    meta_data=meta_data
                 )
                 patience_counter = 0
             else:
@@ -90,13 +92,19 @@ def train(config):
     wandb_run.finish()
 
 
-def count_params(model):
-  return sum([p.numel() for p in model.parameters() if p.requires_grad])
-
 if __name__ == '__main__' : 
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     base_dir = get_base_dir()
-    model = GPT(config,"cuda")
+    use_flash_attn = True
+    if use_flash_attn:
+        model = GPT_FLASH(config,"cuda")
+    else:
+        model = GPT(config,"cuda")
+    
+    # Initialize model weights
+    init_gpt_model(model, config)
+    count_parameters(model)
+    
     criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.eos_token_id)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate,betas=(0.9, 0.95),weight_decay=0.01)
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=2000, num_training_steps=1000000)
@@ -109,6 +117,4 @@ if __name__ == '__main__' :
             "configs" : config,
         }
     )
-    artifact = wandb.Artifact("model-checkpoint",type = 'model')
-    print(f"Total parameters : {count_params(model)}")
     train(config)

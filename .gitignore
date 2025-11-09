@@ -139,3 +139,7 @@ wandb/
 # Model weights and data
 assets/ckpts/*.pth
 assets/ckpts/*.pt
+
+# Temporary files
+temp.txt
+BUG_REPORT.md

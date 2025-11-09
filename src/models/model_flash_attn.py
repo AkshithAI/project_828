@@ -3,37 +3,9 @@ from torch import nn
 import torch.nn.functional as F
 import math
 from typing import Tuple
-from dataclasses import dataclass
 from ..scripts.tokenizer import tokenizer
-@dataclass
-class ModelConfig:
-    def __init__(self):
-        # Model Architecture
-        self.vocab_size = tokenizer.vocab_size   
-        self.num_attn_heads : int = 8
-        self.num_key_value_heads : int = 2
-        self.hidden_dim : int = 512 
-        self.intermediate_size : int = 768
-        self.ffn_dropout = 0.0
-        self.head_dim = 8
-        self.num_hidden_layers = 1
-        self.num_experts = 4
-        self.num_experts_per_tok = 2
-        self.n_groups = 2
-        self.route_scale = 1
-        self.topk_groups = 1
-        self.base = 10000
-        self.initial_context_len = 2048
-        self.ntk_alpha = 1.0
-        self.ntk_beta = 32.0
-        self.scaling_factor = 1.0
-        # Training
-        self.dropout = 0.0
-        self.learning_rate = 3e-4
-        self.batch_size = 8
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.dtype = torch.bfloat16
-
+from ..scripts.configs import ModelConfig
+from flash_attn import flash_attn_func
 
 class RMS_Norm(nn.Module):
     def __init__(self,
@@ -172,8 +144,8 @@ def apply_rope(x : torch.Tensor,
                cos : torch.Tensor,
                sin : torch.Tensor
     ) -> torch.Tensor:
-    cos = cos.unsqueeze(0).unsqueeze(-2).to(x.device)
-    sin = sin.unsqueeze(0).unsqueeze(-2).to(x.device)
+    cos = cos.unsqueeze(-2).unsqueeze(0).to(x.device)
+    sin = sin.unsqueeze(-2).unsqueeze(0).to(x.device)
     x1,x2 = torch.chunk(x,2,dim = -1)
     o1 = x1 * cos - x2 * sin
     o2 = x1 * sin + x2 * cos
@@ -252,7 +224,7 @@ class RotaryEmbedding(nn.Module):
                 q : torch.Tensor,
                 k : torch.Tensor
         ) -> Tuple[torch.Tensor,torch.Tensor]:
-        batch_size,seq_len,_,_,_ = q.shape
+        batch_size,seq_len,_,_ = q.shape
         cos,sin = self.compute_cos_sin(seq_len)
 
         query_shape = q.shape
@@ -268,36 +240,6 @@ class RotaryEmbedding(nn.Module):
         return q,k
     
     
-# def expand_kv(
-#               K : torch.Tensor,
-#               V : torch.Tensor,
-#               S : torch.Tensor,
-#               q_shape
-#     ) -> Tuple[torch.Tensor,torch.Tensor,torch.Tensor]:
-#     n_tokens,n_heads,q_mult,head_dim = q_shape
-#     assert K.shape == (n_tokens,n_heads,head_dim)
-#     assert V.shape == (n_tokens,n_heads,head_dim)
-    
-#     K = K[:,:,None,:].expand(n_tokens,n_heads,q_mult,head_dim)
-#     V = V[:,:,None,:].expand(n_tokens,n_heads,q_mult,head_dim)
-#     S = S.reshape(n_heads,q_mult,1,1).expand(-1,-1,n_tokens,-1)
-    
-#     return K.contiguous(),V.contiguous(),S.contiguous()
-def expand_kv(
-              K : torch.Tensor,
-              V : torch.Tensor,
-              S : torch.Tensor,
-              q_shape
-    ) -> Tuple[torch.Tensor,torch.Tensor,torch.Tensor]:
-    batch_size,seq_len,n_heads,q_mult,head_dim = q_shape
-    assert K.shape == (batch_size,seq_len,n_heads,head_dim)
-    assert V.shape == (batch_size,seq_len,n_heads,head_dim)
-    
-    K = K[:,:,:,None,:].expand(batch_size,seq_len,n_heads,q_mult,head_dim)
-    V = V[:,:,:,None,:].expand(batch_size,seq_len,n_heads,q_mult,head_dim)
-    S = S.reshape(1,n_heads,q_mult,1,1).expand(batch_size,-1,-1,seq_len,-1)
-    
-    return K.contiguous(),V.contiguous(),S.contiguous()
 
 class Attention(nn.Module):
     def __init__(self,
@@ -309,9 +251,7 @@ class Attention(nn.Module):
         self.n_kv_heads = config.num_key_value_heads
         self.head_dim = config.head_dim
         
-        self.sinks = torch.nn.Parameter(
-            torch.empty(config.num_attn_heads, device=device, dtype=config.dtype)
-        )
+       
         self.wq = nn.Linear(
             config.hidden_dim, config.num_attn_heads * config.head_dim, device = device, dtype = config.dtype
         )
@@ -342,28 +282,16 @@ class Attention(nn.Module):
         batch_size,seq_len,hidden_dim = x.shape
         Q,K,V = self.wq(x),self.wk(x),self.wv(x)
         
-        # Q = Q.view(-1,self.n_kv_heads,self.n_heads // self.n_kv_heads,self.head_dim)
-        # K = K.view(-1,self.n_kv_heads,self.head_dim)
-        # V = V.view(-1,self.n_kv_heads,self.head_dim)
-        
-        Q = Q.view(batch_size,seq_len,self.n_kv_heads,self.n_heads // self.n_kv_heads,self.head_dim)
+        Q = Q.view(batch_size,seq_len,self.n_heads,self.head_dim)
         K = K.view(batch_size,seq_len,self.n_kv_heads,self.head_dim)
         V = V.view(batch_size,seq_len,self.n_kv_heads,self.head_dim)
+        
+        
         Q,K = self.rope(Q,K)
-        K,V,S = expand_kv(K,V,self.sinks,Q.shape)
-        mask = torch.triu(Q.new_full((seq_len,seq_len),-float('inf')),diagonal = 1)
+        attn_out = flash_attn_func(Q,K,V,causal = True)
+        attn_out = attn_out.view(batch_size,seq_len,-1)
+        attn_out = self.wo(attn_out)
 
-        scores = torch.einsum("bqhmd,bkhmd->bhmqk",Q,K) / math.sqrt(self.head_dim)
-        scores += mask[None,None,None,:,:]
-        scores = torch.cat([scores,S],dim = -1)
-        
-        attn_scores = torch.softmax(scores,dim = -1)
-        attn_scores = attn_scores[...,:-1]
-
-        attn_out = torch.einsum("bhmqk,bvhmd->bqhmd",attn_scores,V)
-        attn_out = attn_out.reshape(batch_size,seq_len,-1)
-        attn_out = self.wo(attn_out) 
-        
         return attn_out.reshape(batch_size,seq_len,hidden_dim)
         
     
@@ -383,7 +311,7 @@ class TransformerDecoderBLK(nn.Module):
         x = x + self.mlp(self.norm2(x))
         return x
         
-class GPT(nn.Module):
+class GPT_FLASH(nn.Module):
     def __init__(self,
                  config : ModelConfig,
                  device : torch.device | None = None
