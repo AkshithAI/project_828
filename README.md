@@ -19,7 +19,6 @@ A Mixture-of-Experts (MoE) transformer model implementation for code generation,
 - **Type**: Grouped Query Attention (GQA) with RoPE
 - **Attention Heads**: 8 (configurable)
 - **KV Heads**: 2 (4:1 ratio for efficiency)
-- **Head Dimension**: Computed as `hidden_dim / num_attn_heads`
 - **Position Encoding**: Rotary Position Embeddings (RoPE) with YaRN scaling
 - **Special Feature**: Attention sinks for improved long-context handling
 
