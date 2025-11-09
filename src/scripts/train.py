@@ -54,7 +54,7 @@ def train(config):
         loss = loss / grad_accumulation_step
         loss.backward()
         if (step+1) % grad_accumulation_step == 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(),1.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(),1.0)
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
@@ -63,7 +63,7 @@ def train(config):
           "train/lr": scheduler.get_last_lr()[0],
           "train/step": step,
           "train/ppl": math.exp(min(loss_value, 10)),  # Perplexity
-          "train/grad_norm": torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).item(),
+          "train/grad_norm": grad_norm.item(),
         })
         if (step + 1) % 1000 == 0:
             print(f"Step : {step+1} , Loss : {loss_value:.4f}")
@@ -110,8 +110,19 @@ if __name__ == '__main__' :
     count_parameters(model)
     
     criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.eos_token_id)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate,betas=(0.9, 0.95),weight_decay=0.01)
-    scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=2000, num_training_steps=3000000)
+    optimizer = torch.optim.AdamW(
+      model.parameters(),
+      lr=config.learning_rate,
+      betas=(0.9, 0.95),
+      weight_decay=0.01,
+      eps=1e-8 
+    )
+    scheduler = get_cosine_schedule_with_warmup(
+      optimizer,
+      num_warmup_steps=2000,
+      num_training_steps=100000,
+      num_cycles=0.5 
+    )
     wandb_run = wandb.init(
         entity = "akshithmarepally-akai",
         project = "828_testing_5090",
