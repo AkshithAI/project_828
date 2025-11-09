@@ -99,7 +99,7 @@ def train(config):
 if __name__ == '__main__' : 
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     base_dir = get_base_dir()
-    use_flash_attn = True
+    use_flash_attn = False
     if use_flash_attn:
         model = GPT_FLASH(config,"cuda")
     else:
