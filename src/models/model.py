@@ -268,21 +268,6 @@ class RotaryEmbedding(nn.Module):
         return q,k
     
     
-# def expand_kv(
-#               K : torch.Tensor,
-#               V : torch.Tensor,
-#               S : torch.Tensor,
-#               q_shape
-#     ) -> Tuple[torch.Tensor,torch.Tensor,torch.Tensor]:
-#     n_tokens,n_heads,q_mult,head_dim = q_shape
-#     assert K.shape == (n_tokens,n_heads,head_dim)
-#     assert V.shape == (n_tokens,n_heads,head_dim)
-    
-#     K = K[:,:,None,:].expand(n_tokens,n_heads,q_mult,head_dim)
-#     V = V[:,:,None,:].expand(n_tokens,n_heads,q_mult,head_dim)
-#     S = S.reshape(n_heads,q_mult,1,1).expand(-1,-1,n_tokens,-1)
-    
-#     return K.contiguous(),V.contiguous(),S.contiguous()
 def expand_kv(
               K : torch.Tensor,
               V : torch.Tensor,
@@ -341,10 +326,6 @@ class Attention(nn.Module):
         ) -> torch.Tensor:
         batch_size,seq_len,hidden_dim = x.shape
         Q,K,V = self.wq(x),self.wk(x),self.wv(x)
-        
-        # Q = Q.view(-1,self.n_kv_heads,self.n_heads // self.n_kv_heads,self.head_dim)
-        # K = K.view(-1,self.n_kv_heads,self.head_dim)
-        # V = V.view(-1,self.n_kv_heads,self.head_dim)
         
         Q = Q.view(batch_size,seq_len,self.n_kv_heads,self.n_heads // self.n_kv_heads,self.head_dim)
         K = K.view(batch_size,seq_len,self.n_kv_heads,self.head_dim)
