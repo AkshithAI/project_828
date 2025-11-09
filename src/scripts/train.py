@@ -61,9 +61,9 @@ def train(config):
         "train/loss" : loss.item() * grad_accumulation_step,
         "train/step": step
         })
-        if (step + 1) % 100 == 0:
+        if (step + 1) % 1000 == 0:
             print(f"Step : {step+1} , Loss : {loss.item()}")
-        if (step+1) % 10000 == 0:
+        if (step+1) % 50000 == 0:
             val_loss = validation(model,criterion)
             model.train()
             if val_loss < best_val_loss:
@@ -107,7 +107,7 @@ if __name__ == '__main__' :
     
     criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.eos_token_id)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate,betas=(0.9, 0.95),weight_decay=0.01)
-    scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=2000, num_training_steps=1000000)
+    scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=2000, num_training_steps=3000000)
     wandb_run = wandb.init(
         entity = "akshithmarepally-akai",
         project = "828_testing_5090",
