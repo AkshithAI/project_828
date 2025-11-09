@@ -3,24 +3,21 @@ from datasets import load_dataset
 from huggingface_hub import list_repo_files
 from .tokenizer import tokenizer
 
-repo_id = "codeparrot/codeparrot-clean"   # your TRAIN repo
-branch  = "main"                           # or a specific commit SHA for reproducibility
+repo_id = "codeparrot/codeparrot-clean"   
+branch  = "main"                          
 train_shards = sorted(list_repo_files(repo_id, repo_type="dataset"))
-selected = train_shards[3:]  # skip the first shard
+selected = train_shards[2:]
 print(len(selected))
 
-# Turn repo-relative paths into stable resolve URLs
 def to_url(path):
     return f"https://huggingface.co/datasets/{repo_id}/resolve/{branch}/{path}"
 
 train_urls = [to_url(p) for p in selected]
 
-# Build the streaming dataset using the JSON loader
-# (It handles .gz automatically; assumes JSON Lines per file.)
 ds_dict = load_dataset(
     "json",
     data_files={"train": train_urls},
-    split=None,              # we provided our own split mapping
+    split=None,              
     streaming=True,
 )
 
