@@ -61,7 +61,9 @@ def train(config):
         wandb_run.log({
           "train/loss" : loss_value,
           "train/lr": scheduler.get_last_lr()[0],
-          "train/step": step
+          "train/step": step,
+          "train/ppl": math.exp(min(loss_value, 10)),  # Perplexity
+          "train/grad_norm": torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0),
         })
         if (step + 1) % 1000 == 0:
             print(f"Step : {step+1} , Loss : {loss_value:.4f}")
