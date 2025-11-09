@@ -10,7 +10,7 @@ class ModelConfig:
         self.hidden_dim : int = 512 
         self.intermediate_size : int = 768
         self.ffn_dropout = 0.0
-        self.head_dim = 8
+        self.head_dim = self.hidden_dim // self.num_attn_heads 
         self.num_hidden_layers = 1
         self.num_experts = 4
         self.num_experts_per_tok = 2
