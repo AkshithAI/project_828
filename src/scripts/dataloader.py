@@ -36,10 +36,10 @@ def prepare_code_data(files, context_length=2048):
                 )["input_ids"]
         buffer.extend(tokens)
         buffer.append(tokenizer.eos_token_id)
-        while len(buffer) >= context_length:
-            chunk = torch.tensor(buffer[:context_length],dtype = torch.long)
+        while len(buffer) >= context_length + 1:
+            chunk = torch.tensor(buffer[:context_length + 1],dtype = torch.long)
             yield chunk
-            buffer = buffer[context_length:]
+            buffer = buffer[context_length + 1:]
  
 def collate_fn(batch):
   return torch.stack(batch,dim = 0)
@@ -56,5 +56,17 @@ class CustomDataset(IterableDataset):
     
 dataset_train = CustomDataset(ds_for_train)
 dataset_val = CustomDataset(ds_for_val)
-train_data = DataLoader(dataset_train,batch_size = 8,collate_fn = collate_fn,pin_memory=True)
-val_data = DataLoader(dataset_val,batch_size = 8,collate_fn = collate_fn,pin_memory=True)
+train_data = DataLoader(
+    dataset_train,
+    batch_size = 8,
+    collate_fn = collate_fn,
+    pin_memory=True,
+    num_workers=0,
+)
+val_data = DataLoader(
+    dataset_val,
+    batch_size = 8,
+    collate_fn = collate_fn,
+    pin_memory=True,
+    num_workers=0,
+)
