@@ -50,7 +50,8 @@ def train(config):
         with autocast(device_type = "cuda",dtype = torch.bfloat16):
             logits = model(inputs)
             loss = criterion(logits.view(-1,logits.shape[-1]),targets.view(-1))
-            loss = loss / grad_accumulation_step
+            loss_value = loss.item()
+        loss = loss / grad_accumulation_step
         loss.backward()
         if (step+1) % grad_accumulation_step == 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(),1.0)
@@ -58,11 +59,12 @@ def train(config):
             scheduler.step()
             optimizer.zero_grad()
         wandb_run.log({
-        "train/loss" : loss.item() * grad_accumulation_step,
-        "train/step": step
+          "train/loss" : loss_value,
+          "train/lr": scheduler.get_last_lr()[0],
+          "train/step": step
         })
         if (step + 1) % 1000 == 0:
-            print(f"Step : {step+1} , Loss : {loss.item()}")
+            print(f"Step : {step+1} , Loss : {loss_value:.4f}")
         if (step+1) % 50000 == 0:
             val_loss = validation(model,criterion)
             model.train()
