@@ -44,7 +44,6 @@ def train(config):
     patience_counter = 0
     patience = 8
     for step,batch in enumerate(tqdm(train_data)):
-        optimizer.zero_grad()
         batch = batch.to(config.device,non_blocking=True).long()
         inputs = batch[:,:-1].contiguous()
         targets = batch[:,1:].contiguous()
@@ -55,6 +54,7 @@ def train(config):
         loss = loss / grad_accumulation_step
         loss.backward()
         if (step+1) % grad_accumulation_step == 0:
+            optimizer.zero_grad()
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(),1.0)
             optimizer.step()
             scheduler.step()
