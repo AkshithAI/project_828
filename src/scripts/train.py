@@ -44,6 +44,7 @@ def train(config):
     patience_counter = 0
     patience = 8
     for step,batch in enumerate(tqdm(train_data)):
+        optimizer.zero_grad()
         batch = batch.to(config.device,non_blocking=True).long()
         inputs = batch[:,:-1].contiguous()
         targets = batch[:,1:].contiguous()
@@ -57,13 +58,12 @@ def train(config):
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(),1.0)
             optimizer.step()
             scheduler.step()
-            optimizer.zero_grad()
+            wandb_run.log({"train/grad_norm": grad_norm.item()})
         wandb_run.log({
           "train/loss" : loss_value,
           "train/lr": scheduler.get_last_lr()[0],
           "train/step": step,
-          "train/ppl": math.exp(min(loss_value, 10)),  # Perplexity
-          "train/grad_norm": grad_norm.item(),
+          "train/ppl": math.exp(min(loss_value, 10)),  
         })
         if (step + 1) % 1000 == 0:
             print(f"Step : {step+1} , Loss : {loss_value:.4f}")
