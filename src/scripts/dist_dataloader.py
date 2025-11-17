@@ -12,29 +12,31 @@ train_data_0 = CustomDataset(ds_rank_0)
 train_data_1 = CustomDataset(ds_rank_1)
 dataset_val = CustomDataset(ds_for_val)
 
+# ** Will Fix Soon **
+# Hard-Coded the DataLoader for each GPU 
 train_loader_0 = DataLoader(
     train_data_0,
-    batch_size=8,  # Matches train_micro_batch_size_per_gpu in ds-config.json
+    batch_size=8,  
     collate_fn = collate_fn,
     pin_memory=True,
-    num_workers=4,  # Increased for better I/O performance
+    num_workers=4,  
     prefetch_factor=2,
     persistent_workers=True,
 )
 
 train_loader_1 = DataLoader(
     train_data_1,
-    batch_size=8,  # Matches train_micro_batch_size_per_gpu in ds-config.json
+    batch_size=8,  
     collate_fn = collate_fn,
     pin_memory=True,
-    num_workers=4,  # Increased for better I/O performance
+    num_workers=4,  
     prefetch_factor=2,
     persistent_workers=True,
 )
 
 val_data = DataLoader(
       dataset_val,
-      batch_size = 8,  # Match training batch size for consistency
+      batch_size = 8,  
       collate_fn = collate_fn,
       pin_memory=True,
       num_workers=2,
