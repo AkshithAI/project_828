@@ -5,7 +5,7 @@ from datasets import load_dataset
 train_files = get_train_files()
 ds_rank_0,ds_rank_1 = train_files[0::2],train_files[1::2]
 
-ds_rank_0,ds_rank_1 = get_hf_datasets(ds_rank_0)["train"],get_hf_datasets(ds_rank_1)["train"]
+ds_rank_0,ds_rank_1 = get_hf_datasets(ds_rank_0),get_hf_datasets(ds_rank_1)
 ds_for_val = load_dataset("codeparrot/codeparrot-clean-valid",split = "train",streaming = True)
 
 train_data_0 = CustomDataset(ds_rank_0)
