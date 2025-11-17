@@ -17,7 +17,7 @@ from .helper_funcs import get_base_dir
 
 
 @torch.inference_mode()
-def validation(model, criterion, val_loader):
+def validation(model, criterion, val_loader, wandb_run=None):
     model.eval()
     total_val_loss = 0
     steps = 0
@@ -30,8 +30,8 @@ def validation(model, criterion, val_loader):
         logits = model(inputs)
         val_loss = criterion(logits.view(-1, logits.shape[-1]), targets.view(-1))
         
-        if dist.get_rank() == 0:
-            wandb_dist.log({
+        if dist.get_rank() == 0 and wandb_run is not None:
+            wandb_run.log({
                 "val/loss": val_loss.item(),
                 "val/step": step
             })
@@ -52,7 +52,7 @@ def validation(model, criterion, val_loader):
     return avg_val_loss
 
 
-def train(model_engine, train_loader, criterion, val_loader):
+def train(model_engine, train_loader, criterion, val_loader, wandb_run=None, checkpoint_dir=None):
     model_engine.train()
     best_val_loss = float('inf')
     patience_counter = 0
@@ -74,7 +74,7 @@ def train(model_engine, train_loader, criterion, val_loader):
         model_engine.backward(loss)
         model_engine.step()
         
-        if dist.get_rank() == 0:
+        if dist.get_rank() == 0 and wandb_run is not None:
             # Calculate tokens per second
             elapsed = time.time() - start_time
             tokens_per_sec = (global_step + 1) * 128 * 2048 / elapsed if elapsed > 0 else 0
@@ -94,7 +94,7 @@ def train(model_engine, train_loader, criterion, val_loader):
                 log_dict["perf/gpu_memory_allocated_gb"] = allocated
                 log_dict["perf/gpu_memory_reserved_gb"] = reserved
             
-            wandb_dist.log(log_dict)
+            wandb_run.log(log_dict)
         
         if (global_step + 1) % 1000 == 0 and dist.get_rank() == 0:
             allocated = torch.cuda.memory_allocated() / 1e9
@@ -102,35 +102,42 @@ def train(model_engine, train_loader, criterion, val_loader):
         
         if (global_step + 1) % 50000 == 0:
             dist.barrier()  
-            val_loss = validation(model_engine, criterion, val_loader)
+            val_loss = validation(model_engine, criterion, val_loader, wandb_run)
             model_engine.train()
             
             if dist.get_rank() == 0:
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
                     ckpt_id = f"step_{global_step}"
-                    ckpt_dir = os.path.join(base_dir, ckpt_id)
                     
-                    model_engine.save_checkpoint(base_dir, tag=ckpt_id)
+                    # Save checkpoint using DeepSpeed
+                    if checkpoint_dir is not None:
+                        ckpt_dir = os.path.join(checkpoint_dir, ckpt_id)
+                        model_engine.save_checkpoint(checkpoint_dir, tag=ckpt_id)
+                        
+                        # Upload to WandB if available
+                        if wandb_run is not None:
+                            artifact = wandb.Artifact(
+                                name=f"model-checkpoint-{ckpt_id}",
+                                type="model",
+                                description=f"Model checkpoint at step {global_step} with val_loss {val_loss:.4f}",
+                                metadata={
+                                    "step": global_step,
+                                    "val_loss": val_loss,
+                                    "train_loss": loss_value,
+                                    "best_val_loss": best_val_loss,
+                                }
+                            )
+                            artifact.add_dir(ckpt_dir)
+                            wandb_run.log_artifact(artifact)
+                            
+                            wandb_run.log({
+                                "val/best_loss": best_val_loss,
+                                "val/checkpoint_step": global_step
+                            })
+                        
+                        print(f"Checkpoint saved to {ckpt_dir}")
                     
-                    artifact = wandb.Artifact(
-                        name=f"model-checkpoint-{ckpt_id}",
-                        type="model",
-                        description=f"Model checkpoint at step {global_step} with val_loss {val_loss:.4f}",
-                        metadata={
-                            "step": global_step,
-                            "val_loss": val_loss,
-                            "train_loss": loss_value,
-                            "best_val_loss": best_val_loss,
-                        }
-                    )
-                    artifact.add_dir(ckpt_dir)
-                    wandb_dist.log_artifact(artifact)
-                    
-                    wandb_dist.log({
-                        "val/best_loss": best_val_loss,
-                        "val/checkpoint_step": global_step
-                    })
                     patience_counter = 0
                 else:
                     patience_counter += 1
@@ -140,8 +147,8 @@ def train(model_engine, train_loader, criterion, val_loader):
         
         global_step += 1
     
-    if dist.get_rank() == 0:
-        wandb_dist.finish()
+    if dist.get_rank() == 0 and wandb_run is not None:
+        wandb_run.finish()
 
 
 if __name__ == '__main__':
@@ -191,17 +198,18 @@ if __name__ == '__main__':
             print(f"Warning: More than 2 GPUs detected. Rank {rank} using default dataloader.")
     
     if rank == 0:
-        wandb_dist = wandb.init(
+        wandb_run = wandb.init(
             entity="akshithmarepally-akai",
             project="828_Distributed_testing_5090",
             config={
                 "architecture": "GPT",
                 "dataset": "codeparrot/codeparrot-clean",
                 "world_size": world_size,
+                "use_flash_attn": use_flash_attn,
                 "configs": vars(config),
             }
         )
     else:
-        wandb_dist = None
+        wandb_run = None
     
-    train(model_engine, train_loader, criterion, val_data)
+    train(model_engine, train_loader, criterion, val_data, wandb_run, base_dir)
