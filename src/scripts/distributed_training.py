@@ -109,7 +109,23 @@ def train(model_engine, train_loader, criterion, val_loader):
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
                     ckpt_id = f"step_{global_step}"
+                    ckpt_dir = os.path.join(base_dir, ckpt_id)
+                    
                     model_engine.save_checkpoint(base_dir, tag=ckpt_id)
+                    
+                    artifact = wandb.Artifact(
+                        name=f"model-checkpoint-{ckpt_id}",
+                        type="model",
+                        description=f"Model checkpoint at step {global_step} with val_loss {val_loss:.4f}",
+                        metadata={
+                            "step": global_step,
+                            "val_loss": val_loss,
+                            "train_loss": loss_value,
+                            "best_val_loss": best_val_loss,
+                        }
+                    )
+                    artifact.add_dir(ckpt_dir)
+                    wandb_dist.log_artifact(artifact)
                     
                     wandb_dist.log({
                         "val/best_loss": best_val_loss,
