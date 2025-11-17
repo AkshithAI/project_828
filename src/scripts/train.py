@@ -1,17 +1,20 @@
-from tqdm import tqdm
 import torch
-from transformers import get_cosine_schedule_with_warmup
-from torch.amp import autocast
+import math
+import warnings
+import os
 import wandb
+import torch.nn as nn
+from tqdm import tqdm
+from torch.amp import autocast
 from .configs import config 
 from ..models.model import GPT
-from ..models.model_flash_attn import GPT_FLASH
-from ..models.weight_init import init_gpt_model, count_parameters
-import torch.nn as nn
-from .dataloader import train_data,val_data
 from .tokenizer import tokenizer
+from .dataloader import train_data,val_data
+from ..models.model_flash_attn import GPT_FLASH
 from .helper_funcs import get_base_dir,save_checkpoint
-import os
+from transformers import get_cosine_schedule_with_warmup
+from ..models.weight_init import init_gpt_model, count_parameters
+
 
 @torch.inference_mode()
 def validation(model,criterion):
@@ -97,6 +100,7 @@ def train(config):
 
 
 if __name__ == '__main__' : 
+    warnings.filterwarnings("ignore")
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     base_dir = get_base_dir()
     use_flash_attn = False

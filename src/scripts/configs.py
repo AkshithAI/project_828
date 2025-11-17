@@ -1,32 +1,38 @@
 import torch
 from .tokenizer import tokenizer
+from dataclasses import dataclass
 
+@dataclass
 class ModelConfig:
-    def __init__(self):
         # Model architecture
-        self.vocab_size = tokenizer.vocab_size   
-        self.num_attn_heads : int = 8
-        self.num_key_value_heads : int = 2
-        self.hidden_dim : int = 512 
-        self.intermediate_size : int = 768
-        self.ffn_dropout = 0.0
-        self.head_dim = self.hidden_dim // self.num_attn_heads 
-        self.num_hidden_layers = 1
-        self.num_experts = 4
-        self.num_experts_per_tok = 2
-        self.n_groups = 2
-        self.route_scale = 1
-        self.topk_groups = 1
-        self.base = 10000
-        self.initial_context_len = 2048
-        self.ntk_alpha = 1.0
-        self.ntk_beta = 32.0
-        self.scaling_factor = 1.0
+        vocab_size : int = tokenizer.vocab_size   
+        num_attn_heads : int = 8
+        num_key_value_heads : int = 2
+        hidden_dim : int = 512 
+        intermediate_size : int = 768
+        ffn_dropout : float = 0.0
+        head_dim : float = hidden_dim // num_attn_heads 
+        num_hidden_layers : int = 1
+        num_experts : int = 4
+        num_experts_per_tok : int = 2
+        n_groups : int = 2
+        route_scale : int = 1
+        topk_groups : int = 1
+        base : int = 10000
+        initial_context_len : int = 2048
+        ntk_alpha : float = 1.0
+        ntk_beta : float = 32.0
+        scaling_factor : float = 1.0
         # Training
-        self.dropout = 0.0
-        self.learning_rate = 3e-4
-        self.batch_size = 8
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.dtype = torch.bfloat16
+        dropout : float = 0.0
+        learning_rate : float = 3e-4
+        batch_size : int = 8
+        seq_len : int = 2048
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        dtype = torch.bfloat16
+        local_rank : int = -1
+        global_rank : int = -1
 
-config = ModelConfig()
+if __name__ == '__main__':
+    config = ModelConfig()
+    

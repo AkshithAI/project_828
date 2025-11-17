@@ -8,7 +8,7 @@ def get_base_dir():
     else:
         home_dir = os.path.expanduser("~")
         cache_dir = os.path.join(home_dir,".cache")
-        project_828_dir = os.path.join(cache_dir,"project_828")
+        project_828_dir = os.path.join(cache_dir,"project_828_weights")
     os.makedirs(project_828_dir,exist_ok=True)
     return project_828_dir
 
