@@ -180,7 +180,6 @@ if __name__ == '__main__':
         args=cmd_args,
         model=model,
         model_parameters=model.parameters(),
-        config=ds_config
     )
     
     criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.eos_token_id)
