@@ -1,15 +1,16 @@
 #!/bin/bash
 
-# DeepSpeed Distributed Training Launch Script
-# Usage: ./launch_distributed.sh [num_gpus]
+# Installing all the requirements
+pip install -r requirements.txt
 
-NUM_GPUS=${1:-2}  # Default to 2 GPUs if not specified
+# Wandb Login
+wandb login
 
-echo "Launching distributed training on $NUM_GPUS GPUs..."
+# Launch Training
+PYTHONPATH=$(pwd) 
+deepspeed --num_gpus=2 \
+    src/scripts/distributed_training.py 
+    --deepspeed
+    --deepspeed_config src/scripts/ds-config.json 
+    --batch_size 8
 
-deepspeed --num_gpus=$NUM_GPUS \
-    src/scripts/distributed_training.py \
-    --deepspeed \
-    --deepspeed_config src/scripts/ds-config.json
-
-echo "Training completed!"
