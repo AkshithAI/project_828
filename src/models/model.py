@@ -342,7 +342,7 @@ class Attention(nn.Module):
         attn_scores = attn_scores[...,:-1]
 
         attn_out = torch.einsum("bhmqk,bvhmd->bqhmd",attn_scores,V)
-        attn_out = attn_out.reshape(batch_size,seq_len,-1)
+        attn_out = attn_out.reshape(batch_size,seq_len,-1).to(x.dtype)
         attn_out = self.wo(attn_out) 
         
         return attn_out.reshape(batch_size,seq_len,hidden_dim)
