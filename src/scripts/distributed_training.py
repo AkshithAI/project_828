@@ -156,7 +156,8 @@ if __name__ == '__main__':
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     
     parser = argparse.ArgumentParser(description='DeepSpeed GPT Training')
-    parser.add_argument('--local_rank', type=int, default=-1,)
+    parser.add_argument('--local_rank', type=int, default=-1, help='Local rank for distributed training')
+    parser.add_argument('--batch_size', type=int, default=8, help='Batch size for training')
     parser = deepspeed.add_config_arguments(parser)
     cmd_args = parser.parse_args()
     
@@ -171,7 +172,7 @@ if __name__ == '__main__':
         model = GPT_FLASH(config, "cuda")
     else:
         model = GPT(config, "cuda")
-    
+    init_gpt_model(model, config)
     ds_config_path = os.path.join(os.path.dirname(__file__), "ds-config.json")
     with open(ds_config_path, 'r') as f:
         ds_config = json.load(f)
