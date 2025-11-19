@@ -43,6 +43,7 @@
     "profile": false
   },
   "zero_allow_untested_optimizer": true,
+  "steps_per_print": 10,
   "wall_clock_breakdown": false,
   "fp16": { "enabled": false }
 }
