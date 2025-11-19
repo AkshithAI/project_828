@@ -3,7 +3,7 @@
   "train_micro_batch_size_per_gpu": 8,
   "gradient_accumulation_steps": 8,
   "gradient_clipping": 1.0,
-  "steps_per_print": 100,
+  "steps_per_print": 10,
   "optimizer": {
     "type": "AdamW",
     "params": {
@@ -43,7 +43,6 @@
     "profile": false
   },
   "zero_allow_untested_optimizer": true,
-  "steps_per_print": 10,
   "wall_clock_breakdown": false,
   "fp16": { "enabled": false }
 }
