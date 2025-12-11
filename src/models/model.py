@@ -117,8 +117,14 @@ class Gate(nn.Module):
         self.topk_groups = config.topk_groups
         self.n_groups = config.n_groups
         self.route_scale = config.route_scale
-        self.weight = nn.Parameter(torch.empty((config.num_experts, config.hidden_dim),device = device))
-        self.bias = nn.Parameter(torch.empty((config.num_experts), dtype=torch.float32,device = device))
+        
+        self.weight = nn.Parameter(torch.zeros((config.num_experts, config.hidden_dim), device=device, dtype=config.dtype))
+        with torch.no_grad():
+            temp_weight = torch.empty((config.num_experts, config.hidden_dim))
+            nn.init.kaiming_uniform_(temp_weight, a=math.sqrt(5))
+            self.weight.copy_(temp_weight)
+            
+        self.bias = nn.Parameter(torch.zeros((config.num_experts), dtype=torch.float32, device=device))
 
     def forward(self,x : torch.Tensor) -> Tuple[torch.Tensor,torch.Tensor] :
         scores = F.linear(x,self.weight)
@@ -145,6 +151,7 @@ class MoE(nn.Module):
         super().__init__()
         self.dim = config.hidden_dim
         self.gate = Gate(config,device)
+        self.num_experts = config.num_experts
         self.n_routed_experts = config.num_experts_per_tok
         self.experts = nn.ModuleList(
             [Expert(config,device) 
@@ -164,7 +171,7 @@ class MoE(nn.Module):
         utilization = self.expert_counts.float() / self.total_tokens
         return {
             f"experts/expert_{i}_util": utilization[i].item() 
-            for i in range(config.num_experts)
+            for i in range(self.num_experts)
         }
 
     def reset_expert_counts(self):
@@ -176,11 +183,9 @@ class MoE(nn.Module):
         inp_shape = x.shape
         x = x.view(-1,self.dim) 
         xprt_weights,xprt_idxs = self.gate(x)
-        if self.training:
-            counts = torch.bincount(xprt_idxs.flatten(), minlength=self.num_experts)
-            self.expert_counts += counts
-            self.total_tokens += x.shape[0] * self.n_routed_experts
-            
+        counts = torch.bincount(xprt_idxs.flatten(), minlength=self.num_experts)
+        self.expert_counts += counts
+        self.total_tokens += x.shape[0] * self.n_routed_experts 
         routed_xprt_out = torch.zeros_like(x)
         for i,expert in enumerate(self.experts):
             mask = (xprt_idxs == i).any(dim=-1)
