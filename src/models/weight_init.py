@@ -114,10 +114,14 @@ def init_gpt_model(model, config):
         if hasattr(layer, 'mlp'):
             mlp = layer.mlp
             
-            # Initialize gate
+            # Initialize gate (handle bfloat16 by using float32 temp then converting)
             if hasattr(mlp, 'gate'):
-                nn.init.normal_(mlp.gate.weight, mean=0.0, std=0.01)
-                nn.init.zeros_(mlp.gate.bias)
+                with torch.no_grad():
+                    # Initialize in float32 then copy to preserve dtype
+                    temp_weight = torch.empty_like(mlp.gate.weight, dtype=torch.float32)
+                    nn.init.normal_(temp_weight, mean=0.0, std=0.01)
+                    mlp.gate.weight.copy_(temp_weight)
+                    nn.init.zeros_(mlp.gate.bias)
             
             # Initialize experts
             if hasattr(mlp, 'experts'):

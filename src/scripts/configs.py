@@ -33,6 +33,8 @@ class ModelConfig:
         local_rank : int = -1
         global_rank : int = -1
 
+config = ModelConfig()
+
 if __name__ == '__main__':
-    config = ModelConfig()
+    print(config)
     
