@@ -148,71 +148,8 @@ def train(model_engine, train_loader, criterion, val_loader, wandb_run=None, che
     
     if dist.get_rank() == 0 and wandb_run is not None:
         wandb_run.finish()
-
-
+    
 if __name__ == '__main__':
-    warnings.filterwarnings("ignore")
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    
-    parser = argparse.ArgumentParser(description='DeepSpeed GPT Training')
-    parser.add_argument('--local_rank', type=int, default=-1, help='Local rank for distributed training')
-    parser.add_argument('--batch_size', type=int, default=8, help='Batch size for training')
-    parser = deepspeed.add_config_arguments(parser)
-    cmd_args = parser.parse_args()
-    
-    config.local_rank = int(os.environ.get('LOCAL_RANK', -1))
-    config.global_rank = int(os.environ.get('RANK', 0))
-    config.seq_len = 2048  
-    
-    base_dir = get_base_dir()
-    
-    use_flash_attn = False
-    if use_flash_attn:
-        model = GPT_FLASH(config, "cuda")
-    else:
-        model = GPT(config, "cuda")
-        
-    init_gpt_model(model, config)
-    ds_config_path = os.path.join(os.path.dirname(__file__), "ds-config.json")
-    with open(ds_config_path, 'r') as f:
-        ds_config = json.load(f)
-    
-    model_engine, optimizer, _, _ = deepspeed.initialize(
-        args=cmd_args,
-        model=model,
-        model_parameters=model.parameters(),
-    )
-    
-    criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.eos_token_id)
-    
-    world_size = dist.get_world_size()
-    rank = dist.get_rank()
-    
-    if rank == 0:
-        train_loader = train_loader_0
-    elif rank == 1:
-        train_loader = train_loader_1
-    else:
-        train_loader = train_loader_0
-        if rank == 0:
-            print(f"Warning: More than 2 GPUs detected. Rank {rank} using default dataloader.")
-    
-    if rank == 0:
-        wandb_run = wandb.init(
-            entity="akshithmarepally-akai",
-            project="828_Distributed_testing_5090",
-            config={
-                "architecture": "GPT",
-                "dataset": "codeparrot/codeparrot-clean",
-                "world_size": world_size,
-                "use_flash_attn": use_flash_attn,
-                "configs": vars(config),
-            }
-        )
-    else:
-        wandb_run = None
-    
-    if __name__ == '__main__':
     warnings.filterwarnings("ignore")
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     
@@ -233,7 +170,8 @@ if __name__ == '__main__':
         model = GPT_FLASH(config, "cuda")
     else:
         model = GPT(config, "cuda")
-    
+
+    init_gpt_model(model, config)
     model_engine, optimizer, _, _ = deepspeed.initialize(
         args=cmd_args,
         model=model,
