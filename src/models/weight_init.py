@@ -5,7 +5,7 @@ import math
 
 def init_weights(module: nn.Module, config=None):
     """
-    Initialize model weights following best practices for transformers.
+    Initialize model weights .
     
     Args:
         module: PyTorch module to initialize
