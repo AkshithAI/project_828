@@ -46,6 +46,7 @@ def train(config):
     best_val_loss = float('inf')
     patience_counter = 0
     patience = 8
+    optimizer.zero_grad()
     for step,batch in enumerate(tqdm(train_data)):
         batch = batch.to(config.device,non_blocking=True).long()
         inputs = batch[:,:-1].contiguous()
@@ -57,10 +58,10 @@ def train(config):
         loss = loss / grad_accumulation_step
         loss.backward()
         if (step+1) % grad_accumulation_step == 0:
-            optimizer.zero_grad()
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(),1.0)
             optimizer.step()
             scheduler.step()
+            optimizer.zero_grad()
             wandb_run.log({"train/grad_norm": grad_norm.item()})
         wandb_run.log({
           "train/loss" : loss_value,
