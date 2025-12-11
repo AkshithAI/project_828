@@ -164,7 +164,7 @@ class MoE(nn.Module):
         utilization = self.expert_counts.float() / self.total_tokens
         return {
             f"experts/expert_{i}_util": utilization[i].item() 
-            for i in range(self.num_experts)
+            for i in range(config.num_experts)
         }
 
     def reset_expert_counts(self):
