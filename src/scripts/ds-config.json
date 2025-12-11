@@ -1,48 +1,58 @@
 {
-  "train_batch_size": 128,
-  "train_micro_batch_size_per_gpu": 8,
-  "gradient_accumulation_steps": 8,
-  "gradient_clipping": 1.0,
-  "steps_per_print": 10,
+  "train_batch_size": 256,
+  "train_micro_batch_size_per_gpu": 4,
+  "gradient_accumulation_steps": 32,
+  "gradient_clipping": 0.5,
+  "steps_per_print": 100,
+  
   "optimizer": {
-    "type": "AdamW",
+    "type":  "AdamW",
     "params": {
-      "lr": 3e-4,
+      "lr": 1e-4,
       "betas": [0.9, 0.95],
       "eps": 1e-8,
-      "weight_decay": 0.01
+      "weight_decay": 0.1
     }
   },
+  
   "scheduler": {
-      "type": "WarmupCosineLR",
-      "params": {
-          "total_num_steps": 100000,
-          "warmup_num_steps": 2000,
-          "warmup_min_ratio": 0.0,
-          "warmup_type": "log",
-          "cos_min_ratio": 0.001
-      }
+    "type": "WarmupCosineLR",
+    "params": {
+      "total_num_steps": 500000,
+      "warmup_num_steps": 5000,
+      "warmup_min_ratio": 0.0,
+      "warmup_type": "linear",
+      "cos_min_ratio": 0.01
+    }
   },
+  
   "zero_optimization": {
-    "stage": 2,
-    "contiguous_gradients": true,
+    "stage": 3,
+    "offload_optimizer": {
+      "device": "cpu",
+      "pin_memory": true
+    },
+    "offload_param": {
+      "device": "none"
+    },
     "overlap_comm": true,
-    "reduce_bucket_size": 500000000,
-    "allgather_bucket_size": 500000000,
-    "round_robin_gradients": true
+    "contiguous_gradients": true,
+    "reduce_bucket_size": 100000000,
+    "stage3_prefetch_bucket_size": 50000000,
+    "stage3_param_persistence_threshold": 100000
   },
+  
   "bf16": {
-    "enabled": true
+    "enabled": true,
+    "loss_scale": 0,
+    "loss_scale_window": 1000,
+    "hysteresis": 2,
+    "min_loss_scale": 1
   },
-  "activation_checkpointing": {
+  
+  "activation_checkpointing":  {
     "partition_activations": true,
     "contiguous_memory_optimization": true,
-    "cpu_checkpointing": false,
-    "number_checkpoints": null,
-    "synchronize_checkpoint_boundary": false,
-    "profile": false
-  },
-  "zero_allow_untested_optimizer": true,
-  "wall_clock_breakdown": false,
-  "fp16": { "enabled": false }
+    "cpu_checkpointing": false
+  }
 }
