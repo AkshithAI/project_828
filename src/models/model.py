@@ -151,16 +151,40 @@ class MoE(nn.Module):
              for _ in range(config.num_experts)]
         )
         self.shared_experts = MLPBlock(config,device)
+        self.register_buffer(
+            'expert_counts', 
+            torch.zeros(config.num_experts, dtype=torch.long)
+        )
+        self.total_tokens = 0
+        
+    def get_expert_utilization(self):
+        """Return expert utilization statistics for logging"""
+        if self.total_tokens == 0:
+            return {}
+        utilization = self.expert_counts.float() / self.total_tokens
+        return {
+            f"experts/expert_{i}_util": utilization[i].item() 
+            for i in range(self.num_experts)
+        }
+
+    def reset_expert_counts(self):
+        """Reset counters (call periodically during training)"""
+        self.expert_counts.zero_()
+        self.total_tokens = 0    
         
     def forward(self,x : torch.Tensor) -> torch.Tensor:
         inp_shape = x.shape
         x = x.view(-1,self.dim) 
         xprt_weights,xprt_idxs = self.gate(x)
-        xprt_count = torch.zeros_like(x) 
-        xprt_count = xprt_count.scatter_(-1, xprt_idxs, 1)
+        if self.training:
+            counts = torch.bincount(xprt_idxs.flatten(), minlength=self.num_experts)
+            self.expert_counts += counts
+            self.total_tokens += x.shape[0] * self.n_routed_experts
+            
         routed_xprt_out = torch.zeros_like(x)
         for i,expert in enumerate(self.experts):
-            if not xprt_count[:,i].any():
+            mask = (xprt_idxs == i).any(dim=-1)
+            if not mask.any():
                 continue
             batch_idx,expert_idx = torch.where(xprt_idxs == i)
             routed_xprt_out[batch_idx] += xprt_weights[batch_idx,expert_idx,None] * expert(x[batch_idx])
