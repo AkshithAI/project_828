@@ -111,12 +111,10 @@ def train(model_engine, train_loader, criterion, val_loader, wandb_run=None, che
                     best_val_loss = val_loss
                     ckpt_id = f"step_{global_step}"
                     
-                    # Save checkpoint using DeepSpeed
                     if checkpoint_dir is not None:
                         ckpt_dir = os.path.join(checkpoint_dir, ckpt_id)
                         model_engine.save_checkpoint(checkpoint_dir, tag=ckpt_id)
                         
-                        # Upload to WandB if available
                         if wandb_run is not None:
                             artifact = wandb.Artifact(
                                 name=f"model-checkpoint-{ckpt_id}",
