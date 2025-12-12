@@ -56,23 +56,31 @@ def get_train_files(lang="en", include_variants=False):
     train_urls = [to_url(p) for p in train_shards]
     return train_urls
 
-def get_hf_datasets(train_files):
-  ds_dict = load_dataset(
-      "json",
-      data_files={"train": train_files},
-      split=None,              
-      streaming=True,
-  )
+# def get_hf_datasets(train_files):
+#   ds_dict = load_dataset(
+#       "json",
+#       data_files={"train": train_files},
+#       split=None,              
+#       streaming=True,
+#   )
 
-  ds_for_train = ds_dict["train"]
-  ds_for_val = en = load_dataset("allenai/c4", "en",split = "validation", streaming=True)
-  return ds_for_train,ds_for_val
+#   ds_for_train = ds_dict["train"]
+#   ds_for_val = en = load_dataset("allenai/c4", "en",split = "validation", streaming=True)
+#   return ds_for_train,ds_for_val
+def get_hf_datasets(lang="en"):
+    """
+    Load C4 dataset directly using the datasets library with streaming. 
+    This avoids the need to enumerate all files manually.
+    """
+    ds_for_train = load_dataset("allenai/c4", lang, split="train", streaming=True)
+    ds_for_val = load_dataset("allenai/c4", lang, split="validation", streaming=True)
+    return ds_for_train, ds_for_val
 
 def prepare_code_data(files, context_length=2048):
     buffer = []
     for i,file in enumerate(files):
         tokens = tokenizer(
-                file['content'],
+                file['text'],
                 return_attention_mask = False
                 )["input_ids"]
         buffer.extend(tokens)
@@ -94,8 +102,8 @@ class CustomDataset(IterableDataset):
   def __iter__(self):
     yield from prepare_code_data(self.data,self.context_length)
 
-train_files = get_train_files()[0]
-ds_for_train,ds_for_val = get_hf_datasets(train_files)
+# train_files = get_train_files()[0]
+ds_for_train, ds_for_val = get_hf_datasets("en")
 dataset_train = CustomDataset(ds_for_train)
 dataset_val = CustomDataset(ds_for_val)
 train_data = DataLoader(
