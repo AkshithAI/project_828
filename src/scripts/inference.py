@@ -5,7 +5,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
-from collections import Counter
 from ..models.weight_init import init_gpt_model
 
 @torch.inference_mode()
