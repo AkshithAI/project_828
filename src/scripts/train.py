@@ -94,7 +94,7 @@ def train(config):
         })
         if (step + 1) % 1000 == 0:
             print(f"Step : {step+1} , Loss : {loss_value:.4f}")
-        if (step+1) % 50000 == 0:
+        if (step+1) % 25000 == 0:
             val_loss = validation(model,criterion)
             model.train()
             if val_loss < best_val_loss:
@@ -127,7 +127,7 @@ if __name__ == '__main__' :
     warnings.filterwarnings("ignore")
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     base_dir = get_base_dir()
-    use_flash_attn = False
+    use_flash_attn = True
     if use_flash_attn:
         model = GPT_FLASH(config,"cuda")
     else:
@@ -156,7 +156,7 @@ if __name__ == '__main__' :
         project = "828_testing_5090",
         config = {
             "architecture" : "GPT",
-            "dataset" : "codeparrot/codeparrot-clean",
+            "dataset" : "allenai/c4",
             "configs" : config,
         }
     )
