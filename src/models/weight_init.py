@@ -108,7 +108,8 @@ def init_gpt_model(model, config):
                 nn.init.zeros_(attn.wo.bias)
             
             # Initialize attention sinks
-            nn.init.normal_(attn.sinks, mean=0.0, std=0.02)
+            if hasattr(attn, 'sinks'):
+                nn.init.normal_(attn.sinks, mean=0.0, std=0.02)
         
         # MLP/MoE layers
         if hasattr(layer, 'mlp'):
