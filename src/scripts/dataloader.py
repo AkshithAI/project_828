@@ -4,16 +4,58 @@ from huggingface_hub import list_repo_files
 from .tokenizer import tokenizer
 from torch.utils.data import IterableDataset,DataLoader
 
-def get_train_files():
-  repo_id = "codeparrot/codeparrot-clean"   
-  branch  = "main"                          
-  train_shards = sorted(list_repo_files(repo_id, repo_type="dataset"))
+# def get_train_files():
+#   repo_id = "codeparrot/codeparrot-clean"   
+#   branch  = "main"                          
+#   train_shards = sorted(list_repo_files(repo_id, repo_type="dataset"))
 
-  def to_url(path):
-      return f"https://huggingface.co/datasets/{repo_id}/resolve/{branch}/{path}"
+#   def to_url(path):
+#       return f"https://huggingface.co/datasets/{repo_id}/resolve/{branch}/{path}"
 
-  train_urls = [to_url(p) for p in train_shards]
-  return train_urls
+#   train_urls = [to_url(p) for p in train_shards]
+#   return train_urls
+def get_train_files(lang="en", include_variants=False):
+    """
+    Return URLs for files that live in the top-level `lang` folder only (e.g. "en/...").
+    If include_variants=True, also include top-level folders like "en.noclean" and "en.noblocklist".
+    """
+    repo_id = "allenai/c4"
+    branch = "main"
+
+    # get all file paths from the repo
+    all_shards = sorted(list_repo_files(repo_id, repo_type="dataset"))
+
+    # helper: top-level folder name (text before first '/')
+    def top_segment(p):
+        return p.split("/", 1)[0] if "/" in p else p
+
+    if include_variants:
+        allowed = {lang, f"{lang}.noclean", f"{lang}.noblocklist"}
+        train_shards = [p for p in all_shards if top_segment(p) in allowed]
+    else:
+        # strict: first path segment must exactly equal the language (no "multilingual/en/..." etc.)
+        train_shards = [p for p in all_shards if top_segment(p) == lang]
+
+    # dedupe while preserving order (defensive)
+    seen = set()
+    uniq_shards = []
+    for p in train_shards:
+        if p not in seen:
+            seen.add(p)
+            uniq_shards.append(p)
+    train_shards = uniq_shards
+
+    if not train_shards:
+        # helpful debug info
+        top_level = sorted({top_segment(p) for p in all_shards})
+        raise RuntimeError(f"No files found for language '{lang}'. Top-level entries: {top_level}")
+
+    def to_url(path):
+        return f"https://huggingface.co/datasets/{repo_id}/resolve/{branch}/{path}"
+
+    train_urls = [to_url(p) for p in train_shards]
+    return train_urls
+
 def get_hf_datasets(train_files):
   ds_dict = load_dataset(
       "json",
@@ -71,3 +113,4 @@ if __name__ == '__main__':
       pin_memory=True,
       num_workers=0,
   )
+
