@@ -65,7 +65,7 @@ def get_hf_datasets(train_files):
   )
 
   ds_for_train = ds_dict["train"]
-  ds_for_val = load_dataset("codeparrot/codeparrot-clean-valid",split = "train",streaming = True)
+  ds_for_val = en = load_dataset("allenai/c4", "en",split = "validation", streaming=True)
   return ds_for_train,ds_for_val
 
 def prepare_code_data(files, context_length=2048):
@@ -94,23 +94,22 @@ class CustomDataset(IterableDataset):
   def __iter__(self):
     yield from prepare_code_data(self.data,self.context_length)
 
-if __name__ == '__main__':
-  train_files = get_train_files()
-  ds_for_train,ds_for_val = get_hf_datasets(train_files)
-  dataset_train = CustomDataset(ds_for_train)
-  dataset_val = CustomDataset(ds_for_val)
-  train_data = DataLoader(
+train_files = get_train_files()[0]
+ds_for_train,ds_for_val = get_hf_datasets(train_files)
+dataset_train = CustomDataset(ds_for_train)
+dataset_val = CustomDataset(ds_for_val)
+train_data = DataLoader(
       dataset_train,
       batch_size = 8,
       collate_fn = collate_fn,
       pin_memory=True,
       num_workers=0,
-  )
-  val_data = DataLoader(
+)
+val_data = DataLoader(
       dataset_val,
       batch_size = 8,
       collate_fn = collate_fn,
       pin_memory=True,
       num_workers=0,
-  )
+)
 
