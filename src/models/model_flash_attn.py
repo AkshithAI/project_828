@@ -125,7 +125,7 @@ class MoE(nn.Module):
         self.shared_experts = MLPBlock(config,device)
         self.register_buffer(
             'expert_counts', 
-            torch.zeros(config.num_experts, dtype=torch.long)
+            torch.zeros(config.num_experts, dtype=torch.long, device = device)
         )
         self.total_tokens = 0
         
