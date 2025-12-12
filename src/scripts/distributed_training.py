@@ -1,7 +1,6 @@
 import argparse
 import warnings
 import deepspeed
-import json
 import wandb
 import torch
 import math
@@ -11,7 +10,7 @@ from .configs import config
 from ..models.model import GPT
 from ..models.model_flash_attn import GPT_FLASH
 from ..models.weight_init import init_gpt_model
-from .dist_dataloader import val_data, train_loader_0, train_loader_1
+from .dist_dataloader import val_data, train_loader_0, train_loader_1, get_distributed_dataloader
 from .tokenizer import tokenizer
 import os
 from .helper_funcs import get_base_dir
@@ -48,7 +47,8 @@ def validation(model, criterion, val_loader, wandb_run=None):
     # Synchronize validation loss across all ranks
     total_val_loss_tensor = torch.tensor(total_val_loss, device=model.local_rank)
     dist.all_reduce(total_val_loss_tensor, op=dist.ReduceOp.SUM)
-    avg_val_loss = total_val_loss_tensor.item() / (dist.get_world_size() * max(1, steps))
+    world_size = dist.get_world_size()
+    avg_val_loss = total_val_loss_tensor.item() / (max(1, steps) * world_size)
     
     return avg_val_loss
 
@@ -74,6 +74,39 @@ def train(model_engine, train_loader, criterion, val_loader, wandb_run=None, che
         
         model_engine.backward(loss)
         model_engine.step()
+        
+        # Log MoE expert routing statistics
+        if dist.get_rank() == 0:
+            # Handle both wrapped and unwrapped model access
+            base_model = model_engine.module if hasattr(model_engine, 'module') else model_engine
+            for layer_idx, layer in enumerate(base_model.layers):
+                if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'expert_counts'):
+                    moe = layer.mlp
+                    expert_counts = moe.expert_counts
+                    total_tokens = moe.total_tokens
+                    
+                    if (global_step + 1) % 1000 == 0:
+                        print(f"\nLayer {layer_idx} MoE:")
+                        print(f"  Total routed tokens: {total_tokens}")
+                        print(f"  Expert counts: {dict(enumerate(expert_counts.tolist()))}")
+                    
+                    if total_tokens > 0:
+                        utilization = moe.get_expert_utilization()
+                        
+                        # Log to wandb
+                        if wandb_run is not None:
+                            for key, val in utilization.items():
+                                wandb_run.log({f"moe/layer_{layer_idx}/{key}": val * 100})
+                        
+                        # Log to file periodically
+                        if (global_step + 1) % 1000 == 0:
+                            with open("expert_routing.txt", "a") as f:
+                                f.write(f"\nStep {global_step+1} - Layer {layer_idx} MoE:\n")
+                                for key, val in utilization.items():
+                                    expert_id = key.split('_')[1]
+                                    f.write(f"    Expert {expert_id}: {val*100:.2f}%\n")
+                    
+                    moe.reset_expert_counts()
         
         if dist.get_rank() == 0 and wandb_run is not None:
             # Calculate tokens per second
@@ -105,6 +138,9 @@ def train(model_engine, train_loader, criterion, val_loader, wandb_run=None, che
             dist.barrier()  
             val_loss = validation(model_engine, criterion, val_loader, wandb_run)
             model_engine.train()
+            
+            # Track if we should stop training (broadcast from rank 0)
+            should_stop = torch.tensor([0], device=model_engine.local_rank)
             
             if dist.get_rank() == 0:
                 if val_loss < best_val_loss:
@@ -142,7 +178,12 @@ def train(model_engine, train_loader, criterion, val_loader, wandb_run=None, che
                     patience_counter += 1
                     if patience_counter >= patience:
                         print(f"Early Stopping triggered at step: {global_step}")
-                        break
+                        should_stop[0] = 1
+            
+            # Broadcast early stopping decision to all ranks
+            dist.broadcast(should_stop, src=0)
+            if should_stop[0] == 1:
+                break
         
         global_step += 1
     
@@ -183,13 +224,21 @@ if __name__ == '__main__':
     world_size = dist.get_world_size()
     rank = dist.get_rank()
     
-    if rank == 0:
-        train_loader = train_loader_0
-    elif rank == 1:
-        train_loader = train_loader_1
-    else:
-        train_loader = train_loader_0
+    # Use scalable distributed dataloader (works for any number of GPUs)
+    try:
+        train_loader = get_distributed_dataloader(rank, world_size, batch_size=cmd_args.batch_size)
         if rank == 0:
+            print(f"[INFO] Using scalable distributed dataloader for {world_size} GPUs")
+    except Exception as e:
+        # Fallback to legacy loaders for 2 GPU setup
+        if rank == 0:
+            print(f"[WARNING] Falling back to legacy dataloaders: {e}")
+        if rank == 0:
+            train_loader = train_loader_0
+        elif rank == 1:
+            train_loader = train_loader_1
+        else:
+            train_loader = train_loader_0
             print(f"Warning: More than 2 GPUs detected. Rank {rank} using default dataloader.")
     
     if rank == 0:
