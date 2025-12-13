@@ -20,6 +20,7 @@ class ModelConfig:
         topk_groups : int = 1
         base : int = 10000
         initial_context_len : int = 2048
+        max_context_len : int = 4096
         ntk_alpha : float = 1.0
         ntk_beta : float = 32.0
         scaling_factor : float = 1.0
