@@ -37,7 +37,7 @@ if __name__ == '__main__':
         model = GPT_FLASH(config,device,inference=True)
     else:
         model = GPT(config,device)
-    model.load_state_dict(torch.load("/Users/apple/Documents/project-828/project_828/src/scripts/model_24999.pt",map_location="cpu"))
+    model.load_state_dict(torch.load("./project_828/src/scripts/model_24999.pt",map_location="cpu"))
     seed_txt = "I love Woudenberg Koffiemok"
     generated_text = generate(model,seed_txt,device)
     print(generated_text)
