@@ -1,4 +1,5 @@
 from ..models.model import GPT
+from ..models.model_flash_attn import GPT_FLASH
 from .tokenizer import tokenizer
 from .configs import config
 import torch
@@ -31,9 +32,13 @@ def generate(model,seed_txt,device,max_tokens=100,k=50,temp = 0.8):
 if __name__ == '__main__':
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Device used : {device}")
-    model = GPT(config,device)
-    init_gpt_model(model, config)
-    seed_txt = "app.get"
+    use_flash_attn = True
+    if use_flash_attn:
+        model = GPT_FLASH(config,device,inference=True)
+    else:
+        model = GPT(config,device)
+    model.load_state_dict(torch.load("/Users/apple/Documents/project-828/project_828/src/scripts/model_24999.pt",map_location="cpu"))
+    seed_txt = "I love Woudenberg Koffiemok"
     generated_text = generate(model,seed_txt,device)
     print(generated_text)
     

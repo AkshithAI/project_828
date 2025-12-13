@@ -5,7 +5,7 @@ import math
 from typing import Tuple
 from ..scripts.tokenizer import tokenizer
 from ..scripts.configs import ModelConfig
-from flash_attn import flash_attn_func
+#from flash_attn import flash_attn_func
 
 class RMS_Norm(nn.Module):
     def __init__(self,
@@ -118,6 +118,7 @@ class MoE(nn.Module):
         self.dim = config.hidden_dim
         self.gate = Gate(config,device)
         self.n_routed_experts = config.num_experts_per_tok
+        self.num_experts = config.num_experts
         self.experts = nn.ModuleList(
             [Expert(config,device) 
              for _ in range(config.num_experts)]
@@ -267,12 +268,13 @@ class Attention(nn.Module):
     def __init__(self,
                 config : ModelConfig,
                 device : torch.device | None = None,
+                inference : bool = False,
     ) -> None:
         super().__init__()
         self.n_heads = config.num_attn_heads
         self.n_kv_heads = config.num_key_value_heads
         self.head_dim = config.head_dim
-        
+        self.inference = inference
        
         self.wq = nn.Linear(
             config.hidden_dim, config.num_attn_heads * config.head_dim, device = device, dtype = config.dtype
@@ -310,7 +312,18 @@ class Attention(nn.Module):
         
         
         Q,K = self.rope(Q,K)
-        attn_out = flash_attn_func(Q,K,V,causal = True)
+        if self.inference:
+            Q = Q.transpose(1,2)
+            K = K.transpose(1,2)
+            V = V.transpose(1,2)
+            attn_out = F.scaled_dot_product_attention(
+                Q,K,V,
+                is_causal=True,
+                enable_gqa=(self.n_heads != self.n_kv_heads)
+            )
+            attn_out = attn_out.transpose(1,2)
+        else:
+            attn_out = flash_attn_func(Q,K,V,causal = True)
         attn_out = attn_out.view(batch_size,seq_len,-1)
         attn_out = self.wo(attn_out)
 
@@ -320,12 +333,13 @@ class Attention(nn.Module):
 class TransformerDecoderBLK(nn.Module):
     def __init__(self,
                 config : ModelConfig,
-                device : torch.device | None = None
+                device : torch.device | None = None,
+                inference : bool = False,
     ) -> None:
         super().__init__()
         self.norm1 = RMS_Norm(config.hidden_dim,device = device)
         self.norm2 = RMS_Norm(config.hidden_dim,device = device)
-        self.attention = Attention(config,device)
+        self.attention = Attention(config,device,inference)
         self.mlp = MoE(config,device)
 
     def forward(self,x): 
@@ -336,7 +350,8 @@ class TransformerDecoderBLK(nn.Module):
 class GPT_FLASH(nn.Module):
     def __init__(self,
                  config : ModelConfig,
-                 device : torch.device | None = None
+                 device : torch.device | None = None,
+                 inference : bool = False,
     ) -> None:
         super().__init__()
         self.norm = RMS_Norm(config.hidden_dim,device = device)
@@ -347,7 +362,7 @@ class GPT_FLASH(nn.Module):
                 dtype=config.dtype
         )
         self.layers = nn.ModuleList(
-            [TransformerDecoderBLK(config,device)
+            [TransformerDecoderBLK(config,device,inference)
              for _ in range(config.num_hidden_layers)]
         )
         self.unembedding = nn.Linear(config.hidden_dim,config.vocab_size,device = device, dtype=config.dtype)
