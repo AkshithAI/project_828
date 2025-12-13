@@ -89,8 +89,8 @@ class Gate(nn.Module):
         self.topk_groups = config.topk_groups
         self.n_groups = config.n_groups
         self.route_scale = config.route_scale
-        self.weight = nn.Parameter(torch.empty((config.num_experts, config.hidden_dim),device = device))
-        self.bias = nn.Parameter(torch.empty((config.num_experts), dtype=torch.float32,device = device))
+        self.weight = nn.Parameter(torch.empty((config.num_experts, config.hidden_dim), device=device, dtype=config.dtype))
+        self.bias = nn.Parameter(torch.empty((config.num_experts), dtype=config.dtype, device=device))
 
     def forward(self,x : torch.Tensor) -> Tuple[torch.Tensor,torch.Tensor] :
         scores = F.linear(x,self.weight)
@@ -167,8 +167,8 @@ def apply_rope(x : torch.Tensor,
                cos : torch.Tensor,
                sin : torch.Tensor
     ) -> torch.Tensor:
-    cos = cos.unsqueeze(-2).unsqueeze(0).to(x.device)
-    sin = sin.unsqueeze(-2).unsqueeze(0).to(x.device)
+    cos = cos.unsqueeze(-2).unsqueeze(0).to(x.device).to(x.dtype)
+    sin = sin.unsqueeze(-2).unsqueeze(0).to(x.device).to(x.dtype)
     x1,x2 = torch.chunk(x,2,dim = -1)
     o1 = x1 * cos - x2 * sin
     o2 = x1 * sin + x2 * cos
@@ -180,7 +180,8 @@ class RotaryEmbedding(nn.Module):
                  head_dim : int,
                  base : int,
                  dtype : torch.dtype,
-                 initial_context_len : int = 4096,
+                 initial_context_len : int = 2048,
+                 max_context_len : int = 4096,
                  ntk_alpha : float = 1.0,
                  ntk_beta : float = 32.0,
                  scaling_factor : float = 1.0,
@@ -194,6 +195,7 @@ class RotaryEmbedding(nn.Module):
         self.ntk_beta = ntk_beta
         self.scaling_factor = scaling_factor
         self.device = device
+        self.cos,self.sin = self.compute_cos_sin(max_context_len)
 
     def _compute_concentration_and_inv_freq(self) -> Tuple[float,torch.Tensor]:
         """Refer gpt-oss implemention of YaRN and See YaRN paper for more details: https://arxiv.org/abs/2309.00071"""
@@ -245,10 +247,12 @@ class RotaryEmbedding(nn.Module):
 
     def forward(self,
                 q : torch.Tensor,
-                k : torch.Tensor
+                k : torch.Tensor,
+                offset : int
         ) -> Tuple[torch.Tensor,torch.Tensor]:
         batch_size,seq_len,_,_ = q.shape
-        cos,sin = self.compute_cos_sin(seq_len)
+        cos = self.cos[offset:offset+seq_len,:]
+        sin = self.sin[offset:offset+seq_len,:]
 
         query_shape = q.shape
         q = q.view(batch_size,seq_len,-1,self.head_dim)
@@ -261,7 +265,6 @@ class RotaryEmbedding(nn.Module):
         k = k.reshape(key_shape)
 
         return q,k
-    
     
 
 class Attention(nn.Module):
@@ -288,12 +291,18 @@ class Attention(nn.Module):
         self.wo = nn.Linear(
             config.num_attn_heads * config.head_dim, config.hidden_dim, device = device, dtype = config.dtype
         )
-
+        self.cache_k = torch.zeros(
+            1, config.seq_len, config.num_key_value_heads, config.head_dim, device = device , dtype = config.dtype
+        )
+        self.cache_v = torch.zeros(
+            1, config.seq_len, config.num_key_value_heads, config.head_dim, device = device , dtype = config.dtype
+        )
         self.rope = RotaryEmbedding(
             config.head_dim,
             config.base,
             torch.float32,
             initial_context_len = config.initial_context_len,
+            max_context_len = config.max_context_len,
             ntk_alpha = config.ntk_alpha,
             ntk_beta = config.ntk_beta,
             scaling_factor = config.scaling_factor,
@@ -301,24 +310,32 @@ class Attention(nn.Module):
         )
         
     def forward(self,
-                x : torch.Tensor
+                x : torch.Tensor,
+                start_pos : int = 0,
         ) -> torch.Tensor:
         batch_size,seq_len,hidden_dim = x.shape
+        end_pos = start_pos + seq_len
         Q,K,V = self.wq(x),self.wk(x),self.wv(x)
         
         Q = Q.view(batch_size,seq_len,self.n_heads,self.head_dim)
         K = K.view(batch_size,seq_len,self.n_kv_heads,self.head_dim)
         V = V.view(batch_size,seq_len,self.n_kv_heads,self.head_dim)
         
-        
-        Q,K = self.rope(Q,K)
+        Q,K = self.rope(Q,K,offset = start_pos)          
         if self.inference:
+            self.cache_k[:,start_pos:end_pos,:,:] = K
+            self.cache_v[:,start_pos:end_pos,:,:] = V
+            K = self.cache_k[:,:end_pos,:,:]
+            V = self.cache_v[:,:end_pos,:,:]
+
             Q = Q.transpose(1,2)
             K = K.transpose(1,2)
             V = V.transpose(1,2)
+            # Only use is_causal=True for prefill (seq_len > 1)
+            # For single token generation, all cached positions are valid to attend to
             attn_out = F.scaled_dot_product_attention(
                 Q,K,V,
-                is_causal=True,
+                is_causal=(seq_len > 1),
                 enable_gqa=(self.n_heads != self.n_kv_heads)
             )
             attn_out = attn_out.transpose(1,2)
@@ -342,8 +359,8 @@ class TransformerDecoderBLK(nn.Module):
         self.attention = Attention(config,device,inference)
         self.mlp = MoE(config,device)
 
-    def forward(self,x): 
-        x = x + self.attention(self.norm1(x))        
+    def forward(self, x, start_pos : int = 0): 
+        x = x + self.attention(self.norm1(x),start_pos)        
         x = x + self.mlp(self.norm2(x))
         return x
         
@@ -368,11 +385,12 @@ class GPT_FLASH(nn.Module):
         self.unembedding = nn.Linear(config.hidden_dim,config.vocab_size,device = device, dtype=config.dtype)
 
     def forward(self,
-                x : torch.Tensor
+                x : torch.Tensor,
+                start_pos : int = 0,
         ) -> torch.Tensor:
         x = self.embeddings(x)
         for layer in self.layers:
-            x = layer(x)
+            x = layer(x,start_pos)
         x = self.norm(x)
         x = self.unembedding(x)  
         return x
