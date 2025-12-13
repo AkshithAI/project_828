@@ -5,7 +5,7 @@ import math
 from typing import Tuple
 from ..scripts.tokenizer import tokenizer
 from ..scripts.configs import ModelConfig
-#from flash_attn import flash_attn_func
+from flash_attn import flash_attn_func
 
 class RMS_Norm(nn.Module):
     def __init__(self,
@@ -331,8 +331,7 @@ class Attention(nn.Module):
             Q = Q.transpose(1,2)
             K = K.transpose(1,2)
             V = V.transpose(1,2)
-            # Only use is_causal=True for prefill (seq_len > 1)
-            # For single token generation, all cached positions are valid to attend to
+
             attn_out = F.scaled_dot_product_attention(
                 Q,K,V,
                 is_causal=(seq_len > 1),
