@@ -17,7 +17,7 @@ def generate(model,seed_txt,device,max_tokens=500,k=50,temp = 0.8):
     model(tokens,start_pos)
     start_pos = len(sampled_tokens)
     for _ in tqdm(range(max_tokens)):
-        with torch.autocast(device_type=device,dtype=torch.float32):
+        with torch.autocast(device_type=device,dtype=torch.bfloat16):
             logits = model(predicted_token.view(1, 1),start_pos)
         last_seq = logits[:,-1,:]
         preds = F.softmax(last_seq/temp,dim=-1)
