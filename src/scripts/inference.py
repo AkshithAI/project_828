@@ -11,7 +11,6 @@ def generate(model,seed_txt,device,max_tokens=500,k=50,temp = 0.8):
     model.eval()
     sampled_tokens = []
     start_pos = 0
-    #tokens = torch.tensor(tokenizer.encode(seed_txt),dtype=torch.long,device=device).unsqueeze(0)
     tokens = torch.tensor(tokenizer.encode(seed_txt)[:-1], device = device, dtype = torch.long).unsqueeze(0)
     predicted_token = torch.tensor(tokenizer.encode(seed_txt)[-1], device = device, dtype = torch.long).unsqueeze(0)
     sampled_tokens.extend(tokens.squeeze(0).tolist())
@@ -42,7 +41,7 @@ if __name__ == '__main__':
         model = GPT_FLASH(config,device,inference=True)
     else:
         model = GPT(config,device)
-    model.load_state_dict(torch.load("./project_828/src/scripts/model_24999.pt",map_location="cpu"))
+    model.load_state_dict(torch.load("assets/model_24999.pt",map_location="cpu"))
     seed_txt = "In the field artifical intelligence"
     generated_text = generate(model,seed_txt,device)
     print(generated_text)
