@@ -562,7 +562,7 @@ This section documents the training journey, including critical bugs discovered,
 
 **Screenshot**: Training metrics showing unstable loss patterns
 
-![Run 1 - 240k Steps Metrics](assets/Screenshot%202025-12-11%20at%208.13.10%20PM.png)
+![Run 1 - 240k Steps Metrics](https://github.com/AkshithAI/project_828/blob/main/assets/Screenshot%202025-12-11%20at%208.13.10%E2%80%AFPM.png)
 
 
 ---
@@ -594,7 +594,7 @@ This section documents the training journey, including critical bugs discovered,
 
 **Screenshot**: Training metrics showing gradient explosion and noisy loss
 
-![Run 2 - 110k Steps Metrics](assets/Screenshot%202025-12-11%20at%208.13.31%20PM.png)
+![Run 2 - 110k Steps Metrics](https://github.com/AkshithAI/project_828/blob/main/assets/Screenshot%202025-12-11%20at%208.13.31%E2%80%AFPM.png)
 
 
 ---
