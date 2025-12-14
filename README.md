@@ -513,6 +513,8 @@ This section documents the training journey, including critical bugs discovered,
 
 ![Run 1 - 240k Steps Metrics](https://github.com/user-attachments/assets/placeholder-240k-run)
 
+*Note: Replace placeholder image URL with actual training metrics screenshot*
+
 ---
 
 #### 🟡 Run 2: 110k Steps - Post-Fix Gradient Instability
@@ -544,6 +546,8 @@ This section documents the training journey, including critical bugs discovered,
 
 ![Run 2 - 110k Steps Metrics](https://github.com/user-attachments/assets/placeholder-110k-run)
 
+*Note: Replace placeholder image URL with actual training metrics screenshot*
+
 ---
 
 #### 🟢 Run 3: 50k Steps - Stable Training Achieved ✨
@@ -561,7 +565,7 @@ This section documents the training journey, including critical bugs discovered,
 **Training Metrics**:
 - **Gradient norm**: Now peaked around **6** (down from 25+) - 4x improvement!
 - **Training loss**: Much less noisy, smoothly decreasing from ~11 to ~5
-- **Perplexity**: Dropping smoothly from 20,000+ to near 0 (proper convergence)
+- **Perplexity**: Dropping smoothly from 20,000+ to stable low values (proper convergence)
 - **Learning rate**: Following proper cosine warmup schedule
 - **Overall**: **Stable, converging training** - ready for long-term runs
 
@@ -574,6 +578,8 @@ This section documents the training journey, including critical bugs discovered,
 **Screenshot**: Training metrics showing stable convergence
 
 ![Run 3 - 50k Steps Metrics](https://github.com/user-attachments/assets/placeholder-50k-run)
+
+*Note: Replace placeholder image URL with actual training metrics screenshot*
 
 ---
 
@@ -688,7 +694,7 @@ If you use this code, please cite:
   author = {AkshithAI},
   title = {Project 828: Enterprise-Grade MoE Transformer with Advanced Training Pipeline},
   year = {2025},
-  version = {1.0.0},
+  version = "1.0.0",
   publisher = {GitHub},
   url = {https://github.com/AkshithAI/project_828}
 }
