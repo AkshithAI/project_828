@@ -314,7 +314,8 @@ project_828/
 │       ├── configs.py            # Model configuration
 │       ├── dataloader.py         # Data loading and preprocessing
 │       ├── tokenizer.py          # Tokenizer setup
-│       └── helper_funcs.py       # Utility functions
+│       ├── helper_funcs.py       # Utility functions
+│       └── inference.py          # inference for trained models
 ├── launch_distributed.sh         # Launch script for distributed training
 ├── test_setup.py                 # Setup validation script
 ├── requirements.txt
@@ -335,6 +336,56 @@ if use_flash_attn:
 else:
     model = GPT(config, "cuda")
 ```
+
+### Key-Value (KV) Cache for Inference
+
+The model implements an efficient **KV Cache mechanism** that significantly boosts inference speed during autoregressive text generation:
+
+**How it works:**
+- During inference, the attention mechanism caches the Key (K) and Value (V) projections for all previously processed tokens
+- For each new token, only the current token's Q, K, V need to be computed
+- The cached K and V tensors are concatenated with the new K, V for attention computation
+- This avoids redundant recomputation of K, V for the entire sequence at each generation step
+
+**Implementation Details:**
+```python
+# In Attention class (model_flash_attn.py)
+self.cache_k = torch.zeros(
+    1, config.seq_len, config.num_key_value_heads, config.head_dim, device=device, dtype=config.dtype
+)
+self.cache_v = torch.zeros(
+    1, config.seq_len, config.num_key_value_heads, config.head_dim, device=device, dtype=config.dtype
+)
+
+# During forward pass with inference=True:
+if self.inference:
+    self.cache_k[:, start_pos:end_pos, :, :] = K
+    self.cache_v[:, start_pos:end_pos, :, :] = V
+    K = self.cache_k[:, :end_pos, :, :]
+    V = self.cache_v[:, :end_pos, :, :]
+```
+
+**Performance Benefits:**
+- **Time Complexity**: Reduces from O(n²) to O(n) per token generation (where n is sequence length)
+- **Speed Boost**: ~10-50x faster inference compared to full recomputation
+- **Memory Trade-off**: Uses additional memory proportional to `seq_len × num_kv_heads × head_dim`
+
+**Usage:**
+```python
+# Enable KV cache by setting inference=True when creating the model
+model = GPT_FLASH(config, device, inference=True)
+
+# Generate tokens with positional tracking
+start_pos = 0
+model(initial_tokens, start_pos)  # Prefill cache
+start_pos = len(initial_tokens)
+for _ in range(max_new_tokens):
+    logits = model(next_token.view(1, 1), start_pos)
+    start_pos += 1
+    # ... sample next token
+```
+
+**Note**: KV cache is automatically used when `inference=True` is passed to the model constructor. During training, the cache is bypassed for efficiency.
 
 ### DeepSpeed ZeRO Optimization
 
@@ -511,9 +562,8 @@ This section documents the training journey, including critical bugs discovered,
 
 **Screenshot**: Training metrics showing unstable loss patterns
 
-![Run 1 - 240k Steps Metrics](https://github.com/user-attachments/assets/placeholder-240k-run)
+![Run 1 - 240k Steps Metrics](assets/Screenshot%202025-12-11%20at%208.13.10%20PM.png)
 
-*Note: Replace placeholder image URL with actual training metrics screenshot*
 
 ---
 
@@ -544,9 +594,8 @@ This section documents the training journey, including critical bugs discovered,
 
 **Screenshot**: Training metrics showing gradient explosion and noisy loss
 
-![Run 2 - 110k Steps Metrics](https://github.com/user-attachments/assets/placeholder-110k-run)
+![Run 2 - 110k Steps Metrics](assets/Screenshot%202025-12-11%20at%208.13.31%20PM.png)
 
-*Note: Replace placeholder image URL with actual training metrics screenshot*
 
 ---
 
@@ -577,9 +626,8 @@ This section documents the training journey, including critical bugs discovered,
 
 **Screenshot**: Training metrics showing stable convergence
 
-![Run 3 - 50k Steps Metrics](https://github.com/user-attachments/assets/placeholder-50k-run)
+![Run 3 - 50k Steps Metrics](assets/Screenshot%202025-12-13%20at%2012.33.28%20PM.png)
 
-*Note: Replace placeholder image URL with actual training metrics screenshot*
 
 ---
 
