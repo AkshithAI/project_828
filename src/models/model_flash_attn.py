@@ -291,12 +291,12 @@ class Attention(nn.Module):
         self.wo = nn.Linear(
             config.num_attn_heads * config.head_dim, config.hidden_dim, device = device, dtype = config.dtype
         )
-        self.cache_k = torch.zeros(
+        self.register_buffer = ("cache_k", torch.zeros(
             1, config.seq_len, config.num_key_value_heads, config.head_dim, device = device , dtype = config.dtype
-        )
-        self.cache_v = torch.zeros(
+        ))
+        self.register_buffer = ("cache_v", torch.zeros(
             1, config.seq_len, config.num_key_value_heads, config.head_dim, device = device , dtype = config.dtype
-        )
+        ))
         self.rope = RotaryEmbedding(
             config.head_dim,
             config.base,
@@ -343,7 +343,7 @@ class Attention(nn.Module):
         attn_out = attn_out.view(batch_size,seq_len,-1)
         attn_out = self.wo(attn_out)
 
-        return attn_out.reshape(batch_size,seq_len,hidden_dim)
+        return attn_out
         
     
 class TransformerDecoderBLK(nn.Module):
