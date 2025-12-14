@@ -127,6 +127,9 @@ dmypy.json
 *.pt
 *.ckpt
 
+# But allow the specific checkpoint in assets folder
+!assets/*.pt
+
 # Weights & Biases
 wandb/
 
@@ -143,3 +146,5 @@ assets/ckpts/*.pt
 # Temporary files
 temp.txt
 BUG_REPORT.md
+
+project_828/test_setup.py
