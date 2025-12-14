@@ -626,7 +626,7 @@ This section documents the training journey, including critical bugs discovered,
 
 **Screenshot**: Training metrics showing stable convergence
 
-![Run 3 - 50k Steps Metrics](assets/Screenshot%202025-12-13%20at%2012.33.28%20PM.png)
+![Run 3 - 50k Steps Metrics](https://github.com/AkshithAI/project_828/blob/main/assets/Screenshot%202025-12-13%20at%2012.33.28%E2%80%AFPM.png)
 
 
 ---
