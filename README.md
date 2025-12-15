@@ -350,11 +350,11 @@ The model implements an efficient **KV Cache mechanism** that significantly boos
 **Implementation Details:**
 ```python
 # In Attention class (model_flash_attn.py)
-self.cache_k = torch.zeros(
-    1, config.seq_len, config.num_key_value_heads, config.head_dim, device=device, dtype=config.dtype
+self.register_buffer("cache_k", torch.zeros(
+        1, config.seq_len, config.num_key_value_heads, config.head_dim, device = device , dtype = config.dtype), persistent=False
 )
-self.cache_v = torch.zeros(
-    1, config.seq_len, config.num_key_value_heads, config.head_dim, device=device, dtype=config.dtype
+self.register_buffer("cache_v", torch.zeros(
+        1, config.seq_len, config.num_key_value_heads, config.head_dim, device = device , dtype = config.dtype), persistent=False
 )
 
 # During forward pass with inference=True:
