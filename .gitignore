@@ -147,4 +147,4 @@ assets/ckpts/*.pt
 temp.txt
 BUG_REPORT.md
 
-project_828/test_setup.py
+test_setup.py
