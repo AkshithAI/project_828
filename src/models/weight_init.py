@@ -170,7 +170,7 @@ def init_gpt_model(model, config):
         if model.unembedding.bias is not None:
             nn.init.zeros_(model.unembedding.bias)
     
-    print(f"✓ GPT model weights initialized successfully")
+    print(f" GPT model weights initialized successfully")
     print(f"  - {config.num_hidden_layers} transformer layers")
     print(f"  - {config.num_experts} experts per MoE layer")
     print(f"  - Hidden dim: {config.hidden_dim}")
@@ -182,8 +182,8 @@ def count_parameters(model):
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     
     print(f"\nModel Parameters:")
-    print(f"  Total parameters: {total_params:,}")
-    print(f"  Trainable parameters: {trainable_params:,}")
-    print(f"  Non-trainable parameters: {total_params - trainable_params:,}")
+    print(f" - Total parameters: {total_params:,}")
+    print(f" - Trainable parameters: {trainable_params:,}")
+    print(f" - Non-trainable parameters: {total_params - trainable_params:,}")
     
     return total_params, trainable_params

@@ -13,6 +13,14 @@ class RMS_Norm(nn.Module):
                  eps : float = 1e-5,
                  device : torch.device|None = None
         ) -> None:
+        """
+            Normalizing weights along num_features using RMSNorm.
+    
+            Args:
+                num_features: dim along which the weights are normalized
+                eps : a small factor to handle divide-by-zero error
+                config: Optional ModelConfig object
+        """
         super().__init__()
         self.num_features = num_features
         self.eps = eps
@@ -37,6 +45,13 @@ class MLPBlock(nn.Module):
                  config : ModelConfig,
                  device : torch.device|None = None
     ) -> None:
+        """
+            Multi-Layer Perceptron Block with SwiGLU activation.
+    
+            Args:
+                config: ModelConfig object containing model hyperparameters
+                device: torch device to place the module on
+        """
         super().__init__()
         self.w1 = nn.Linear(
             config.hidden_dim, 2 * config.intermediate_size, device = device, dtype=config.dtype
@@ -60,6 +75,13 @@ class Expert(nn.Module):
                  config : ModelConfig,
                  device : torch.device|None = None
     ) -> None:
+        """
+            A Multi-Layer Perceptron Block for Experts in MoE.
+    
+            Args:
+                config: ModelConfig object containing model hyperparameters
+                device: torch device to place the module on
+        """
         super().__init__()
         self.w1 = nn.Linear(
             config.hidden_dim, 2 * config.intermediate_size, device = device, dtype=config.dtype
@@ -83,11 +105,16 @@ class Gate(nn.Module):
                 config : ModelConfig,
                 device : torch.device|None = None
     ) -> None:
+        """
+            Router/Gate module for Mixture of Experts.
+    
+            Args:
+                config: ModelConfig object containing model hyperparameters
+                device: torch device to place the module on
+        """
         super().__init__()
         self.dim = config.hidden_dim
         self.topk = config.num_experts_per_tok
-        self.topk_groups = config.topk_groups
-        self.n_groups = config.n_groups
         self.route_scale = config.route_scale
         self.weight = nn.Parameter(torch.empty((config.num_experts, config.hidden_dim), device=device, dtype=config.dtype))
         self.bias = nn.Parameter(torch.empty((config.num_experts), dtype=config.dtype, device=device))
@@ -97,12 +124,6 @@ class Gate(nn.Module):
         scores = scores.softmax(dim = -1,dtype = torch.float32)
         original_scores = scores
         scores = scores + self.bias
-        if self.n_groups > 1:
-            scores = scores.view(x.shape[0],self.n_groups,-1)
-            group_scores = scores.topk(2,dim = -1)[0].sum(dim = -1)
-            indices = group_scores.topk(self.topk_groups, dim=-1)[1]
-            mask = scores.new_ones(x.shape[0], self.n_groups, dtype=bool).scatter_(1, indices, False)
-            scores = scores.masked_fill_(mask.unsqueeze(-1), float("-inf")).flatten(1)
         indices = torch.topk(scores, self.topk, dim=-1)[1]
         weights = original_scores.gather(1, indices)
         weights *= self.route_scale
@@ -114,6 +135,13 @@ class MoE(nn.Module):
                  config : ModelConfig,
                  device : torch.device|None = None
     ) -> None:
+        """
+            Mixture of Experts module with shared experts.
+    
+            Args:
+                config: ModelConfig object containing model hyperparameters
+                device: torch device to place the module on
+        """
         super().__init__()
         self.dim = config.hidden_dim
         self.gate = Gate(config,device)
@@ -187,6 +215,20 @@ class RotaryEmbedding(nn.Module):
                  scaling_factor : float = 1.0,
                  device: torch.device | None = None
         ) -> None:
+        """
+            Rotary Position Embedding with YaRN scaling support.
+    
+            Args:
+                head_dim: dimension of each attention head
+                base: base frequency for rotary embeddings
+                dtype: data type for computations
+                initial_context_len: original context length for YaRN scaling
+                max_context_len: maximum context length to precompute
+                ntk_alpha: NTK-aware scaling alpha parameter
+                ntk_beta: NTK-aware scaling beta parameter
+                scaling_factor: context length scaling factor
+                device: torch device to place the module on
+        """
         super().__init__()
         self.head_dim  = head_dim
         self.base = base
@@ -273,6 +315,14 @@ class Attention(nn.Module):
                 device : torch.device | None = None,
                 inference : bool = False,
     ) -> None:
+        """
+            Multi-Head Attention with Grouped Query Attention and Flash Attention.
+    
+            Args:
+                config: ModelConfig object containing model hyperparameters
+                device: torch device to place the module on
+                inference: whether to enable KV caching for inference
+        """
         super().__init__()
         self.n_heads = config.num_attn_heads
         self.n_kv_heads = config.num_key_value_heads
@@ -298,7 +348,8 @@ class Attention(nn.Module):
             self.register_buffer("cache_v", torch.zeros(
                 1, config.seq_len, config.num_key_value_heads, config.head_dim, device = device , dtype = config.dtype
             ), persistent=False)
-            
+        self.q_norm = RMS_Norm(config.head_dim, device = device)
+        self.k_norm = RMS_Norm(config.head_dim, device = device)    
         self.rope = RotaryEmbedding(
             config.head_dim,
             config.base,
@@ -315,7 +366,7 @@ class Attention(nn.Module):
                 x : torch.Tensor,
                 start_pos : int = 0,
         ) -> torch.Tensor:
-        batch_size,seq_len,hidden_dim = x.shape
+        batch_size,seq_len,_ = x.shape
         end_pos = start_pos + seq_len
         Q,K,V = self.wq(x),self.wk(x),self.wv(x)
         
@@ -323,6 +374,10 @@ class Attention(nn.Module):
         K = K.view(batch_size,seq_len,self.n_kv_heads,self.head_dim)
         V = V.view(batch_size,seq_len,self.n_kv_heads,self.head_dim)
         
+        # Test 1 : Q and K norms along head_dim
+        Q = self.q_norm(Q)
+        K = self.k_norm(K)
+
         Q,K = self.rope(Q,K,offset = start_pos)          
         if self.inference:
             self.cache_k[:,start_pos:end_pos,:,:] = K
@@ -354,6 +409,14 @@ class TransformerDecoderBLK(nn.Module):
                 device : torch.device | None = None,
                 inference : bool = False,
     ) -> None:
+        """
+            Transformer Decoder Block with pre-normalization.
+    
+            Args:
+                config: ModelConfig object containing model hyperparameters
+                device: torch device to place the module on
+                inference: whether to enable KV caching for inference
+        """
         super().__init__()
         self.norm1 = RMS_Norm(config.hidden_dim,device = device)
         self.norm2 = RMS_Norm(config.hidden_dim,device = device)
@@ -371,6 +434,14 @@ class GPT_FLASH(nn.Module):
                  device : torch.device | None = None,
                  inference : bool = False,
     ) -> None:
+        """
+            GPT model with Flash Attention and Mixture of Experts.
+    
+            Args:
+                config: ModelConfig object containing model hyperparameters
+                device: torch device to place the module on
+                inference: whether to enable KV caching for inference
+        """
         super().__init__()
         self.norm = RMS_Norm(config.hidden_dim,device = device)
         self.embeddings = nn.Embedding(
