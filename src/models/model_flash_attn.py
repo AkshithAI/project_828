@@ -3,7 +3,6 @@ from torch import nn
 import torch.nn.functional as F
 import math
 from typing import Tuple
-from ..scripts.tokenizer import tokenizer
 from ..scripts.configs import ModelConfig
 from flash_attn import flash_attn_func
 
@@ -167,6 +166,26 @@ class MoE(nn.Module):
             f"experts/expert_{i}_util": utilization[i].item() 
             for i in range(self.num_experts)
         }
+    
+    def get_wandb_metrics(self):
+        """Return expert utilization metrics formatted for wandb real-time dashboard"""
+        if self.total_tokens == 0:
+            return {}
+        utilization = self.expert_counts.float() / self.total_tokens
+        util_list = [utilization[i].item() * 100 for i in range(self.num_experts)]
+        
+        metrics = {
+            # Individual expert utilization (percentage)
+            **{f"expert_{i}": util_list[i] for i in range(self.num_experts)},
+            # Summary statistics
+            "expert_util_mean": sum(util_list) / len(util_list),
+            "expert_util_max": max(util_list),
+            "expert_util_min": min(util_list),
+            "expert_util_std": (sum((x - sum(util_list)/len(util_list))**2 for x in util_list) / len(util_list)) ** 0.5,
+            # Load balance score (higher = more balanced, 100 = perfect)
+            "load_balance_score": (min(util_list) / max(util_list) * 100) if max(util_list) > 0 else 0,
+        }
+        return metrics
 
     def reset_expert_counts(self):
         """Reset counters (call periodically during training)"""
@@ -189,7 +208,7 @@ class MoE(nn.Module):
             routed_xprt_out[batch_idx] += xprt_weights[batch_idx,expert_idx,None] * expert(x[batch_idx])
         mlp_out = routed_xprt_out + self.shared_experts(x)
         return mlp_out.reshape(inp_shape)
-    
+
 
 def apply_rope(x : torch.Tensor,
                cos : torch.Tensor,

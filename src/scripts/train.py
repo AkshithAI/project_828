@@ -63,28 +63,31 @@ def train(config):
             scheduler.step()
             optimizer.zero_grad()
             wandb_run.log({"train/grad_norm": grad_norm.item()})
+            
+            # Log real-time expert utilization to wandb
             for layer_idx, layer in enumerate(model.layers):
-                if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'expert_counts'):
+                if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'get_wandb_metrics'):
                     moe = layer.mlp
-                    expert_counts = moe.expert_counts
-                    total_tokens = moe.total_tokens
-            
-                    print(f"\nLayer {layer_idx} MoE:")
-                    print(f"  Total routed tokens: {total_tokens}")
-                    print(f"  Expert counts: {dict(enumerate(expert_counts.tolist()))}")
-            
-                    if total_tokens > 0:
-                        utilization = moe.get_expert_utilization()
-                        # Log to wandb
-                        for key, val in utilization.items():
-                            wandb_run.log({f"moe/layer_{layer_idx}/{key}": val * 100})
-                        # Log to file
-                        with open("expert_routing.txt", "a") as f:
-                            f.write(f"\nStep {step+1} - Layer {layer_idx} MoE:\n")
-                            for key, val in utilization.items():
-                                expert_id = key.split('_')[1]
-                                f.write(f"    Expert {expert_id}: {val*100:.2f}%\n")
-                    moe.reset_expert_counts()
+                    if moe.total_tokens > 0:
+                        metrics = moe.get_wandb_metrics()
+                        # Log with layer prefix for dashboard organization
+                        wandb_run.log({
+                            f"moe/layer_{layer_idx}/{k}": v for k, v in metrics.items()
+                        })
+                        
+                        # Print detailed stats periodically
+                        if (step + 1) % 1000 == 0:
+                            print(f"\nLayer {layer_idx} MoE:")
+                            print(f"  Total routed tokens: {moe.total_tokens}")
+                            print(f"  Expert counts: {dict(enumerate(moe.expert_counts.tolist()))}")
+                            print(f"  Load balance: {metrics['load_balance_score']:.1f}%")
+                            
+                            with open("expert_routing.txt", "a") as f:
+                                f.write(f"\nStep {step+1} - Layer {layer_idx} MoE:\n")
+                                for i in range(moe.num_experts):
+                                    f.write(f"    Expert {i}: {metrics[f'expert_{i}']:.2f}%\n")
+                        
+                        moe.reset_expert_counts()
 
         wandb_run.log({
           "train/loss" : loss_value,
