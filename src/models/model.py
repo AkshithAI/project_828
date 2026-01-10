@@ -146,8 +146,8 @@ class Gate(nn.Module):
         self.topk = config.num_experts_per_tok
         self.route_scale = config.route_scale
         
-        self.weight = nn.Parameter(torch.zeros((config.num_experts, config.hidden_dim), device=device, dtype=config.dtype))            
-        self.bias = nn.Parameter(torch.zeros((config.num_experts), dtype=torch.float32, device=device))
+        self.weight = nn.Parameter(torch.empty((config.num_experts, config.hidden_dim), device=device, dtype=config.dtype))            
+        self.bias = nn.Parameter(torch.empty((config.num_experts), dtype=torch.float32, device=device))
 
     def forward(self,x : torch.Tensor) -> Tuple[torch.Tensor,torch.Tensor] :
         scores = F.linear(x,self.weight)
@@ -184,7 +184,7 @@ class MoE(nn.Module):
         self.shared_experts = MLPBlock(config,device)
         self.register_buffer(
             'expert_counts', 
-            torch.zeros(config.num_experts, dtype=torch.long)
+            torch.zeros(config.num_experts, dtype=torch.long, device=device)
         )
         self.total_tokens = 0
         
@@ -383,6 +383,9 @@ class Attention(nn.Module):
             config.num_attn_heads * config.head_dim, config.hidden_dim, device = device, dtype = config.dtype
         )
 
+        self.q_norm = RMS_Norm(config.head_dim, device = device)
+        self.k_norm = RMS_Norm(config.head_dim, device = device) 
+
         self.rope = RotaryEmbedding(
             config.head_dim,
             config.base,
@@ -403,6 +406,7 @@ class Attention(nn.Module):
         Q = Q.view(batch_size,seq_len,self.n_kv_heads,self.n_heads // self.n_kv_heads,self.head_dim)
         K = K.view(batch_size,seq_len,self.n_kv_heads,self.head_dim)
         V = V.view(batch_size,seq_len,self.n_kv_heads,self.head_dim)
+        Q,K = self.q_norm(Q),self.k_norm(K)
         Q,K = self.rope(Q,K)
         K,V,S = expand_kv(K,V,self.sinks,Q.shape)
         mask = torch.triu(Q.new_full((seq_len,seq_len),-float('inf')),diagonal = 1)

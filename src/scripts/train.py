@@ -11,10 +11,10 @@ from ..models.model import GPT
 from .tokenizer import tokenizer
 from .dataloader import train_data,val_data
 from ..models.model_flash_attn import GPT_FLASH
-from .helper_funcs import get_base_dir,save_checkpoint
+from .helper_funcs import get_base_dir,save_checkpoint,load_checkpoint
 from transformers import get_cosine_schedule_with_warmup
 from ..models.weight_init import init_gpt_model, count_parameters
-
+from .inference import generate
 
 @torch.inference_mode()
 def validation(model,criterion):
@@ -40,14 +40,18 @@ def validation(model,criterion):
       break
   return total_val_loss / max(1,steps)
 
-def train(config):
+def train(config, start_step=0):
     model.train()
     grad_accumulation_step = 16
     best_val_loss = float('inf')
     patience_counter = 0
     patience = 8
     optimizer.zero_grad()
-    for step,batch in enumerate(tqdm(train_data)):
+
+    for step,batch in enumerate(tqdm(train_data, initial=start_step, desc="Training")):
+        if step < start_step:
+            continue
+            
         batch = batch.to(config.device,non_blocking=True).long()
         inputs = batch[:,:-1].contiguous()
         targets = batch[:,1:].contiguous()
@@ -64,18 +68,15 @@ def train(config):
             optimizer.zero_grad()
             wandb_run.log({"train/grad_norm": grad_norm.item()})
             
-            # Log real-time expert utilization to wandb
             for layer_idx, layer in enumerate(model.layers):
                 if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'get_wandb_metrics'):
                     moe = layer.mlp
                     if moe.total_tokens > 0:
                         metrics = moe.get_wandb_metrics()
-                        # Log with layer prefix for dashboard organization
                         wandb_run.log({
                             f"moe/layer_{layer_idx}/{k}": v for k, v in metrics.items()
                         })
                         
-                        # Print detailed stats periodically
                         if (step + 1) % 1000 == 0:
                             print(f"\nLayer {layer_idx} MoE:")
                             print(f"  Total routed tokens: {moe.total_tokens}")
@@ -99,6 +100,21 @@ def train(config):
             print(f"Step : {step+1} , Loss : {loss_value:.4f}")
         if (step+1) % 25000 == 0:
             val_loss = validation(model,criterion)
+            generate(model,
+                     "The old clock in the hallway stopped at midnight, and when I touched it a hidden drawer slid open revealing...",
+                     config.device,max_tokens=60,temp=0.8)
+            generate(model,
+                     "Explain like I'm five: how does a battery make electricity?",
+                     config.device,max_tokens=80,temp=0.3)
+            generate(model,
+                     "Write a Python function that reverses a string and explain its time complexity in one paragraph.",
+                     config.device,max_tokens=120,temp=0.2)
+            generate(model,
+                     "Customer: I received a damaged package yesterday and the item is broken. Agent:",
+                     config.device,max_tokens=80,temp=0.4)
+            generate(model,
+                     "In 200–250 words, argue for investing in renewable energy for economic growth. Cite one realistic-sounding statistic and label it as an example (do not invent specific study names).", 
+                     config.device,max_tokens=250,temp=0.5)
             model.train()
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -163,4 +179,7 @@ if __name__ == '__main__' :
             "configs" : config,
         }
     )
-    train(config)
+    
+    start_step = load_checkpoint(base_dir, model, optimizer, scheduler, device=config.device)
+    
+    train(config, start_step=start_step)
