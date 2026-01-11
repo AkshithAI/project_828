@@ -143,7 +143,7 @@ def save_checkpoint(ckpt_dir,step,model_data,optimizer_data,scheduler_data,wandb
     torch.save(optimizer_data,optimizer_path)
     torch.save(scheduler_data,scheduler_path)
 
-    art_name = f"model-checkpoint-{step:06d}"
+    art_name = f"model-checkpoint-TinyStories-{step:06d}" #changed
     artifact = wandb.Artifact(art_name,type = "model")    
     artifact.add_file(model_path)
     artifact.add_file(optimizer_path)
