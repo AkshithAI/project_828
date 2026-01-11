@@ -100,21 +100,21 @@ def train(config, start_step=0):
             print(f"Step : {step+1} , Loss : {loss_value:.4f}")
         if (step+1) % 25000 == 0:
             val_loss = validation(model,criterion)
-            generate(model,
+            print(generate(model,
                      "The old clock in the hallway stopped at midnight, and when I touched it a hidden drawer slid open revealing...",
-                     config.device,max_tokens=60,temp=0.8)
-            generate(model,
+                     config.device,max_tokens=60,temp=0.8))
+            print(generate(model,
                      "Explain like I'm five: how does a battery make electricity?",
-                     config.device,max_tokens=80,temp=0.3)
-            generate(model,
+                     config.device,max_tokens=80,temp=0.3))
+            print(generate(model,
                      "Write a Python function that reverses a string and explain its time complexity in one paragraph.",
-                     config.device,max_tokens=120,temp=0.2)
-            generate(model,
+                     config.device,max_tokens=120,temp=0.2))
+            print(generate(model,
                      "Customer: I received a damaged package yesterday and the item is broken. Agent:",
-                     config.device,max_tokens=80,temp=0.4)
-            generate(model,
+                     config.device,max_tokens=80,temp=0.4))
+            print(generate(model,
                      "In 200–250 words, argue for investing in renewable energy for economic growth. Cite one realistic-sounding statistic and label it as an example (do not invent specific study names).", 
-                     config.device,max_tokens=250,temp=0.5)
+                     config.device,max_tokens=250,temp=0.5))
             model.train()
             if val_loss < best_val_loss:
                 best_val_loss = val_loss

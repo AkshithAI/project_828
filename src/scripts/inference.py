@@ -7,7 +7,10 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 def display_expert_stats(model):
-    """Display expert usage statistics for each layer."""
+    """
+    Display expert usage statistics for each layer.
+
+    """
     print("\n" + "="*70)
     print("Expert Usage Statistics".center(70))
     print("="*70)
@@ -49,6 +52,17 @@ def display_expert_stats(model):
 
 @torch.inference_mode()
 def generate(model,seed_txt,device,max_tokens=500,k=50,temp = 0.8):
+    """
+    Sample Inference on the model
+    
+    Args:
+        model: model object
+        seed_txt: prompt for sequence generation
+        device: torch.device() object
+        max_tokens: max sequence length
+        k: topk param for selecting top 'k' words from probability distribution
+        temp: temperature for sequence generation
+    """
     model.eval()
     sampled_tokens = []
     start_pos = 0

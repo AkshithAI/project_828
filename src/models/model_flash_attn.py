@@ -214,8 +214,8 @@ def apply_rope(x : torch.Tensor,
                cos : torch.Tensor,
                sin : torch.Tensor
     ) -> torch.Tensor:
-    cos = cos.unsqueeze(-2).unsqueeze(0).to(x.device).to(x.dtype)
-    sin = sin.unsqueeze(-2).unsqueeze(0).to(x.device).to(x.dtype)
+    cos = cos.unsqueeze(0).unsqueeze(-2).to(x.device).to(x.dtype)
+    sin = sin.unsqueeze(0).unsqueeze(-2).to(x.device).to(x.dtype)
     x1,x2 = torch.chunk(x,2,dim = -1)
     o1 = x1 * cos - x2 * sin
     o2 = x1 * sin + x2 * cos
@@ -394,8 +394,7 @@ class Attention(nn.Module):
         V = V.view(batch_size,seq_len,self.n_kv_heads,self.head_dim)
         
         # Test 1 : Q and K norms along head_dim
-        Q = self.q_norm(Q)
-        K = self.k_norm(K)
+        Q,K = self.q_norm(Q),self.k_norm(K)
 
         Q,K = self.rope(Q,K,offset = start_pos)          
         if self.inference:
