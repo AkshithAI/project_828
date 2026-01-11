@@ -115,8 +115,8 @@ class Gate(nn.Module):
         self.dim = config.hidden_dim
         self.topk = config.num_experts_per_tok
         self.route_scale = config.route_scale
-        self.weight = nn.Parameter(torch.empty((config.num_experts, config.hidden_dim), device=device, dtype=config.dtype))
-        self.bias = nn.Parameter(torch.empty((config.num_experts), dtype=config.dtype, device=device))
+        self.weight = nn.Parameter(torch.ones((config.num_experts, config.hidden_dim), device=device, dtype=config.dtype))
+        self.bias = nn.Parameter(torch.zeros((config.num_experts), dtype=config.dtype, device=device))
 
     def forward(self,x : torch.Tensor) -> Tuple[torch.Tensor,torch.Tensor] :
         scores = F.linear(x,self.weight)
@@ -256,7 +256,9 @@ class RotaryEmbedding(nn.Module):
         self.ntk_beta = ntk_beta
         self.scaling_factor = scaling_factor
         self.device = device
-        self.cos,self.sin = self.compute_cos_sin(max_context_len)
+        cos, sin = self.compute_cos_sin(max_context_len)
+        self.register_buffer('cos', cos, persistent=False)
+        self.register_buffer('sin', sin, persistent=False)
 
     def _compute_concentration_and_inv_freq(self) -> Tuple[float,torch.Tensor]:
         """Refer gpt-oss implemention of YaRN and See YaRN paper for more details: https://arxiv.org/abs/2309.00071"""
