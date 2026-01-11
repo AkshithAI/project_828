@@ -4,6 +4,15 @@ import wandb
 from pathlib import Path
 
 def get_base_dir():
+    """
+    Get Base Directory of Project Folder
+
+    Args:
+        None
+    
+    Returns:
+        PosixPath: Path to Project Folder
+    """
     base_dir = Path.cwd()
     ckpt_dir = base_dir/"checkpoints"
     ckpt_dir.mkdir(exist_ok=True)
@@ -100,11 +109,35 @@ def load_checkpoint(base_dir, model, optimizer=None, scheduler=None, device="cud
 
 
 def save_checkpoint(ckpt_dir,step,model_data,optimizer_data,scheduler_data,wandb_run,meta_data=None):
+    """
+    Save model state dict with meta data
+    
+    Args:
+        ckpt_dir: Path to Checkpoint Directory
+        step: Global Step for checkpoint 
+        model_data: model's state info
+        optimizer_data: optimizer's state info
+        scheduler_data: scheduler's state info
+        wandb_run: wandb object to save the session details
+        meta_data: meta data
+    
+    Returns:
+        None
+    """
     os.makedirs(ckpt_dir,exist_ok=True)
-
     model_path = os.path.join(ckpt_dir,f"model_{step:05d}.pt")
     optimizer_path = os.path.join(ckpt_dir,f"optim_{step:05d}.pt")
     scheduler_path = os.path.join(ckpt_dir,f"scheduler_{step:05d}.pt")
+
+    # For now not tracked
+    checkpoint_data = {
+        "model": model_data,
+        "optimizer": optimizer_data,
+        "scheduler": scheduler_data,
+        "step": step
+    }
+    if meta_data is not None:
+        checkpoint_data.update(meta_data)
 
     torch.save(model_data,model_path)
     torch.save(optimizer_data,optimizer_path)
