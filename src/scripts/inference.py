@@ -75,8 +75,13 @@ def generate(model,seed_txt,device,max_tokens=500,k=50,temp = 0.8):
         with torch.autocast(device_type=device,dtype=torch.bfloat16):
             logits = model(predicted_token.view(1, 1),start_pos)
         last_seq = logits[:,-1,:]
-        preds = F.softmax(last_seq/temp,dim=-1)
-        idx = torch.multinomial(preds,num_samples=1)
+        # preds = F.softmax(last_seq/temp,dim=-1)
+        # idx = torch.multinomial(preds,num_samples=1)
+        
+        top_k_logits, top_k_indices = torch.topk(last_seq, k, dim=-1)
+        preds = F.softmax(top_k_logits, dim=-1)
+        sampled_idx = torch.multinomial(preds, num_samples=1)
+        idx = top_k_indices.gather(-1, sampled_idx)
         idx_item = idx.item()
         sampled_tokens.append(idx_item)
         tokens = torch.cat((tokens,idx),dim=-1)
@@ -103,7 +108,7 @@ if __name__ == '__main__':
         if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'reset_expert_counts'):
             layer.mlp.reset_expert_counts()
     
-    seed_txt = "In the field artifical intelligence"
+    seed_txt = "In the field of artifical intelligence"
     generated_text = generate(model,seed_txt,device)
     print(generated_text)
     

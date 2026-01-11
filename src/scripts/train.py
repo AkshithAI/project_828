@@ -9,8 +9,7 @@ from torch.amp import autocast
 from .configs import config 
 from ..models.model import GPT
 from .tokenizer import tokenizer
-#from .dataloader import train_data,val_data
-from .testloader import train_data,val_data
+from .dataloader import train_data,val_data
 from ..models.model_flash_attn import GPT_FLASH
 from .helper_funcs import get_base_dir,save_checkpoint,load_checkpoint
 from transformers import get_cosine_schedule_with_warmup
@@ -75,18 +74,6 @@ def train(config, start_step=0):
                         wandb_run.log({
                             f"moe/layer_{layer_idx}/{k}": v for k, v in metrics.items()
                         })
-                        
-                        if (step + 1) % 1000 == 0:
-                            print(f"\nLayer {layer_idx} MoE:")
-                            print(f"  Total routed tokens: {moe.total_tokens}")
-                            print(f"  Expert counts: {dict(enumerate(moe.expert_counts.tolist()))}")
-                            print(f"  Load balance: {metrics['load_balance_score']:.1f}%")
-                            
-                            with open("expert_routing.txt", "a") as f:
-                                f.write(f"\nStep {step+1} - Layer {layer_idx} MoE:\n")
-                                for i in range(moe.num_experts):
-                                    f.write(f"    Expert {i}: {metrics[f'expert_{i}']:.2f}%\n")
-                        
                         moe.reset_expert_counts()
 
         wandb_run.log({
@@ -99,30 +86,21 @@ def train(config, start_step=0):
             print(f"Step : {step+1} , Loss : {loss_value:.4f}")
         if (step+1) % 25000 == 0:
             val_loss = validation(model,criterion)
-            # print(generate(model,
-            #          "The old clock in the hallway stopped at midnight, and when I touched it a hidden drawer slid open revealing...",
-            #          config.device,max_tokens=60,temp=0.8))
-            # print(generate(model,
-            #          "Explain like I'm five: how does a battery make electricity?",
-            #          config.device,max_tokens=80,temp=0.3))
-            # print(generate(model,
-            #          "Write a Python function that reverses a string and explain its time complexity in one paragraph.",
-            #          config.device,max_tokens=120,temp=0.2))
-            # print(generate(model,
-            #          "Customer: I received a damaged package yesterday and the item is broken. Agent:",
-            #          config.device,max_tokens=80,temp=0.4))
-            # print(generate(model,
-            #          "In 200–250 words, argue for investing in renewable energy for economic growth. Cite one realistic-sounding statistic and label it as an example (do not invent specific study names).", 
-            #          config.device,max_tokens=250,temp=0.5))
-            seed_txt = [
-                "One day, a little girl named lily ",
-                "Once upon a time, there was",
-                "One day, a fast driver named Tim",
-                "Mommy and Emily were playing a ",
-                "Jack was feeling a bit sad. "
-            ]
-            for prompt in seed_txt:
-                print(generate(model,prompt,config.device,max_tokens=200,temp=0.6))
+            print(generate(model,
+                     "The old clock in the hallway stopped at midnight, and when I touched it a hidden drawer slid open revealing...",
+                     config.device,max_tokens=60,temp=0.8))
+            print(generate(model,
+                     "Explain like I'm five: how does a battery make electricity?",
+                     config.device,max_tokens=80,temp=0.3))
+            print(generate(model,
+                     "Write a Python function that reverses a string and explain its time complexity in one paragraph.",
+                     config.device,max_tokens=120,temp=0.2))
+            print(generate(model,
+                     "Customer: I received a damaged package yesterday and the item is broken. Agent:",
+                     config.device,max_tokens=80,temp=0.4))
+            print(generate(model,
+                     "In 200–250 words, argue for investing in renewable energy for economic growth. Cite one realistic-sounding statistic and label it as an example (do not invent specific study names).", 
+                     config.device,max_tokens=250,temp=0.5))
             model.train()
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -183,7 +161,7 @@ if __name__ == '__main__' :
         project = "828_testing_5090",
         config = {
             "architecture" : "GPT",
-            "dataset" : "roneneldan/TinyStories", #changed
+            "dataset" : "allenai/c4", 
             "configs" : config,
         }
     )
