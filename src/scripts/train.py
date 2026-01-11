@@ -9,7 +9,8 @@ from torch.amp import autocast
 from .configs import config 
 from ..models.model import GPT
 from .tokenizer import tokenizer
-from .dataloader import train_data,val_data
+#from .dataloader import train_data,val_data
+from .testloader import train_data,val_data
 from ..models.model_flash_attn import GPT_FLASH
 from .helper_funcs import get_base_dir,save_checkpoint,load_checkpoint
 from transformers import get_cosine_schedule_with_warmup
@@ -48,10 +49,8 @@ def train(config, start_step=0):
     patience = 8
     optimizer.zero_grad()
 
-    for step,batch in enumerate(tqdm(train_data, initial=start_step, desc="Training")):
-        if step < start_step:
-            continue
-            
+    for i, batch in enumerate(tqdm(train_data, desc="Training")):
+        step = i + start_step  
         batch = batch.to(config.device,non_blocking=True).long()
         inputs = batch[:,:-1].contiguous()
         targets = batch[:,1:].contiguous()
@@ -100,21 +99,30 @@ def train(config, start_step=0):
             print(f"Step : {step+1} , Loss : {loss_value:.4f}")
         if (step+1) % 25000 == 0:
             val_loss = validation(model,criterion)
-            print(generate(model,
-                     "The old clock in the hallway stopped at midnight, and when I touched it a hidden drawer slid open revealing...",
-                     config.device,max_tokens=60,temp=0.8))
-            print(generate(model,
-                     "Explain like I'm five: how does a battery make electricity?",
-                     config.device,max_tokens=80,temp=0.3))
-            print(generate(model,
-                     "Write a Python function that reverses a string and explain its time complexity in one paragraph.",
-                     config.device,max_tokens=120,temp=0.2))
-            print(generate(model,
-                     "Customer: I received a damaged package yesterday and the item is broken. Agent:",
-                     config.device,max_tokens=80,temp=0.4))
-            print(generate(model,
-                     "In 200–250 words, argue for investing in renewable energy for economic growth. Cite one realistic-sounding statistic and label it as an example (do not invent specific study names).", 
-                     config.device,max_tokens=250,temp=0.5))
+            # print(generate(model,
+            #          "The old clock in the hallway stopped at midnight, and when I touched it a hidden drawer slid open revealing...",
+            #          config.device,max_tokens=60,temp=0.8))
+            # print(generate(model,
+            #          "Explain like I'm five: how does a battery make electricity?",
+            #          config.device,max_tokens=80,temp=0.3))
+            # print(generate(model,
+            #          "Write a Python function that reverses a string and explain its time complexity in one paragraph.",
+            #          config.device,max_tokens=120,temp=0.2))
+            # print(generate(model,
+            #          "Customer: I received a damaged package yesterday and the item is broken. Agent:",
+            #          config.device,max_tokens=80,temp=0.4))
+            # print(generate(model,
+            #          "In 200–250 words, argue for investing in renewable energy for economic growth. Cite one realistic-sounding statistic and label it as an example (do not invent specific study names).", 
+            #          config.device,max_tokens=250,temp=0.5))
+            seed_txt = [
+                "One day, a little girl named lily ",
+                "Once upon a time, there was",
+                "One day, a fast driver named Tim",
+                "Mommy and Emily were playing a ",
+                "Jack was feeling a bit sad. "
+            ]
+            for prompt in seed_txt:
+                print(generate(model,prompt,config.device,max_tokens=200,temp=0.6))
             model.train()
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -175,7 +183,7 @@ if __name__ == '__main__' :
         project = "828_testing_5090",
         config = {
             "architecture" : "GPT",
-            "dataset" : "allenai/c4",
+            "dataset" : "roneneldan/TinyStories", #changed
             "configs" : config,
         }
     )
