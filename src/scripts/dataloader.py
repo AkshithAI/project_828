@@ -3,6 +3,7 @@ from datasets import load_dataset
 from huggingface_hub import list_repo_files
 from .tokenizer import tokenizer
 from torch.utils.data import IterableDataset,DataLoader
+from .configs import config
 
 # def get_train_files():
 #   repo_id = "codeparrot/codeparrot-clean"   
@@ -76,7 +77,7 @@ def get_hf_datasets(lang="en"):
     ds_for_val = load_dataset("allenai/c4", lang, split="validation", streaming=True)
     return ds_for_train, ds_for_val
 
-def prepare_code_data(files, context_length=2048):
+def prepare_code_data(files, context_length=config.max_context_len):
     buffer = []
     for i,file in enumerate(files):
         tokens = tokenizer(
@@ -108,14 +109,15 @@ dataset_train = CustomDataset(ds_for_train)
 dataset_val = CustomDataset(ds_for_val)
 train_data = DataLoader(
       dataset_train,
-      batch_size = 8,
+      batch_size = 16,
+      shuffle = True,
       collate_fn = collate_fn,
       pin_memory=True,
       num_workers=0,
 )
 val_data = DataLoader(
       dataset_val,
-      batch_size = 8,
+      batch_size = 16,
       collate_fn = collate_fn,
       pin_memory=True,
       num_workers=0,

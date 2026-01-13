@@ -22,7 +22,6 @@ train_data = DataLoader(
 val_data = DataLoader(
       dataset_val,
       batch_size = 8,
-      shuffle = True,
       collate_fn = collate_fn,
       pin_memory=True,
       num_workers=0,

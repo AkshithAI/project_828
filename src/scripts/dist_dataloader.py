@@ -55,7 +55,8 @@ dataset_val = CustomDataset(ds_for_val)
 # Legacy hardcoded loaders (deprecated)
 train_loader_0 = DataLoader(
     train_data_0,
-    batch_size=8,  
+    batch_size=8,
+    shuffle = True,  
     collate_fn=collate_fn,
     pin_memory=True,
     num_workers=4,  
