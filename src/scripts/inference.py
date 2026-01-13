@@ -1,5 +1,6 @@
 from ..models.model import GPT
 from ..models.model_flash_attn import GPT_FLASH
+from ..models.weight_init import init_gpt_model
 from .tokenizer import tokenizer
 from .configs import config
 import torch
@@ -101,6 +102,7 @@ if __name__ == '__main__':
         model = GPT_FLASH(config,device,inference=True)
     else:
         model = GPT(config,device)
+    init_gpt_model(model, config)
     model.load_state_dict(torch.load("assets/model_24999.pt",map_location="cpu"))
     
     # Reset expert counts from training before inference

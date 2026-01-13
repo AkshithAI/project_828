@@ -197,7 +197,7 @@ def main():
         print("\n⚠️  Cannot determine wheel requirements.")
         print("   Make sure PyTorch with CUDA is installed first.")
         print("\n   Install PyTorch with CUDA:")
-        print("   pip install torch --index-url https://download.pytorch.org/whl/cu121")
+        print("   pip install torch --index-url https://download.pytorch.org/whl/cu128")
     
     print("\n" + "=" * 60)
 

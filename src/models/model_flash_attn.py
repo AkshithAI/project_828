@@ -105,8 +105,9 @@ class Gate(nn.Module):
                 device : torch.device|None = None
     ) -> None:
         """
-            Router/Gate module for Mixture of Experts.
-    
+            - Router/Gate module for Mixture of Experts.
+            - Loss-Free Balancing, featured by an auxiliary-loss-free load balancing strategy
+
             Args:
                 config: ModelConfig object containing model hyperparameters
                 device: torch device to place the module on
@@ -115,18 +116,59 @@ class Gate(nn.Module):
         self.dim = config.hidden_dim
         self.topk = config.num_experts_per_tok
         self.route_scale = config.route_scale
-        self.weight = nn.Parameter(torch.ones((config.num_experts, config.hidden_dim), device=device, dtype=config.dtype))
-        self.bias = nn.Parameter(torch.zeros((config.num_experts), dtype=config.dtype, device=device))
+        self.update_param = config.update_param
+        self.num_experts = config.num_experts
+        self.router = nn.Linear(config.hidden_dim, config.num_experts, bias = False, device = device, dtype = config.dtype)
+        self.register_buffer("bias", torch.zeros(config.num_experts, dtype=torch.float32, device=device))
+        # Tracking for wandb
+        self._last_sigmoid_scores = None
+        self._last_score_stats = None
 
-    def forward(self,x : torch.Tensor) -> Tuple[torch.Tensor,torch.Tensor] :
-        scores = F.linear(x,self.weight)
-        scores = scores.softmax(dim = -1,dtype = torch.float32)
+    def update_bias(self, current_load: torch.Tensor) -> None:
+        """Update bias in-place using Loss-Free Balancing rule."""
+        # Convert to float for stable computation
+        load_float = current_load.float()
+        average_load = load_float.sum() / self.num_experts
+        e = average_load - load_float
+        self.bias.add_(self.update_param * e)
+    
+    def get_score_metrics(self) -> dict:
+        """Return sigmoid score statistics for wandb tracking."""
+        if self._last_score_stats is None:
+            return {}
+        return self._last_score_stats
+    
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        scores = self.router(x)
+        scores = torch.sigmoid(scores)
+        
+        # Track sigmoid score statistics for wandb debugging
+        if self.training:
+            with torch.no_grad():
+                self._last_sigmoid_scores = scores.detach()
+                self._last_score_stats = {
+                    "gate/sigmoid_mean": scores.mean().item(),
+                    "gate/sigmoid_std": scores.std().item(),
+                    "gate/sigmoid_min": scores.min().item(),
+                    "gate/sigmoid_max": scores.max().item(),
+                    # Per-expert mean scores (before bias)
+                    **{f"gate/expert_{i}_score_mean": scores[:, i].mean().item() 
+                       for i in range(self.num_experts)},
+                }
+        
         original_scores = scores
-        scores = scores + self.bias
-        indices = torch.topk(scores, self.topk, dim=-1)[1]
+        biased_scores = scores + self.bias.detach().to(scores.dtype)
+        indices = torch.topk(biased_scores, self.topk, dim=-1)[1]
+        current_load = torch.bincount(indices.flatten(), minlength=self.num_experts)
         weights = original_scores.gather(1, indices)
-        weights *= self.route_scale
-        return weights.type_as(x),indices     
+        weights = weights * self.route_scale
+
+        # Bias term update rule
+        if self.training:
+            with torch.no_grad():
+                self.update_bias(current_load)
+
+        return weights.type_as(x), indices, current_load    
     
 
 class MoE(nn.Module):
@@ -175,16 +217,24 @@ class MoE(nn.Module):
         util_list = [utilization[i].item() * 100 for i in range(self.num_experts)]
         
         metrics = {
-            # Individual expert utilization (percentage)
             **{f"expert_{i}": util_list[i] for i in range(self.num_experts)},
             # Summary statistics
             "expert_util_mean": sum(util_list) / len(util_list),
             "expert_util_max": max(util_list),
             "expert_util_min": min(util_list),
             "expert_util_std": (sum((x - sum(util_list)/len(util_list))**2 for x in util_list) / len(util_list)) ** 0.5,
-            # Load balance score (higher = more balanced, 100 = perfect)
             "load_balance_score": (min(util_list) / max(util_list) * 100) if max(util_list) > 0 else 0,
         }
+        # Add gate sigmoid score metrics
+        gate_metrics = self.gate.get_score_metrics()
+        metrics.update(gate_metrics)
+        # Add bias statistics
+        bias = self.gate.bias
+        metrics["gate/bias_mean"] = bias.mean().item()
+        metrics["gate/bias_std"] = bias.std().item()
+        metrics["gate/bias_min"] = bias.min().item()
+        metrics["gate/bias_max"] = bias.max().item()
+        
         return metrics
 
     def reset_expert_counts(self):
@@ -195,11 +245,12 @@ class MoE(nn.Module):
     def forward(self,x : torch.Tensor) -> torch.Tensor:
         inp_shape = x.shape
         x = x.view(-1,self.dim) 
-        xprt_weights,xprt_idxs = self.gate(x)
-        counts = torch.bincount(xprt_idxs.flatten(), minlength=self.num_experts)
+        xprt_weights,xprt_idxs,counts = self.gate(x)
+
         self.expert_counts += counts
         self.total_tokens += x.shape[0] * self.n_routed_experts 
         routed_xprt_out = torch.zeros_like(x)
+
         for i,expert in enumerate(self.experts):
             mask = (xprt_idxs == i).any(dim=-1)
             if not mask.any():
@@ -207,6 +258,7 @@ class MoE(nn.Module):
             batch_idx,expert_idx = torch.where(xprt_idxs == i)
             routed_xprt_out[batch_idx] += xprt_weights[batch_idx,expert_idx,None] * expert(x[batch_idx])
         mlp_out = routed_xprt_out + self.shared_experts(x)
+
         return mlp_out.reshape(inp_shape)
 
 
@@ -443,7 +495,7 @@ class TransformerDecoderBLK(nn.Module):
         self.attention = Attention(config,device,inference)
         self.mlp = MoE(config,device)
 
-    def forward(self, x, start_pos : int = 0): 
+    def forward(self,x,start_pos : int = 0): 
         x = x + self.attention(self.norm1(x),start_pos)        
         x = x + self.mlp(self.norm2(x))
         return x

@@ -13,9 +13,10 @@ class ModelConfig:
         ffn_dropout : float = 0.0
         head_dim : float = hidden_dim // num_attn_heads 
         num_hidden_layers : int = 6 #1
-        num_experts : int = 2 #4
-        num_experts_per_tok : int = 1 #2
-        route_scale : int = 1
+        num_experts : int = 4 #4
+        num_experts_per_tok : int = 2 #2
+        update_param : float = 1e-3
+        route_scale : float = 1.0
         base : int = 10000
         initial_context_len : int = 2048
         max_context_len : int = 2048 #4096
