@@ -120,42 +120,18 @@ class Gate(nn.Module):
         self.num_experts = config.num_experts
         self.router = nn.Linear(config.hidden_dim, config.num_experts, bias = False, device = device, dtype = config.dtype)
         self.register_buffer("bias", torch.zeros(config.num_experts, dtype=torch.float32, device=device))
-        # Tracking for wandb
-        self._last_sigmoid_scores = None
-        self._last_score_stats = None
 
     def update_bias(self, current_load: torch.Tensor) -> None:
         """Update bias in-place using Loss-Free Balancing rule."""
-        # Convert to float for stable computation
         load_float = current_load.float()
         average_load = load_float.sum() / self.num_experts
         e = average_load - load_float
         self.bias.add_(self.update_param * e)
     
-    def get_score_metrics(self) -> dict:
-        """Return sigmoid score statistics for wandb tracking."""
-        if self._last_score_stats is None:
-            return {}
-        return self._last_score_stats
-    
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """See this paper for implementation details: https://arxiv.org/abs/2408.15664"""
         scores = self.router(x)
         scores = torch.sigmoid(scores)
-        
-        # Track sigmoid score statistics for wandb debugging
-        if self.training:
-            with torch.no_grad():
-                self._last_sigmoid_scores = scores.detach()
-                self._last_score_stats = {
-                    "gate/sigmoid_mean": scores.mean().item(),
-                    "gate/sigmoid_std": scores.std().item(),
-                    "gate/sigmoid_min": scores.min().item(),
-                    "gate/sigmoid_max": scores.max().item(),
-                    # Per-expert mean scores (before bias)
-                    **{f"gate/expert_{i}_score_mean": scores[:, i].mean().item() 
-                       for i in range(self.num_experts)},
-                }
-        
         original_scores = scores
         biased_scores = scores + self.bias.detach().to(scores.dtype)
         indices = torch.topk(biased_scores, self.topk, dim=-1)[1]
@@ -218,22 +194,7 @@ class MoE(nn.Module):
         
         metrics = {
             **{f"expert_{i}": util_list[i] for i in range(self.num_experts)},
-            # Summary statistics
-            "expert_util_mean": sum(util_list) / len(util_list),
-            "expert_util_max": max(util_list),
-            "expert_util_min": min(util_list),
-            "expert_util_std": (sum((x - sum(util_list)/len(util_list))**2 for x in util_list) / len(util_list)) ** 0.5,
-            "load_balance_score": (min(util_list) / max(util_list) * 100) if max(util_list) > 0 else 0,
         }
-        # Add gate sigmoid score metrics
-        gate_metrics = self.gate.get_score_metrics()
-        metrics.update(gate_metrics)
-        # Add bias statistics
-        bias = self.gate.bias
-        metrics["gate/bias_mean"] = bias.mean().item()
-        metrics["gate/bias_std"] = bias.std().item()
-        metrics["gate/bias_min"] = bias.min().item()
-        metrics["gate/bias_max"] = bias.max().item()
         
         return metrics
 
@@ -447,7 +408,6 @@ class Attention(nn.Module):
         K = K.view(batch_size,seq_len,self.n_kv_heads,self.head_dim)
         V = V.view(batch_size,seq_len,self.n_kv_heads,self.head_dim)
         
-        # Test 1 : Q and K norms along head_dim
         Q,K = self.q_norm(Q),self.k_norm(K)
 
         Q,K = self.rope(Q,K,offset = start_pos)          

@@ -387,6 +387,90 @@ for _ in range(max_new_tokens):
 
 **Note**: KV cache is automatically used when `inference=True` is passed to the model constructor. During training, the cache is bypassed for efficiency.
 
+### Auxiliary-Loss-Free Load Balancing for MoE
+
+The Mixture of Experts module implements **Loss-Free Load Balancing** based on the DeepSeek-V3 paper ([arXiv:2408.15664](https://arxiv.org/abs/2408.15664)). This approach eliminates the need for auxiliary load balancing losses while achieving near-perfect expert utilization.
+
+**The Problem with Traditional MoE:**
+Standard MoE routers often suffer from **expert collapsing** — a phenomenon where a few experts receive most tokens while others are underutilized. Traditional solutions add an auxiliary loss term to encourage balanced routing, but this introduces additional hyperparameters and can conflict with the primary training objective.
+
+**How Loss-Free Balancing Works:**
+
+The router uses a learnable bias term that dynamically adjusts expert selection probabilities based on real-time load statistics:
+
+```python
+# Gate/Router Implementation
+class Gate(nn.Module):
+    def __init__(self, config):
+        self.router = nn.Linear(hidden_dim, num_experts, bias=False)
+        self.register_buffer("bias", torch.zeros(num_experts))  # Adaptive bias
+        self.update_param = 1e-3  # Bias update rate
+    
+    def forward(self, x):
+        # 1. Compute sigmoid gating scores
+        scores = torch.sigmoid(self.router(x))
+        
+        # 2. Add bias for expert selection (bias detached from gradients)
+        biased_scores = scores + self.bias.detach()
+        
+        # 3. Select top-k experts based on biased scores
+        indices = torch.topk(biased_scores, k=2, dim=-1)[1]
+        
+        # 4. Use ORIGINAL scores (not biased) for weighting
+        weights = scores.gather(1, indices)
+        
+        # 5. Update bias based on current load imbalance
+        current_load = torch.bincount(indices.flatten(), minlength=num_experts)
+        average_load = current_load.sum() / num_experts
+        error = average_load - current_load
+        self.bias += self.update_param * error  # Increase bias for underused experts
+        
+        return weights, indices
+```
+
+**Key Design Principles:**
+
+1. **Decoupled Selection vs. Weighting**:
+   - Expert **selection** uses biased scores: `scores + bias`
+   - Expert **weighting** uses original scores: `scores`
+   - This allows the bias to influence routing without affecting gradient flow through the router
+
+2. **Dynamic Bias Adjustment**:
+   - After each forward pass, compute the load imbalance: `error = avg_load - current_load`
+   - Underutilized experts get a positive bias boost → more likely to be selected
+   - Overutilized experts get a negative bias penalty → less likely to be selected
+   - Update rate `update_param = 1e-3` provides stable, gradual adjustment
+
+3. **No Auxiliary Loss Required**:
+   - The bias mechanism operates entirely at inference time
+   - No additional loss terms to balance or hyperparameters to tune
+   - Training objective remains purely focused on language modeling
+
+**Why Sigmoid Gating?**
+
+Unlike softmax-based routing which produces competitive probabilities (experts compete for activation), sigmoid gating:
+- Allows multiple experts to have high scores simultaneously
+- Scores represent absolute "relevance" rather than relative probability
+- Works naturally with the bias-based selection mechanism
+- Saturated sigmoid scores (approaching 0 or 1) don't harm load balancing since the bias term compensates
+
+**Implementation Details:**
+```python
+# In ModelConfig (configs.py)
+num_experts: int = 6              # Total routed experts
+num_experts_per_tok: int = 2      # Active experts per token (top-k)
+update_param: float = 1e-3        # Bias update rate
+route_scale: float = 1.0          # Weight scaling factor
+```
+
+**Results:**
+- Achieves near-perfect load balancing: ~16.67% utilization per expert (for 6 experts)
+- No expert collapsing observed
+- Training remains stable without auxiliary loss interference
+- Bias values converge to stable offsets that maintain balance
+
+**Note**: The bias term is registered as a buffer (not a parameter) and updated via direct addition during training. It is saved with the model checkpoint and used during inference to maintain consistent routing behavior.
+
 ### DeepSpeed ZeRO Optimization
 
 **ZeRO Stage 1:** Optimizer state partitioning
@@ -538,6 +622,7 @@ This section documents the training journey, including critical bugs discovered,
 | **Run 1** | 240,000 | Code | RoPE shape mismatch (B*S vs B,S) | N/A | ❌ Unstable |
 | **Run 2** | 110,000 | Code | Gradient norm explosion | Peak ~25 | ❌ Very Noisy |
 | **Run 3** | 50,000 | Language | None (all fixes applied) | Peak ~6 | ✅ **Stable** |
+| **Run 4** | 50,000 | Language | Expert collapsing in MoE | Peak ~7 | ✅ **Stable + Balanced** |
 
 ### 🔬 Detailed Experiment Analysis
 
@@ -627,6 +712,47 @@ This section documents the training journey, including critical bugs discovered,
 **Screenshot**: Training metrics showing stable convergence
 
 ![Run 3 - 50k Steps Metrics](https://github.com/AkshithAI/project_828/blob/main/assets/Screenshot%202025-12-13%20at%2012.33.28%E2%80%AFPM.png)
+
+
+---
+
+#### 🔵 Run 4: 50k Steps - MoE Load Balancing & Attention Stability ✨
+
+**Configuration**: denim-dew-45
+
+**Dataset**: Language dataset
+
+**Problems Identified**:
+- ⚠️ Expert collapsing observed in MoE - some experts receiving disproportionate token allocation
+- ⚠️ Residual variance in gradient norms and training loss during training
+
+**Fixes Applied**:
+- ✅ Added **Q-Norm and K-Norm** to Attention mechanism for improved stability
+- ✅ Implemented **Auxiliary-Loss-Free Load Balancing** in MoE router
+
+**Results**: **Perfect Load Balancing Achieved** 🎉
+
+**Training Metrics**:
+- **Gradient norm**: Peaked around ~7, with some variance but overall stable
+- **Training loss**: Smoothly decreasing from ~11 to ~4, consistent convergence
+- **Perplexity**: Proper exponential decay from 20,000+ to stable low values
+- **Learning rate**: Following linear warmup + cosine schedule correctly
+- **Expert Utilization**: Near-perfect load balancing across all 6 experts (~16.67% each)
+
+**Key Improvements**:
+- **Q/K Normalization**: Added RMSNorm to query and key projections before RoPE application
+  - Provides additional stability to attention mechanism
+  - Marginal but significant improvement in training dynamics
+- **Loss-Free Load Balancing**: Dynamic bias adjustment ensures equal expert utilization
+  - No auxiliary loss required (eliminates hyperparameter tuning)
+  - Bias term adapts in real-time based on token routing statistics
+  - Achieves near-perfect ~16.67% utilization per expert (for 6 experts)
+
+**Screenshot**: Training metrics showing stable convergence with load-balanced MoE
+
+![Run 4 - 50k Steps Metrics](https://github.com/AkshithAI/project_828/blob/main/assets/Screenshot%202026-01-14%20at%205.55.34%E2%80%AFPM.png)
+
+**Training Logs**: Detailed load balancing and sigmoid gating logs available at [assets/train_logs](assets/train_logs/)
 
 
 ---
