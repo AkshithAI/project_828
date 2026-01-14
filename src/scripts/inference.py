@@ -1,6 +1,5 @@
 from ..models.model import GPT
 from ..models.model_flash_attn import GPT_FLASH
-from ..models.weight_init import init_gpt_model
 from .tokenizer import tokenizer
 from .configs import config
 import torch
@@ -76,9 +75,6 @@ def generate(model,seed_txt,device,max_tokens=500,k=50,temp = 0.8):
         with torch.autocast(device_type=device,dtype=torch.bfloat16):
             logits = model(predicted_token.view(1, 1),start_pos)
         last_seq = logits[:,-1,:]
-        # preds = F.softmax(last_seq/temp,dim=-1)
-        # idx = torch.multinomial(preds,num_samples=1)
-        
         top_k_logits, top_k_indices = torch.topk(last_seq, k, dim=-1)
         preds = F.softmax(top_k_logits, dim=-1)
         sampled_idx = torch.multinomial(preds, num_samples=1)
@@ -102,15 +98,14 @@ if __name__ == '__main__':
         model = GPT_FLASH(config,device,inference=True)
     else:
         model = GPT(config,device)
-    init_gpt_model(model, config)
-    model.load_state_dict(torch.load("assets/model_24999.pt",map_location="cpu"))
+    model.load_state_dict(torch.load("assets/moe_loss-free_run.pt",map_location="cpu"))
     
     # Reset expert counts from training before inference
     for layer in model.layers:
         if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'reset_expert_counts'):
             layer.mlp.reset_expert_counts()
     
-    seed_txt = "In the field of artifical intelligence"
+    seed_txt = "The investigation of past cultures of the modern"
     generated_text = generate(model,seed_txt,device)
     print(generated_text)
     
