@@ -44,8 +44,9 @@ A production-ready Mixture-of-Experts (MoE) transformer model implementation fea
 
 ## ✨ Features
 
-- **Mixture of Experts (MoE)** - 4 routed experts + 1 shared expert with auxiliary-loss-free load balancing
-- **Grouped Query Attention (GQA)** - Efficient attention with 8 attention heads and 2 KV heads (4:1 ratio)
+- **Mixture of Experts (MoE)** - 6 routed experts + 1 shared expert with auxiliary-loss-free load balancing
+- **Grouped Query Attention (GQA)** - Efficient attention with 8 attention heads and 4 KV heads (2:1 ratio)
+- **Q/K Normalization** - RMSNorm applied to Query and Key projections for attention stability
 - **RoPE with YaRN Scaling** - Rotary Position Embeddings with NTK-aware interpolation for context extension
 - **SwiGLU Activation** - State-of-the-art gated activation function in FFN layers
 - **DeepSpeed Integration** - ZeRO optimization stages 1-3 for distributed training
@@ -76,20 +77,21 @@ A production-ready Mixture-of-Experts (MoE) transformer model implementation fea
 **1. Attention Mechanism**
 - **Type**: Grouped Query Attention (GQA) with RoPE
 - **Attention Heads**: 8 (configurable)
-- **KV Heads**: 2 (4:1 ratio for efficiency)
+- **KV Heads**: 4 (2:1 ratio for efficiency)
+- **Q/K Normalization**: RMSNorm applied to Query and Key projections before RoPE
 - **Position Encoding**: Rotary Position Embeddings (RoPE) with YaRN scaling
 - **Special Feature**: Attention sinks for improved long-context handling
 
 **2. Mixture of Experts (MoE)**
-- **Number of Experts**: 4 routed experts + 1 shared expert
+- **Number of Experts**: 6 routed experts + 1 shared expert
 - **Active Experts**: 2 experts per token (top-k routing)
 - **Expert Architecture**: SwiGLU-based FFN
   ```
   Expert(x) = W2(dropout(SwiGLU(W1(x) * W3(x))))
   ```
-- **Routing**: Learned gating with group-based selection and Auxiliary-Loss-Free Load Balancing
-- **Groups**: `n_groups: 1` with `topk_groups: 1` for simplified routing
-- **Route Scale**: `route_scale: 1` for balanced expert utilization
+- **Routing**: Sigmoid gating with Auxiliary-Loss-Free Load Balancing (no auxiliary loss required)
+- **Load Balancing**: Dynamic bias adjustment based on real-time token routing statistics
+- **Route Scale**: `route_scale: 1.0` for balanced expert utilization
 
 **3. Feed-Forward Network**
 - **Hidden Dimension**: 512 (test) / 1024+ (production)
@@ -113,28 +115,28 @@ A production-ready Mixture-of-Experts (MoE) transformer model implementation fea
 - **Concentration Factor**: 1.0 (default YaRN parameter)
 - **Attention Sinks**: Enabled for improved long-context handling
 
-### Current Model Configuration (60M params)
+### Current Model Configuration (~60M params)
 
 ```python
-# Test Configuration - src/scripts/configs.py
+# Current Configuration - src/scripts/configs.py
 vocab_size: 49,152              # StarCoder2 tokenizer
 hidden_dim: 512
 intermediate_size: 768
-num_hidden_layers: 1
+num_hidden_layers: 6            # 6 transformer layers
 num_attn_heads: 8
-num_key_value_heads: 2
+num_key_value_heads: 4          # 2:1 GQA ratio
 head_dim: 64                    # hidden_dim / num_attn_heads
-num_experts: 4                  # Routed experts
-num_experts_per_tok: 2          # Active experts per token
-n_groups: 1                     # Expert routing groups
-topk_groups: 1                  # Top-k group selection
-route_scale: 1                  # Expert routing scale
+num_experts: 6                  # Routed experts
+num_experts_per_tok: 2          # Active experts per token (top-k)
+update_param: 1e-3              # Bias update rate for load balancing
+route_scale: 1.0                # Expert routing scale
 base: 10000                     # RoPE base frequency
 initial_context_len: 2048       # Initial sequence length
-max_context_len: 4096           # Maximum sequence length with scaling
+max_context_len: 2048           # Maximum sequence length
 ntk_alpha: 1.0                  # NTK interpolation factor
 ntk_beta: 32.0                  # NTK scaling temperature
 scaling_factor: 1.0             # Overall scaling multiplier
+ffn_dropout: 0.0                # Dropout in expert FFN
 dtype: bfloat16                 # Mixed precision training
 ```
 
@@ -148,10 +150,12 @@ hidden_dim: 1536
 intermediate_size: 4096
 num_hidden_layers: 24
 num_attn_heads: 24
-num_key_value_heads: 8
+num_key_value_heads: 8          # 3:1 GQA ratio
 head_dim: 64
 num_experts: 8
 num_experts_per_tok: 2
+update_param: 1e-3              # Loss-free load balancing
+route_scale: 1.0
 initial_context_len: 2048
 max_context_len: 8192           # Extended context with YaRN
 ```
@@ -244,17 +248,21 @@ bash launch_distributed.sh
 Edit `src/scripts/configs.py` to modify model architecture:
 
 ```python
+@dataclass
 class ModelConfig:
-    def __init__(self):
-        # Model architecture
-        self.hidden_dim = 512
-        self.num_hidden_layers = 1
-        self.num_attn_heads = 8
-        self.num_experts = 4
-        
-        # Training
-        self.learning_rate = 3e-4
-        self.batch_size = 8
+    # Model architecture
+    hidden_dim: int = 512
+    num_hidden_layers: int = 6
+    num_attn_heads: int = 8
+    num_key_value_heads: int = 4
+    num_experts: int = 6
+    num_experts_per_tok: int = 2
+    update_param: float = 1e-3  # Load balancing bias update rate
+    route_scale: float = 1.0
+    
+    # Training
+    learning_rate: float = 3e-4
+    batch_size: int = 8
 ```
 
 Edit `src/scripts/train.py` for single-GPU training hyperparameters:
@@ -302,22 +310,33 @@ Edit `src/scripts/ds-config.json` for distributed training settings:
 ```
 project_828/
 ├── src/
+│   ├── __init__.py
 │   ├── models/
+│   │   ├── __init__.py
 │   │   ├── model.py              # Main GPT model with standard attention
-│   │   ├── model_flash_attn.py   # GPT model with Flash Attention
+│   │   ├── model_flash_attn.py   # GPT model with Flash Attention + Q/K Norms
 │   │   └── weight_init.py        # Model weight initialization
 │   └── scripts/
+│       ├── __init__.py
 │       ├── train.py              # Single GPU training loop
 │       ├── distributed_training.py  # DeepSpeed distributed training
 │       ├── dist_dataloader.py    # Distributed data loading
 │       ├── ds-config.json        # DeepSpeed configuration
-│       ├── configs.py            # Model configuration
+│       ├── configs.py            # Model configuration (dataclass)
 │       ├── dataloader.py         # Data loading and preprocessing
-│       ├── tokenizer.py          # Tokenizer setup
+│       ├── testloader.py         # Test data loader
+│       ├── tokenizer.py          # StarCoder2 tokenizer setup
 │       ├── helper_funcs.py       # Utility functions
-│       └── inference.py          # inference for trained models
+│       └── inference.py          # Inference for trained models
+├── assets/
+│   ├── train_logs/               # Training log screenshots
+│   │   ├── Load Balancing Logs/  # Expert utilization visualizations
+│   │   └── sigmoid logs/         # Sigmoid gating score logs
+│   ├── model_24999.pt            # Checkpoint at step 24999
+│   └── moe_loss-free_run.pt      # Loss-free load balancing run checkpoint
+├── check_flash_attn_requirements.py  # Flash Attention compatibility check
+├── init.sh                       # Environment setup script
 ├── launch_distributed.sh         # Launch script for distributed training
-├── test_setup.py                 # Setup validation script
 ├── requirements.txt
 └── README.md
 ```
