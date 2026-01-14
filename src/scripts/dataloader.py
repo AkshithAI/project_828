@@ -5,76 +5,43 @@ from .tokenizer import tokenizer
 from torch.utils.data import IterableDataset,DataLoader
 from .configs import config
 
-# def get_train_files():
-#   repo_id = "codeparrot/codeparrot-clean"   
-#   branch  = "main"                          
-#   train_shards = sorted(list_repo_files(repo_id, repo_type="dataset"))
-
-#   def to_url(path):
-#       return f"https://huggingface.co/datasets/{repo_id}/resolve/{branch}/{path}"
-
-#   train_urls = [to_url(p) for p in train_shards]
-#   return train_urls
-def get_train_files(lang="en", include_variants=False):
-    """
-    Return URLs for files that live in the top-level `lang` folder only (e.g. "en/...").
-    If include_variants=True, also include top-level folders like "en.noclean" and "en.noblocklist".
-    """
-    repo_id = "allenai/c4"
+def get_train_files(repo_id):
     branch = "main"
 
     # get all file paths from the repo
     all_shards = sorted(list_repo_files(repo_id, repo_type="dataset"))
 
-    # helper: top-level folder name (text before first '/')
-    def top_segment(p):
-        return p.split("/", 1)[0] if "/" in p else p
-
-    if include_variants:
-        allowed = {lang, f"{lang}.noclean", f"{lang}.noblocklist"}
-        train_shards = [p for p in all_shards if top_segment(p) in allowed]
-    else:
-        # strict: first path segment must exactly equal the language (no "multilingual/en/..." etc.)
-        train_shards = [p for p in all_shards if top_segment(p) == lang]
-
-    # dedupe while preserving order (defensive)
-    seen = set()
-    uniq_shards = []
-    for p in train_shards:
-        if p not in seen:
-            seen.add(p)
-            uniq_shards.append(p)
-    train_shards = uniq_shards
-
-    if not train_shards:
-        # helpful debug info
-        top_level = sorted({top_segment(p) for p in all_shards})
-        raise RuntimeError(f"No files found for language '{lang}'. Top-level entries: {top_level}")
-
     def to_url(path):
         return f"https://huggingface.co/datasets/{repo_id}/resolve/{branch}/{path}"
 
-    train_urls = [to_url(p) for p in train_shards]
-    return train_urls
+    train_urls = [to_url(p) for p in all_shards]
+    return train_urls[2:] # Exclude readme and .gitattributes file
 
-# def get_hf_datasets(train_files):
-#   ds_dict = load_dataset(
-#       "json",
-#       data_files={"train": train_files},
-#       split=None,              
-#       streaming=True,
-#   )
-
-#   ds_for_train = ds_dict["train"]
-#   ds_for_val = en = load_dataset("allenai/c4", "en",split = "validation", streaming=True)
-#   return ds_for_train,ds_for_val
-def get_hf_datasets(lang="en"):
+def get_hf_datasets(train_files):
     """
-    Load C4 dataset directly using the datasets library with streaming. 
-    This avoids the need to enumerate all files manually.
+    Load dataset directly using the datasets library with streaming. 
+    Uses all shards except last 4 for training, and last 4 for validation.
     """
-    ds_for_train = load_dataset("allenai/c4", lang, split="train", streaming=True)
-    ds_for_val = load_dataset("allenai/c4", lang, split="validation", streaming=True)
+    train_urls = train_files[:-4]
+    val_urls = train_files[-4:]
+    
+    # Detect file format from first file extension
+    file_format = 'parquet' if train_urls[0].endswith('.parquet') else 'json'
+    
+    ds_for_train = load_dataset(
+        file_format,
+        data_files=train_urls,
+        split='train',
+        streaming=True
+    )
+    
+    ds_for_val = load_dataset(
+        file_format,
+        data_files=val_urls,
+        split='train',
+        streaming=True
+    )
+    
     return ds_for_train, ds_for_val
 
 def prepare_code_data(files, context_length=config.max_context_len):
@@ -92,7 +59,7 @@ def prepare_code_data(files, context_length=config.max_context_len):
             buffer = buffer[context_length + 1:]
  
 def collate_fn(batch):
-  return torch.stack(batch,dim = 0)
+  return torch.stack(batch, dim = 0)
 
 class CustomDataset(IterableDataset):
   def __init__(self,data,context_length = 2048):
@@ -103,14 +70,14 @@ class CustomDataset(IterableDataset):
   def __iter__(self):
     yield from prepare_code_data(self.data,self.context_length)
 
-# train_files = get_train_files()[0]
-ds_for_train, ds_for_val = get_hf_datasets("en")
+repo_id = "karpathy/fineweb-edu-100b-shuffle"
+train_files = get_train_files(repo_id)
+ds_for_train, ds_for_val = get_hf_datasets(train_files)
 dataset_train = CustomDataset(ds_for_train)
 dataset_val = CustomDataset(ds_for_val)
 train_data = DataLoader(
       dataset_train,
-      batch_size = 16,
-      shuffle = True,
+      batch_size = 4,
       collate_fn = collate_fn,
       pin_memory=True,
       num_workers=0,
@@ -121,5 +88,4 @@ val_data = DataLoader(
       collate_fn = collate_fn,
       pin_memory=True,
       num_workers=0,
-)
-
+)        
