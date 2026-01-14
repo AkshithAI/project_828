@@ -17,28 +17,29 @@ from ..models.weight_init import init_gpt_model, count_parameters
 from .inference import generate
 
 @torch.inference_mode()
-def validation(model,criterion):
+def validation(model, criterion, train_step):
   model.eval()
   total_val_loss = 0
   steps = 0
-  for step,batch in enumerate(val_data):
-    with autocast(device_type = "cuda",dtype = torch.bfloat16):
-        batch = batch.to(config.device,non_blocking=True).long()
-        labels = batch[:,:-1].contiguous()
-        targets = batch[:,1:].contiguous()
+  for step, batch in enumerate(val_data):
+    with autocast(device_type="cuda", dtype=torch.bfloat16):
+        batch = batch.to(config.device, non_blocking=True).long()
+        labels = batch[:, :-1].contiguous()
+        targets = batch[:, 1:].contiguous()
         logits = model(labels)
-        val_loss = criterion(logits.view(-1,logits.shape[-1]),targets.view(-1))
-    wandb_run.log({
-        "val/loss" : val_loss.item(),
-        "val/step": step
-    })
+        val_loss = criterion(logits.view(-1, logits.shape[-1]), targets.view(-1))
     steps += 1
     if (steps + 1) % 1000 == 0:
-        print(f"Step : {steps+1} , Loss : {val_loss}")
+        print(f"Val Step: {steps+1}, Loss: {val_loss.item():.4f}")
     total_val_loss += val_loss.item()
     if steps == 5000:
       break
-  return total_val_loss / max(1,steps)
+  avg_val_loss = total_val_loss / max(1, steps)
+  wandb_run.log({
+      "val/loss": avg_val_loss,
+      "val/ppl": math.exp(min(avg_val_loss, 10)),
+  }, step=train_step, commit=False)
+  return avg_val_loss
 
 def train(config, start_step=0):
     model.train()
@@ -59,33 +60,33 @@ def train(config, start_step=0):
             loss_value = loss.item()
         loss = loss / grad_accumulation_step
         loss.backward()
+        metrics = {
+            "train/loss": loss_value,
+            "train/lr": scheduler.get_last_lr()[0],
+            "train/ppl": math.exp(min(loss_value, 10)),
+        }
+        
         if (step+1) % grad_accumulation_step == 0:
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(),1.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
-            wandb_run.log({"train/grad_norm": grad_norm.item()})
+            metrics["train/grad_norm"] = grad_norm.item()
             
             for layer_idx, layer in enumerate(model.layers):
                 if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'get_wandb_metrics'):
                     moe = layer.mlp
                     if moe.total_tokens > 0:
-                        metrics = moe.get_wandb_metrics()
-                        wandb_run.log({
-                            f"moe/layer_{layer_idx}/{k}": v for k, v in metrics.items()
-                        })
+                        moe_metrics = moe.get_wandb_metrics()
+                        for k, v in moe_metrics.items():
+                            metrics[f"moe/layer_{layer_idx}/{k}"] = v
                         moe.reset_expert_counts()
 
-        wandb_run.log({
-          "train/loss" : loss_value,
-          "train/lr": scheduler.get_last_lr()[0],
-          "train/step": step,
-          "train/ppl": math.exp(min(loss_value, 10)),  
-        })
+        wandb_run.log(metrics, step=step)
         if (step + 1) % 1000 == 0:
             print(f"Step : {step+1} , Loss : {loss_value:.4f}")
         if (step+1) % 25000 == 0:
-            val_loss = validation(model,criterion)
+            val_loss = validation(model, criterion, train_step=step)
             print(generate(model,
                      "The old clock in the hallway stopped at midnight, and when I touched it a hidden drawer slid open revealing...",
                      config.device,max_tokens=60,temp=0.8))
@@ -153,7 +154,7 @@ if __name__ == '__main__' :
     scheduler = get_cosine_schedule_with_warmup(
       optimizer,
       num_warmup_steps=2000,
-      num_training_steps=100000,
+      num_training_steps=1000000,
       num_cycles=0.5 
     )
     wandb_run = wandb.init(
