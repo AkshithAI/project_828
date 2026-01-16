@@ -1,7 +1,7 @@
 from ..models.model import GPT
 from ..models.model_flash_attn import GPT_FLASH
 from .tokenizer import tokenizer
-from .configs import config
+from .configs.model_config import config
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm

@@ -6,14 +6,14 @@ import torch
 import math
 import torch.distributed as dist
 import torch.nn as nn
-from .configs import config
-from ..models.model import GPT
-from ..models.model_flash_attn import GPT_FLASH
-from ..models.weight_init import init_gpt_model
-from .dist_dataloader import val_data, train_loader_0, train_loader_1, get_distributed_dataloader
-from .tokenizer import tokenizer
+from ..configs.model_config import config
+from ...models.model import GPT
+from ...models.model_flash_attn import GPT_FLASH
+from ...models.weight_init import init_gpt_model
+from ..dist_dataloader import val_data, train_loader_0, train_loader_1, get_distributed_dataloader
+from ..tokenizer import tokenizer
 import os
-from .helper_funcs import get_base_dir
+from ..helper_funcs import get_base_dir
 
 
 @torch.inference_mode()

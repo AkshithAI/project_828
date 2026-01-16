@@ -1,5 +1,5 @@
 import torch
-from .tokenizer import tokenizer
+from ..tokenizer import tokenizer
 from dataclasses import dataclass
 
 @dataclass

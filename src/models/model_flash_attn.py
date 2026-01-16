@@ -3,7 +3,7 @@ from torch import nn
 import torch.nn.functional as F
 import math
 from typing import Tuple
-from ..scripts.configs import ModelConfig
+from ..scripts.configs.model_config import ModelConfig
 from flash_attn import flash_attn_func
 
 class RMS_Norm(nn.Module):
@@ -32,7 +32,7 @@ class RMS_Norm(nn.Module):
     
 
 def swiglu(x, alpha: float = 1.702, limit: float = 7.0):
-    x_glu, x_linear = x[..., ::2], x[..., 1::2]
+    x_glu, x_linear = x.chunk(2, dim=-1) 
     x_glu = x_glu.clamp(min=None, max=limit)
     x_linear = x_linear.clamp(min=-limit, max=limit)
     out_glu = x_glu * torch.sigmoid(alpha * x_glu)

@@ -3,7 +3,7 @@ from datasets import load_dataset
 from huggingface_hub import list_repo_files
 from .tokenizer import tokenizer
 from torch.utils.data import IterableDataset,DataLoader
-from .configs import config
+from .configs.model_config import config
 
 def get_train_files(repo_id):
     branch = "main"
