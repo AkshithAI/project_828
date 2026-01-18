@@ -40,7 +40,6 @@ from nemo_curator.stages.text.filters import (
     PunctuationFilter,
     BoilerPlateStringFilter
 )
-from nemo_curator import Sequential
 from nemo_curator.backends.xenna import XennaExecutor
 
 # External imports
@@ -353,38 +352,41 @@ def build_url_remover(text_field: str = "text") -> Modify:
 # Stage Builders - Deduplication
 
 @registry.register_dedup("ExactDeduplicationWorkflow")
-def build_exact_dedup(input_path: str, output_path: str, params: Optional[Dict] = None) -> Sequential:
-    """Build Exact Deduplication workflow."""
+def build_exact_dedup(input_path: str, output_path: str, params: Optional[Dict] = None) -> Pipeline:
+    """Build Exact Deduplication workflow using Pipeline (Ray-based)."""
     from nemo_curator.stages.deduplication.exact.workflow import ExactDeduplicationWorkflow
     from nemo_curator.stages.text.deduplication.removal_workflow import TextDuplicatesRemovalWorkflow
     
     params = params or {}
     cache_path = params.get("cache_path", "./results")
     
-    return Sequential([
-        ExactDeduplicationWorkflow(
-            input_path=input_path,
-            output_path=cache_path,
-            text_field=params.get("text_field", "text"),
-            assign_id=params.get("assign_id", True),
-            perform_removal=False,
-            input_filetype=params.get("input_filetype", "parquet")
-        ),
-        TextDuplicatesRemovalWorkflow(
-            input_path=input_path,
-            ids_to_remove_path=f"{cache_path}/ExactDuplicateIds",
-            output_path=output_path,
-            input_filetype=params.get("input_filetype", "parquet"),
-            input_id_field="_curator_dedup_id",
-            ids_to_remove_duplicate_id_field="_curator_dedup_id",
-            id_generator_path=f"{cache_path}/exact_id_generator.json"
-        )
-    ])
+    pipeline = Pipeline(name="exact_dedup_pipeline", description="Exact deduplication workflow")
+    
+    pipeline.add_stage(ExactDeduplicationWorkflow(
+        input_path=input_path,
+        output_path=cache_path,
+        text_field=params.get("text_field", "text"),
+        assign_id=params.get("assign_id", True),
+        perform_removal=False,
+        input_filetype=params.get("input_filetype", "parquet")
+    ))
+    
+    pipeline.add_stage(TextDuplicatesRemovalWorkflow(
+        input_path=input_path,
+        ids_to_remove_path=f"{cache_path}/ExactDuplicateIds",
+        output_path=output_path,
+        input_filetype=params.get("input_filetype", "parquet"),
+        input_id_field="_curator_dedup_id",
+        ids_to_remove_duplicate_id_field="_curator_dedup_id",
+        id_generator_path=f"{cache_path}/exact_id_generator.json"
+    ))
+    
+    return pipeline
 
 
 @registry.register_dedup("FuzzyDeduplicationWorkflow")
-def build_fuzzy_dedup(input_path: str, output_path: str, params: Optional[Dict] = None) -> Sequential:
-    """Build Fuzzy Deduplication workflow."""
+def build_fuzzy_dedup(input_path: str, output_path: str, params: Optional[Dict] = None) -> Pipeline:
+    """Build Fuzzy Deduplication workflow using Pipeline (Ray-based)."""
     from nemo_curator.stages.deduplication.fuzzy.workflow import FuzzyDeduplicationWorkflow
     from nemo_curator.stages.text.deduplication.removal_workflow import TextDuplicatesRemovalWorkflow
     
@@ -392,49 +394,54 @@ def build_fuzzy_dedup(input_path: str, output_path: str, params: Optional[Dict] 
     cache_path = params.get("cache_path", "./cache")
     results_path = params.get("results_path", "./results")
     
-    return Sequential([
-        FuzzyDeduplicationWorkflow(
-            input_path=input_path,
-            cache_path=cache_path,
-            output_path=results_path,
-            text_field=params.get("text_field", "text"),
-            perform_removal=False,
-            input_filetype=params.get("input_filetype", "parquet"),
-            char_ngrams=params.get("char_ngrams", 24),
-            num_bands=params.get("num_bands", 20),
-            minhashes_per_band=params.get("minhashes_per_band", 13)
-        ),
-        TextDuplicatesRemovalWorkflow(
-            input_path=input_path,
-            ids_to_remove_path=f"{results_path}/FuzzyDuplicateIds",
-            output_path=output_path,
-            input_filetype=params.get("input_filetype", "parquet"),
-            input_id_field="_curator_dedup_id",
-            ids_to_remove_duplicate_id_field="_curator_dedup_id",
-            id_generator_path=f"{results_path}/fuzzy_id_generator.json"
-        )
-    ])
+    pipeline = Pipeline(name="fuzzy_dedup_pipeline", description="Fuzzy deduplication workflow")
+    
+    pipeline.add_stage(FuzzyDeduplicationWorkflow(
+        input_path=input_path,
+        cache_path=cache_path,
+        output_path=results_path,
+        text_field=params.get("text_field", "text"),
+        perform_removal=False,
+        input_filetype=params.get("input_filetype", "parquet"),
+        char_ngrams=params.get("char_ngrams", 24),
+        num_bands=params.get("num_bands", 20),
+        minhashes_per_band=params.get("minhashes_per_band", 13)
+    ))
+    
+    pipeline.add_stage(TextDuplicatesRemovalWorkflow(
+        input_path=input_path,
+        ids_to_remove_path=f"{results_path}/FuzzyDuplicateIds",
+        output_path=output_path,
+        input_filetype=params.get("input_filetype", "parquet"),
+        input_id_field="_curator_dedup_id",
+        ids_to_remove_duplicate_id_field="_curator_dedup_id",
+        id_generator_path=f"{results_path}/fuzzy_id_generator.json"
+    ))
+    
+    return pipeline
 
 
 @registry.register_dedup("TextSemanticDeduplicationWorkflow")
-def build_semantic_dedup(input_path: str, output_path: str, params: Optional[Dict] = None) -> Sequential:
-    """Build Semantic Deduplication workflow."""
+def build_semantic_dedup(input_path: str, output_path: str, params: Optional[Dict] = None) -> Pipeline:
+    """Build Semantic Deduplication workflow using Pipeline (Ray-based)."""
     from nemo_curator.stages.text.deduplication.semantic import TextSemanticDeduplicationWorkflow
     
     params = params or {}
     
-    return Sequential([
-        TextSemanticDeduplicationWorkflow(
-            input_path=input_path,
-            output_path=output_path,
-            cache_path=params.get("cache_path", "./sem_cache"),
-            model_identifier=params.get("model_identifier", "sentence-transformers/all-MiniLM-L6-v2"),
-            n_clusters=params.get("n_clusters", 100),
-            eps=params.get("eps", 0.07),
-            id_field=params.get("id_field", "doc_id"),
-            perform_removal=params.get("perform_removal", True)
-        )
-    ])
+    pipeline = Pipeline(name="semantic_dedup_pipeline", description="Semantic deduplication workflow")
+    
+    pipeline.add_stage(TextSemanticDeduplicationWorkflow(
+        input_path=input_path,
+        output_path=output_path,
+        cache_path=params.get("cache_path", "./sem_cache"),
+        model_identifier=params.get("model_identifier", "sentence-transformers/all-MiniLM-L6-v2"),
+        n_clusters=params.get("n_clusters", 100),
+        eps=params.get("eps", 0.07),
+        id_field=params.get("id_field", "doc_id"),
+        perform_removal=params.get("perform_removal", True)
+    ))
+    
+    return pipeline
 
 
 # Pipeline Builders

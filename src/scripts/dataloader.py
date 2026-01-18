@@ -90,5 +90,3 @@ val_data = DataLoader(
       num_workers=0,
 )        
 
-if __name__ == '__main__':
-   print(get_train_files("karpathy/fineweb-edu-100b-shuffle")[0])
