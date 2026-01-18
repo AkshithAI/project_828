@@ -202,7 +202,7 @@ if __name__ == '__main__':
     config.global_rank = int(os.environ.get('RANK', 0))
     config.seq_len = 2048  
     
-    base_dir = get_base_dir()
+    base_dir = get_base_dir("checkpoints")
     
     use_flash_attn = False
     if use_flash_attn:

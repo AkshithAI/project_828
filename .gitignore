@@ -146,5 +146,3 @@ assets/ckpts/*.pt
 # Temporary files
 temp.txt
 BUG_REPORT.md
-
-test_setup.py

@@ -1,0 +1,91 @@
+{
+    "_description": "NeMo Curator Preprocessing Configuration",
+    "_version": "2.0",
+    "_docs": "https://docs.nvidia.com/nemo/curator/latest/about/concepts/text/data-processing-concepts.html",
+
+    "block_size": "128MB",
+    "files_per_partition": 4,
+    "text_field": "text",
+
+    "add_id": {
+        "enabled": true,
+        "params": {
+            "id_field": "document_id",
+            "id_prefix": "v1",
+            "overwrite": true
+        }
+    },
+
+    "WordCountFilter": {
+        "enabled": true,
+        "params": {
+            "min_words": 50,
+            "max_words": 100000
+        }
+    },
+
+    "NonAlphaNumericFilter": {
+        "enabled": true,
+        "params": {
+            "max_non_alpha_numeric_to_text_ratio": 0.25
+        }
+    },
+
+    "RepeatedLinesFilter": {
+        "enabled": true,
+        "params": {
+            "max_repeated_line_fraction": 0.7
+        }
+    },
+
+    "PunctuationFilter": {
+        "enabled": true,
+        "params": {
+            "max_num_sentences_without_endmark_ratio": 0.85
+        }
+    },
+
+    "BoilerPlateStringFilter": {
+        "enabled": false,
+        "params": {}
+    },
+
+    "UnicodeReformatter": true,
+    "NewlineNormalizer": true,
+    "UrlRemover": true,
+
+    "ExactDeduplicationWorkflow": {
+        "enabled": false,
+        "params": {
+            "text_field": "text",
+            "assign_id": true,
+            "input_filetype": "parquet",
+            "cache_path": "./results/exact_dedup"
+        }
+    },
+
+    "FuzzyDeduplicationWorkflow": {
+        "enabled": false,
+        "params": {
+            "text_field": "text",
+            "input_filetype": "parquet",
+            "cache_path": "./cache/fuzzy",
+            "results_path": "./results/fuzzy",
+            "char_ngrams": 24,
+            "num_bands": 20,
+            "minhashes_per_band": 13
+        }
+    },
+
+    "TextSemanticDeduplicationWorkflow": {
+        "enabled": false,
+        "params": {
+            "cache_path": "./cache/semantic",
+            "model_identifier": "sentence-transformers/all-MiniLM-L6-v2",
+            "n_clusters": 100,
+            "eps": 0.07,
+            "id_field": "doc_id",
+            "perform_removal": true
+        }
+    }
+}

@@ -18,11 +18,12 @@ A production-ready Mixture-of-Experts (MoE) transformer model implementation fea
 
 </div>
 
-## 📑 Table of Contents
+## Table of Contents
 
 - [Features](#-features)
 - [Model Architecture](#️-model-architecture)
 - [Dataset](#-dataset)
+- [Data Curation](#-data-curation)
 - [Quick Start](#-quick-start)
   - [Prerequisites](#prerequisites)
   - [Installation](#installation)
@@ -42,7 +43,7 @@ A production-ready Mixture-of-Experts (MoE) transformer model implementation fea
 
 ---
 
-## ✨ Features
+## Features
 
 - **Mixture of Experts (MoE)** - 6 routed experts + 1 shared expert with auxiliary-loss-free load balancing
 - **Grouped Query Attention (GQA)** - Efficient attention with 8 attention heads and 4 KV heads (2:1 ratio)
@@ -54,10 +55,11 @@ A production-ready Mixture-of-Experts (MoE) transformer model implementation fea
 - **Mixed Precision Training** - BFloat16 for optimal performance
 - **Comprehensive Logging** - Weights & Biases integration with detailed metrics
 - **Production-Ready** - Enterprise-grade code with extensive error handling
+- **NeMo Curator Integration** - Robust data preprocessing pipeline with filtering, cleaning, and deduplication
 
 ---
 
-## 🏗️ Model Architecture
+## Model Architecture
 
 ### Overview
 
@@ -162,7 +164,7 @@ max_context_len: 8192           # Extended context with YaRN
 
 ---
 
-## 📊 Dataset
+## Dataset
 
 - **Training**: CodeParrot-Clean (streaming, 54 shards) / Language datasets
 - **Validation**: CodeParrot-Clean-Valid
@@ -173,7 +175,39 @@ max_context_len: 8192           # Extended context with YaRN
 
 ---
 
-## 🚀 Quick Start
+## Data Curation
+
+This project includes a comprehensive data preprocessing pipeline powered by [NVIDIA NeMo Curator](https://docs.nvidia.com/nemo/curator/latest/).
+
+### Features
+
+- **Quality Filtering** - Word count, punctuation, boilerplate removal
+- **Text Cleaning** - Unicode normalization, URL removal, newline standardization  
+- **Deduplication** - Exact, fuzzy (MinHash), and semantic deduplication
+- **Multiple Sources** - HuggingFace datasets, ArXiv, Common Crawl, Wikipedia
+
+### Quick Usage
+
+```bash
+# Curate a HuggingFace dataset
+python src/scripts/data/preprocess.py --custom --repo_id username/dataset-name
+
+# With deduplication
+python src/scripts/data/preprocess.py --custom --dedup
+
+# Predefined datasets (ArXiv, Wikipedia, Common Crawl)
+python src/scripts/data/preprocess.py --data_tag wiki --download_dir ./data
+```
+
+### Configuration
+
+Edit `src/scripts/configs/preprocess.json` to enable/disable processing stages.
+
+**[Full Documentation →](src/scripts/data/README.md)**
+
+---
+
+## Quick Start
 
 ### Prerequisites
 
@@ -305,7 +339,7 @@ Edit `src/scripts/ds-config.json` for distributed training settings:
 - 60M model (2 GPUs with good P2P): ~12-24 hours for 100K steps
 - 800M model: ~7-14 days for 500K steps (8x A100 with NVLink)
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 project_828/
@@ -341,7 +375,7 @@ project_828/
 └── README.md
 ```
 
-## 🔧 Advanced Features
+## Advanced Features
 
 ### Flash Attention Support
 
@@ -548,12 +582,12 @@ The training script automatically logs to W&B:
 - Tokens per second
 - Model configuration
 
-## 🐛 Known Issues & Solutions
+## Known Issues & Solutions
 
 ### Training Instability
-- ✅ **Fixed**: Loss logging bug (incorrect gradient accumulation scaling)
-- ✅ **Fixed**: Data pipeline context length mismatch
-- ✅ **Fixed**: Dtype mismatch in attention output
+- **Fixed**: Loss logging bug (incorrect gradient accumulation scaling)
+- **Fixed**: Data pipeline context length mismatch
+- **Fixed**: Dtype mismatch in attention output
 
 ### Memory Issues
 - Use ZeRO Stage 2 or 3 for distributed training
@@ -594,7 +628,7 @@ export NCCL_IB_DISABLE=1
 export NCCL_P2P_LEVEL=SYS
 ```
 
-## 📊 Performance Benchmarks
+## Performance Benchmarks
 
 ### Single GPU Performance
 | GPU | Speed | Memory | Recommendation |
@@ -611,7 +645,7 @@ export NCCL_P2P_LEVEL=SYS
 
 **Key Takeaway:** Multi-GPU only helps with good P2P topology (PIX/PXB/NVLink). With NODE topology, single GPU is ~1200x faster!
 
-## 📊 Monitoring Training
+## Monitoring Training
 
 ### Key Metrics to Watch
 
@@ -630,11 +664,11 @@ export NCCL_P2P_LEVEL=SYS
 
 ---
 
-## 📈 Training Experiments & Results
+## Training Experiments & Results
 
 This section documents the training journey, including critical bugs discovered, fixes applied, and lessons learned from three major training runs.
 
-### 📊 Training Runs Summary
+### Training Runs Summary
 
 | Run | Steps | Dataset | Key Issue | Grad Norm | Training Stability |
 |-----|-------|---------|-----------|-----------|-------------------|
@@ -643,9 +677,9 @@ This section documents the training journey, including critical bugs discovered,
 | **Run 3** | 50,000 | Language | None (all fixes applied) | Peak ~6 | ✅ **Stable** |
 | **Run 4** | 50,000 | Language | Expert collapsing in MoE | Peak ~7 | ✅ **Stable + Balanced** |
 
-### 🔬 Detailed Experiment Analysis
+### Detailed Experiment Analysis
 
-#### 🔴 Run 1: 240k Steps - Critical RoPE Bug Discovery
+#### Run 1: 240k Steps - Critical RoPE Bug Discovery
 
 **Configuration**: 5090_run_240k_steps
 
@@ -671,7 +705,7 @@ This section documents the training journey, including critical bugs discovered,
 
 ---
 
-#### 🟡 Run 2: 110k Steps - Post-Fix Gradient Instability
+#### Run 2: 110k Steps - Post-Fix Gradient Instability
 
 **Configuration**: 5090_run_110k_steps
 
@@ -703,7 +737,7 @@ This section documents the training journey, including critical bugs discovered,
 
 ---
 
-#### 🟢 Run 3: 50k Steps - Stable Training Achieved ✨
+#### Run 3: 50k Steps - Stable Training Achieved 
 
 **Configuration**: Latest run (ongoing/best results)
 
@@ -713,7 +747,7 @@ This section documents the training journey, including critical bugs discovered,
 - ✅ RoPE attention reshape fix (from Run 1)
 - ✅ Switched to language dataset for more stable gradients (from Run 2 insights)
 
-**Results**: **Significantly Improved Stability** 🎉
+**Results**: **Significantly Improved Stability** 
 
 **Training Metrics**:
 - **Gradient norm**: Now peaked around **6** (down from 25+) - 4x improvement!
@@ -735,7 +769,7 @@ This section documents the training journey, including critical bugs discovered,
 
 ---
 
-#### 🔵 Run 4: 50k Steps - MoE Load Balancing & Attention Stability ✨
+#### Run 4: 50k Steps - MoE Load Balancing & Attention Stability 
 
 **Configuration**: denim-dew-45
 
@@ -776,7 +810,7 @@ This section documents the training journey, including critical bugs discovered,
 
 ---
 
-### 💡 Lessons Learned
+### Lessons Learned
 
 #### 1. **Positional Encoding Must Match Tensor Operations**
 - **Critical**: RoPE positional encoding calculations must match the exact tensor shapes used in attention mechanisms
@@ -808,7 +842,7 @@ This section documents the training journey, including critical bugs discovered,
 
 ---
 
-## 🔬 Model Variants
+## Model Variants
 
 ### Standard Attention (`model.py`)
 - Traditional scaled dot-product attention
@@ -822,7 +856,7 @@ This section documents the training journey, including critical bugs discovered,
 - 50% memory reduction
 - Requires `flash-attn` package
 
-## 💻 Hardware Requirements
+## Hardware Requirements
 
 ### Minimum (Single GPU)
 - 1x RTX 4090 (24GB VRAM)
@@ -840,7 +874,7 @@ This section documents the training journey, including critical bugs discovered,
 - If NODE topology: Destroy and find better hardware
 - Look for "PCIe 4.0 x16" with modern CPUs (AMD EPYC 7xxx series)
 
-## 🛠️ Troubleshooting Guide
+## Troubleshooting Guide
 
 ### Before Starting Multi-GPU Training
 
@@ -878,7 +912,7 @@ This section documents the training journey, including critical bugs discovered,
 
 ---
 
-## 📝 Citation
+## Citation
 
 If you use this code, please cite:
 
@@ -897,19 +931,19 @@ If you use this code, please cite:
 
 ---
 
-## 📄 License
+## License
 
 [TBD]
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
 ---
 
-## 📧 Contact
+## Contact
 
 For questions or issues, please open an issue on GitHub or contact [@AkshithAI](https://github.com/AkshithAI).
 

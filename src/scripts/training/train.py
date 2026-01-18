@@ -132,7 +132,7 @@ def train(config, start_step=0):
 if __name__ == '__main__' : 
     warnings.filterwarnings("ignore")
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    base_dir = get_base_dir()
+    base_dir = get_base_dir("checkpoints")
     use_flash_attn = True
     if use_flash_attn:
         model = GPT_FLASH(config,"cuda")

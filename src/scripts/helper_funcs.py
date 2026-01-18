@@ -3,7 +3,7 @@ import torch
 import wandb
 from pathlib import Path
 
-def get_base_dir():
+def get_base_dir(sub_folder : str):
     """
     Get Base Directory of Project Folder
 
@@ -13,10 +13,13 @@ def get_base_dir():
     Returns:
         PosixPath: Path to Project Folder
     """
-    base_dir = Path.cwd()
-    ckpt_dir = base_dir/"checkpoints"
-    ckpt_dir.mkdir(exist_ok=True)
-    return ckpt_dir
+    base_dir = Path.cwd()   
+    out_dir = base_dir / sub_folder
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if out_dir.exists() and not out_dir.is_dir():
+        raise FileExistsError(f"{out_dir} exists and is not a directory")
+
+    return out_dir.resolve()
 
 def get_latest_checkpoint_step(base_dir):
     """
@@ -149,3 +152,4 @@ def save_checkpoint(ckpt_dir,step,model_data,optimizer_data,scheduler_data,wandb
     artifact.add_file(optimizer_path)
     artifact.add_file(scheduler_path)
     wandb_run.log_artifact(artifact)
+       
