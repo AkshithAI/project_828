@@ -124,8 +124,8 @@ class Gate(nn.Module):
     def update_bias(self, current_load: torch.Tensor) -> None:
         """Update bias in-place using Loss-Free Balancing rule."""
         load_float = current_load.float()
-        average_load = load_float.sum() / self.num_experts
-        e = average_load - load_float
+        #average_load = load_float.sum() / self.num_experts
+        e = load_float.mean() - load_float # Test
         self.bias.add_(self.update_param * e)
     
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -137,6 +137,7 @@ class Gate(nn.Module):
         indices = torch.topk(biased_scores, self.topk, dim=-1)[1]
         current_load = torch.bincount(indices.flatten(), minlength=self.num_experts)
         weights = original_scores.gather(1, indices)
+        weights /= weights.sum(dim=-1, keepdim=True) # Test
         weights = weights * self.route_scale
 
         # Bias term update rule
@@ -409,8 +410,8 @@ class Attention(nn.Module):
         V = V.view(batch_size,seq_len,self.n_kv_heads,self.head_dim)
         
         Q,K = self.q_norm(Q),self.k_norm(K)
+        Q,K = self.rope(Q,K,offset = start_pos)
 
-        Q,K = self.rope(Q,K,offset = start_pos)          
         if self.inference:
             self.cache_k[:,start_pos:end_pos,:,:] = K
             self.cache_v[:,start_pos:end_pos,:,:] = V
