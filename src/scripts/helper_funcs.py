@@ -44,20 +44,21 @@ def get_latest_checkpoint_step(base_dir):
 
 def get_checkpoint_paths(base_dir, step):
     """
-    Get paths for model, optimizer, and scheduler checkpoints at a given step.
+    Get paths for model, optimizer, scheduler, and dataloader checkpoints at a given step.
     
     Args:
         base_dir: Path to checkpoint directory
         step: Step number
         
     Returns:
-        tuple: (model_path, optimizer_path, scheduler_path)
+        tuple: (model_path, optimizer_path, scheduler_path, dataloader_path)
     """
     base_dir = Path(base_dir)
     model_path = base_dir / f"model_{step:05d}.pt"
     optim_path = base_dir / f"optim_{step:05d}.pt"
     scheduler_path = base_dir / f"scheduler_{step:05d}.pt"
-    return model_path, optim_path, scheduler_path
+    dataloader_path = base_dir / f"dataloader_{step:05d}.pt"
+    return model_path, optim_path, scheduler_path, dataloader_path
 
 def load_checkpoint(base_dir, model, optimizer=None, scheduler=None, device="cuda"):
     """
@@ -71,16 +72,17 @@ def load_checkpoint(base_dir, model, optimizer=None, scheduler=None, device="cud
         device: Device to map tensors to
         
     Returns:
-        int: The step number to resume from, or 0 if no checkpoint found
+        tuple: (start_step, dataloader_state) - step number to resume from (0 if no checkpoint),
+               and dataloader state dict (None if no checkpoint or no dataloader state)
     """
     base_dir = Path(base_dir)
     latest_step = get_latest_checkpoint_step(base_dir)
     
     if latest_step is None:
         print("No checkpoint found. Starting from scratch.")
-        return 0
+        return 0, None
     
-    model_path, optim_path, scheduler_path = get_checkpoint_paths(base_dir, latest_step)
+    model_path, optim_path, scheduler_path, dataloader_path = get_checkpoint_paths(base_dir, latest_step)
     
     # Load model
     if model_path.exists():
@@ -89,7 +91,7 @@ def load_checkpoint(base_dir, model, optimizer=None, scheduler=None, device="cud
         model.load_state_dict(model_state)
     else:
         print(f"Warning: Model checkpoint not found at {model_path}")
-        return 0
+        return 0, None
     
     # Load optimizer
     if optimizer is not None and optim_path.exists():
@@ -107,11 +109,22 @@ def load_checkpoint(base_dir, model, optimizer=None, scheduler=None, device="cud
     elif scheduler is not None:
         print(f"Warning: Scheduler checkpoint not found at {scheduler_path}")
     
+    # Load dataloader state
+    dataloader_state = None
+    if dataloader_path.exists():
+        print(f"Loading dataloader checkpoint from {dataloader_path}")
+        dataloader_state = torch.load(dataloader_path, map_location="cpu", weights_only=False)
+        print(f"  -> Dataloader state: {dataloader_state.get('batches_yielded', 0)} batches, "
+              f"{dataloader_state.get('documents_processed', 0)} documents")
+    else:
+        print(f"Warning: Dataloader checkpoint not found at {dataloader_path}")
+    
     print(f"Resumed from step {latest_step}")
-    return latest_step
+    return latest_step, dataloader_state
 
 
-def save_checkpoint(ckpt_dir,step,model_data,optimizer_data,scheduler_data,wandb_run,meta_data=None):
+def save_checkpoint(ckpt_dir, step, model_data, optimizer_data, scheduler_data, wandb_run, 
+                    dataloader_state=None, meta_data=None):
     """
     Save model state dict with meta data
     
@@ -122,15 +135,17 @@ def save_checkpoint(ckpt_dir,step,model_data,optimizer_data,scheduler_data,wandb
         optimizer_data: optimizer's state info
         scheduler_data: scheduler's state info
         wandb_run: wandb object to save the session details
+        dataloader_state: dataloader's state info (dict from ResumableDataLoader.get_state())
         meta_data: meta data
     
     Returns:
         None
     """
-    os.makedirs(ckpt_dir,exist_ok=True)
-    model_path = os.path.join(ckpt_dir,f"model_{step:05d}.pt")
-    optimizer_path = os.path.join(ckpt_dir,f"optim_{step:05d}.pt")
-    scheduler_path = os.path.join(ckpt_dir,f"scheduler_{step:05d}.pt")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    model_path = os.path.join(ckpt_dir, f"model_{step:05d}.pt")
+    optimizer_path = os.path.join(ckpt_dir, f"optim_{step:05d}.pt")
+    scheduler_path = os.path.join(ckpt_dir, f"scheduler_{step:05d}.pt")
+    dataloader_path = os.path.join(ckpt_dir, f"dataloader_{step:05d}.pt")
 
     # For now not tracked
     checkpoint_data = {
@@ -142,14 +157,22 @@ def save_checkpoint(ckpt_dir,step,model_data,optimizer_data,scheduler_data,wandb
     if meta_data is not None:
         checkpoint_data.update(meta_data)
 
-    torch.save(model_data,model_path)
-    torch.save(optimizer_data,optimizer_path)
-    torch.save(scheduler_data,scheduler_path)
+    torch.save(model_data, model_path)
+    torch.save(optimizer_data, optimizer_path)
+    torch.save(scheduler_data, scheduler_path)
+    
+    # Save dataloader state
+    if dataloader_state is not None:
+        torch.save(dataloader_state, dataloader_path)
+        print(f"[Checkpoint] Saved dataloader state: {dataloader_state.get('batches_yielded', 0)} batches, "
+              f"{dataloader_state.get('documents_processed', 0)} documents")
 
     art_name = f"model-checkpoint-test-{step:06d}" 
-    artifact = wandb.Artifact(art_name,type = "model")    
+    artifact = wandb.Artifact(art_name, type="model")    
     artifact.add_file(model_path)
     artifact.add_file(optimizer_path)
     artifact.add_file(scheduler_path)
+    if dataloader_state is not None and os.path.exists(dataloader_path):
+        artifact.add_file(dataloader_path)
     wandb_run.log_artifact(artifact)
        

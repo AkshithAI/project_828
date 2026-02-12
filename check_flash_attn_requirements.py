@@ -108,17 +108,17 @@ def main():
     
     # Python version
     py_full, py_minor = get_python_version()
-    print(f"\n📌 Python Version: {py_full}")
+    print(f"\n Python Version: {py_full}")
     print(f"   Wheel tag: cp{py_minor.replace('.', '')}")
     
     # System info
-    print(f"\n📌 Platform: {platform.system()} {platform.machine()}")
+    print(f"\n Platform: {platform.system()} {platform.machine()}")
     
     # PyTorch info
     print("\n" + "-" * 60)
     torch_info = get_pytorch_version()
     if torch_info:
-        print(f"🔥 PyTorch Version: {torch_info['torch_version']}")
+        print(f"   PyTorch Version: {torch_info['torch_version']}")
         print(f"   Wheel tag: torch{torch_info['torch_major_minor'].replace('.', '')}")
         print(f"   CUDA Available: {torch_info['cuda_available']}")
         if torch_info['cuda_version']:
@@ -127,39 +127,39 @@ def main():
         if torch_info['cuda_arch_list']:
             print(f"   Supported CUDA Architectures: {', '.join(torch_info['cuda_arch_list'])}")
     else:
-        print("❌ PyTorch not installed!")
+        print("   PyTorch not installed!")
         print("   Install PyTorch first: pip install torch")
     
     # System CUDA
     print("\n" + "-" * 60)
     system_cuda = get_system_cuda_version()
     if system_cuda:
-        print(f"🖥️  System CUDA (nvcc): {system_cuda}")
+        print(f"  System CUDA (nvcc): {system_cuda}")
     else:
-        print("⚠️  nvcc not found in PATH (may not be needed for prebuilt wheels)")
+        print("  nvcc not found in PATH (may not be needed for prebuilt wheels)")
     
     # GPU info
     print("\n" + "-" * 60)
     gpus = get_gpu_info()
     if gpus:
-        print("🎮 GPU(s) Detected:")
+        print(" GPU(s) Detected:")
         for i, gpu in enumerate(gpus):
             print(f"   [{i}] {gpu['name']}")
             print(f"       Driver: {gpu['driver_version']}, Memory: {gpu['memory']}")
     else:
-        print("❌ No NVIDIA GPU detected or nvidia-smi not available")
+        print(" No NVIDIA GPU detected or nvidia-smi not available")
     
     # Flash attention status
     print("\n" + "-" * 60)
     flash_version = check_flash_attn_installed()
     if flash_version:
-        print(f"✅ Flash Attention installed: {flash_version}")
+        print(f" Flash Attention installed: {flash_version}")
     else:
-        print("❌ Flash Attention not installed")
+        print(" Flash Attention not installed")
     
     # Recommendation
     print("\n" + "=" * 60)
-    print("📦 RECOMMENDED WHEEL")
+    print(" RECOMMENDED WHEEL")
     print("=" * 60)
     
     if torch_info and torch_info['cuda_version']:
@@ -169,10 +169,10 @@ def main():
         wheel_pattern = get_flash_attn_wheel_name(py_minor, torch_v, cuda_v)
         print(f"\nLook for wheel matching: {wheel_pattern}")
         
-        print(f"\n🔗 Download from:")
+        print(f"\n Download from:")
         print(f"   https://github.com/Dao-AILab/flash-attention/releases")
         
-        print(f"\n📋 Your specifications:")
+        print(f"\n Your specifications:")
         print(f"   • Python: {py_minor} (cp{py_minor.replace('.', '')})")
         print(f"   • PyTorch: {torch_v} (torch{torch_v.replace('.', '')})")
         print(f"   • CUDA: {cuda_v} (cu{cuda_v.replace('.', '')})")
@@ -182,7 +182,7 @@ def main():
         torch_short = torch_v.replace('.', '')
         py_short = py_minor.replace('.', '')
         
-        print(f"\n💡 Installation options:")
+        print(f"\n Installation options:")
         print(f"\n   Option 1 - Build from source (slow but reliable):")
         print(f"   pip install flash-attn --no-build-isolation")
         
@@ -194,10 +194,10 @@ def main():
         print(f"   pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.3/flash_attn-2.7.3+cu{cuda_short}torch{torch_short}cxx11abiTRUE-cp{py_short}-cp{py_short}-linux_x86_64.whl")
         
     else:
-        print("\n⚠️  Cannot determine wheel requirements.")
-        print("   Make sure PyTorch with CUDA is installed first.")
-        print("\n   Install PyTorch with CUDA:")
-        print("   pip install torch --index-url https://download.pytorch.org/whl/cu128")
+        print("\n  Cannot determine wheel requirements.")
+        print("    Make sure PyTorch with CUDA is installed first.")
+        print("\n  Install PyTorch with CUDA:")
+        print("    pip install torch --index-url https://download.pytorch.org/whl/cu128")
     
     print("\n" + "=" * 60)
 

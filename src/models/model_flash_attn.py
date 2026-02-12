@@ -9,7 +9,7 @@ from flash_attn import flash_attn_func
 class RMS_Norm(nn.Module):
     def __init__(self,
                  num_features,
-                 eps : float = 1e-5,
+                 eps : float = 1e-8,
                  device : torch.device|None = None
         ) -> None:
         """
@@ -59,14 +59,14 @@ class MLPBlock(nn.Module):
             config.intermediate_size, config.hidden_dim, device = device, dtype=config.dtype
         )
         self.w3 = nn.Linear(
-            config.hidden_dim, 2 * config.intermediate_size, device = device, dtype=config.dtype
+            config.hidden_dim, config.intermediate_size, device = device, dtype=config.dtype
         )
         
         self.dropout = nn.Dropout(config.ffn_dropout)
         
     def forward(self,x : torch.Tensor) -> torch.Tensor:
         
-        return self.w2(self.dropout(swiglu(self.w1(x) * self.w3(x))))
+        return self.w2(self.dropout(swiglu(self.w1(x)) * self.w3(x)))
     
 
 class Expert(nn.Module):
@@ -89,14 +89,14 @@ class Expert(nn.Module):
             config.intermediate_size, config.hidden_dim, device = device, dtype=config.dtype
         )
         self.w3 = nn.Linear(
-            config.hidden_dim, 2 * config.intermediate_size, device = device, dtype=config.dtype
+            config.hidden_dim, config.intermediate_size, device = device, dtype=config.dtype
         )
         
         self.dropout = nn.Dropout(config.ffn_dropout)
         
     def forward(self,x : torch.Tensor) -> torch.Tensor:
         
-        return self.w2(self.dropout(swiglu(self.w1(x) * self.w3(x))))
+        return self.w2(self.dropout(swiglu(self.w1(x)) * self.w3(x)))
     
 
 class Gate(nn.Module):
@@ -124,8 +124,7 @@ class Gate(nn.Module):
     def update_bias(self, current_load: torch.Tensor) -> None:
         """Update bias in-place using Loss-Free Balancing rule."""
         load_float = current_load.float()
-        #average_load = load_float.sum() / self.num_experts
-        e = load_float.mean() - load_float # Test
+        e = torch.sign(load_float.mean() - load_float) 
         self.bias.add_(self.update_param * e)
     
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -137,7 +136,7 @@ class Gate(nn.Module):
         indices = torch.topk(biased_scores, self.topk, dim=-1)[1]
         current_load = torch.bincount(indices.flatten(), minlength=self.num_experts)
         weights = original_scores.gather(1, indices)
-        weights /= weights.sum(dim=-1, keepdim=True) # Test
+        weights /= weights.sum(dim=-1, keepdim=True) 
         weights = weights * self.route_scale
 
         # Bias term update rule
@@ -214,8 +213,7 @@ class MoE(nn.Module):
         routed_xprt_out = torch.zeros_like(x)
 
         for i,expert in enumerate(self.experts):
-            mask = (xprt_idxs == i).any(dim=-1)
-            if not mask.any():
+            if not counts[i]:
                 continue
             batch_idx,expert_idx = torch.where(xprt_idxs == i)
             routed_xprt_out[batch_idx] += xprt_weights[batch_idx,expert_idx,None] * expert(x[batch_idx])
@@ -378,10 +376,10 @@ class Attention(nn.Module):
         )
         if self.inference:
             self.register_buffer("cache_k", torch.zeros(
-                1, config.seq_len, config.num_key_value_heads, config.head_dim, device = device , dtype = config.dtype
+                1, config.initial_context_len, config.num_key_value_heads, config.head_dim, device = device , dtype = config.dtype
             ), persistent=False)
             self.register_buffer("cache_v", torch.zeros(
-                1, config.seq_len, config.num_key_value_heads, config.head_dim, device = device , dtype = config.dtype
+                1, config.initial_context_len, config.num_key_value_heads, config.head_dim, device = device , dtype = config.dtype
             ), persistent=False)
         self.q_norm = RMS_Norm(config.head_dim, device = device)
         self.k_norm = RMS_Norm(config.head_dim, device = device)    

@@ -1,8 +1,10 @@
 from ..models.model import GPT
 from ..models.model_flash_attn import GPT_FLASH
+from ..models.weight_init import count_parameters
 from .tokenizer import tokenizer
 from .configs.model_config import config
 import torch
+import os
 import torch.nn.functional as F
 from tqdm import tqdm
 
@@ -11,9 +13,8 @@ def display_expert_stats(model):
     Display expert usage statistics for each layer.
 
     """
-    print("\n" + "="*70)
+    print("\n" + "-"*50)
     print("Expert Usage Statistics".center(70))
-    print("="*70)
     
     for layer_idx, layer in enumerate(model.layers):
         if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'expert_counts'):
@@ -48,7 +49,6 @@ def display_expert_stats(model):
             print(f"  Load balance metrics:")
             print(f"    Mean: {mean_count:.1f} | Std Dev: {std_dev:.1f} | CV: {cv:.1f}%")
     
-    print("="*70)
 
 @torch.inference_mode()
 def generate(model,seed_txt,device,max_tokens=500,k=50,temp = 0.8):
@@ -91,6 +91,7 @@ def generate(model,seed_txt,device,max_tokens=500,k=50,temp = 0.8):
 
 
 if __name__ == '__main__':
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Device used : {device}")
     use_flash_attn = True
