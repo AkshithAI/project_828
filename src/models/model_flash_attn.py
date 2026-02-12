@@ -4,7 +4,6 @@ import torch.nn.functional as F
 import math
 from typing import Tuple
 from ..scripts.configs.model_config import ModelConfig
-from flash_attn import flash_attn_func
 
 class RMS_Norm(nn.Module):
     def __init__(self,
@@ -226,8 +225,16 @@ def apply_rope(x : torch.Tensor,
                cos : torch.Tensor,
                sin : torch.Tensor
     ) -> torch.Tensor:
-    cos = cos.unsqueeze(0).unsqueeze(-2).to(x.device).to(x.dtype)
-    sin = sin.unsqueeze(0).unsqueeze(-2).to(x.device).to(x.dtype)
+    if cos.dim() == 2:
+        # (seq_len, head_dim//2) -> (1, seq_len, 1, head_dim//2)
+        cos = cos.unsqueeze(0).unsqueeze(-2)
+        sin = sin.unsqueeze(0).unsqueeze(-2)
+    else:
+        # (batch, seq_len, head_dim//2) -> (batch, seq_len, 1, head_dim//2)
+        cos = cos.unsqueeze(-2)
+        sin = sin.unsqueeze(-2)
+    cos = cos.to(x.device).to(x.dtype)
+    sin = sin.to(x.device).to(x.dtype)
     x1,x2 = torch.chunk(x,2,dim = -1)
     o1 = x1 * cos - x2 * sin
     o2 = x1 * sin + x2 * cos
@@ -240,7 +247,7 @@ class RotaryEmbedding(nn.Module):
                  base : int,
                  dtype : torch.dtype,
                  initial_context_len : int = 2048,
-                 max_context_len : int = 4096,
+                 max_context_len : int = 2048,
                  ntk_alpha : float = 1.0,
                  ntk_beta : float = 32.0,
                  scaling_factor : float = 1.0,
@@ -323,11 +330,16 @@ class RotaryEmbedding(nn.Module):
     def forward(self,
                 q : torch.Tensor,
                 k : torch.Tensor,
-                offset : int
+                offset : int = 0,
+                position_ids : torch.Tensor | None = None,
         ) -> Tuple[torch.Tensor,torch.Tensor]:
         batch_size,seq_len,_,_ = q.shape
-        cos = self.cos[offset:offset+seq_len,:]
-        sin = self.sin[offset:offset+seq_len,:]
+        if position_ids is not None:
+            cos = self.cos[position_ids]
+            sin = self.sin[position_ids]
+        else:
+            cos = self.cos[offset:offset+seq_len,:]
+            sin = self.sin[offset:offset+seq_len,:]
 
         query_shape = q.shape
         q = q.view(batch_size,seq_len,-1,self.head_dim)
@@ -361,6 +373,7 @@ class Attention(nn.Module):
         self.n_kv_heads = config.num_key_value_heads
         self.head_dim = config.head_dim
         self.inference = inference
+        self.max_cache_len = config.max_context_len
        
         self.wq = nn.Linear(
             config.hidden_dim, config.num_attn_heads * config.head_dim, device = device, dtype = config.dtype
@@ -375,12 +388,8 @@ class Attention(nn.Module):
             config.num_attn_heads * config.head_dim, config.hidden_dim, device = device, dtype = config.dtype
         )
         if self.inference:
-            self.register_buffer("cache_k", torch.zeros(
-                1, config.initial_context_len, config.num_key_value_heads, config.head_dim, device = device , dtype = config.dtype
-            ), persistent=False)
-            self.register_buffer("cache_v", torch.zeros(
-                1, config.initial_context_len, config.num_key_value_heads, config.head_dim, device = device , dtype = config.dtype
-            ), persistent=False)
+            self.register_buffer("cache_k", None, persistent=False)
+            self.register_buffer("cache_v", None, persistent=False)
         self.q_norm = RMS_Norm(config.head_dim, device = device)
         self.k_norm = RMS_Norm(config.head_dim, device = device)    
         self.rope = RotaryEmbedding(
@@ -395,12 +404,37 @@ class Attention(nn.Module):
             device = device
         )
         
+    def reset_cache(self, batch_size: int = 1) -> None:
+        """Allocate (or reallocate) KV cache for the given batch size."""
+        if self.inference:
+            device = self.wq.weight.device
+            dtype = self.wq.weight.dtype
+            self.cache_k = torch.zeros(
+                batch_size, self.max_cache_len, self.n_kv_heads, self.head_dim,
+                device=device, dtype=dtype,
+            )
+            self.cache_v = torch.zeros(
+                batch_size, self.max_cache_len, self.n_kv_heads, self.head_dim,
+                device=device, dtype=dtype,
+            )
+
     def forward(self,
                 x : torch.Tensor,
                 start_pos : int = 0,
+                position_ids : torch.Tensor | None = None,
+                attn_mask : torch.Tensor | None = None,
         ) -> torch.Tensor:
         batch_size,seq_len,_ = x.shape
         end_pos = start_pos + seq_len
+
+        if self.inference:
+            if self.cache_k is None or self.cache_k.shape[0] != batch_size:
+                self.reset_cache(batch_size)
+            assert end_pos <= self.max_cache_len, (
+                f"Sequence length {end_pos} exceeds max cache length {self.max_cache_len}. "
+                f"Increase max_context_len in ModelConfig."
+            )
+
         Q,K,V = self.wq(x),self.wk(x),self.wv(x)
         
         Q = Q.view(batch_size,seq_len,self.n_heads,self.head_dim)
@@ -408,7 +442,7 @@ class Attention(nn.Module):
         V = V.view(batch_size,seq_len,self.n_kv_heads,self.head_dim)
         
         Q,K = self.q_norm(Q),self.k_norm(K)
-        Q,K = self.rope(Q,K,offset = start_pos)
+        Q,K = self.rope(Q,K,offset = start_pos,position_ids = position_ids)
 
         if self.inference:
             self.cache_k[:,start_pos:end_pos,:,:] = K
@@ -422,11 +456,13 @@ class Attention(nn.Module):
 
             attn_out = F.scaled_dot_product_attention(
                 Q,K,V,
-                is_causal=(seq_len > 1),
+                attn_mask=attn_mask,
+                is_causal=(seq_len > 1 and attn_mask is None),
                 enable_gqa=(self.n_heads != self.n_kv_heads)
             )
             attn_out = attn_out.transpose(1,2)
         else:
+            from flash_attn import flash_attn_func
             attn_out = flash_attn_func(Q,K,V,causal = True)
         attn_out = attn_out.view(batch_size,seq_len,-1)
         attn_out = self.wo(attn_out)
@@ -454,8 +490,8 @@ class TransformerDecoderBLK(nn.Module):
         self.attention = Attention(config,device,inference)
         self.mlp = MoE(config,device)
 
-    def forward(self,x,start_pos : int = 0): 
-        x = x + self.attention(self.norm1(x),start_pos)        
+    def forward(self,x,start_pos : int = 0,position_ids = None,attn_mask = None): 
+        x = x + self.attention(self.norm1(x),start_pos,position_ids,attn_mask)        
         x = x + self.mlp(self.norm2(x))
         return x
         
@@ -474,6 +510,7 @@ class GPT_FLASH(nn.Module):
                 inference: whether to enable KV caching for inference
         """
         super().__init__()
+        self.inference = inference
         self.norm = RMS_Norm(config.hidden_dim,device = device)
         self.embeddings = nn.Embedding(
                 config.vocab_size, 
@@ -487,13 +524,21 @@ class GPT_FLASH(nn.Module):
         )
         self.unembedding = nn.Linear(config.hidden_dim,config.vocab_size,device = device, dtype=config.dtype)
 
+    def reset_cache(self, batch_size: int = 1) -> None:
+        """Reset KV caches across all layers. Call before each new generation."""
+        if self.inference:
+            for layer in self.layers:
+                layer.attention.reset_cache(batch_size)
+
     def forward(self,
                 x : torch.Tensor,
                 start_pos : int = 0,
+                position_ids : torch.Tensor | None = None,
+                attn_mask : torch.Tensor | None = None,
         ) -> torch.Tensor:
         x = self.embeddings(x)
         for layer in self.layers:
-            x = layer(x,start_pos)
+            x = layer(x,start_pos,position_ids,attn_mask)
         x = self.norm(x)
         x = self.unembedding(x)  
         return x
