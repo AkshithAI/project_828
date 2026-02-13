@@ -122,13 +122,13 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
+# Assets folder
+assets/
+
 # PyTorch model checkpoints
 *.pth
 *.pt
 *.ckpt
-
-# But allow the specific checkpoint in assets folder
-!assets/*.pt
 
 # Weights & Biases
 wandb/
@@ -138,10 +138,6 @@ wandb/
 
 # macOS
 .DS_Store
-
-# Model weights and data
-assets/ckpts/*.pth
-assets/ckpts/*.pt
 
 # Temporary files
 temp.txt
