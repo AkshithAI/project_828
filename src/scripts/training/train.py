@@ -52,8 +52,10 @@ def train(config, train_data, val_data, start_step=0):
         patience = 8
         optimizer.zero_grad()
 
+        # When resuming, offset by 1 to avoid reprocessing the checkpointed step
+        resume_offset = 1 if start_step > 0 else 0
         for i, batch in enumerate(tqdm(train_data, desc="Training")):
-            step = i + start_step  
+            step = i + start_step + resume_offset
             batch = batch.to(config.device,non_blocking=True).long()
             inputs = batch[:,:-1].contiguous()
             targets = batch[:,1:].contiguous()
@@ -147,26 +149,7 @@ def train(config, train_data, val_data, start_step=0):
         )
         print(f"[Interrupt] Checkpoint saved successfully.")
         wandb_run.finish()
-    except Exception as e:
-        print(f"ERROR : {e}")
-        # Attempt emergency save
-        try:
-            print(f"[Error] Attempting emergency checkpoint save at step {step}...")
-            dataloader_state = train_data.get_state()
-            save_checkpoint(
-                base_dir,
-                step,
-                model_data=model.state_dict(),
-                optimizer_data=optimizer.state_dict(),
-                scheduler_data=scheduler.state_dict(),
-                wandb_run=wandb_run,
-                dataloader_state=dataloader_state,
-                meta_data=meta_data
-            )
-            print(f"[Error] Emergency checkpoint saved.")
-        except Exception as save_error:
-            print(f"[Error] Failed to save emergency checkpoint: {save_error}")
-        raise 
+
 
 
 if __name__ == '__main__' : 
@@ -188,7 +171,7 @@ if __name__ == '__main__' :
       model.parameters(),
       lr=config.learning_rate,
       betas=(0.9, 0.95),
-      weight_decay=0.01,
+      weight_decay=0.1,
       eps=1e-8 
     )
     scheduler = get_cosine_schedule_with_warmup(

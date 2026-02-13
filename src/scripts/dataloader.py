@@ -162,19 +162,22 @@ class ResumableDataLoader:
     1. Wraps the underlying DataLoader
     2. Tracks batch-level progress
     3. Provides save/load state functionality
-    4. Supports skipping batches when resuming
+    
+    Resumption is handled at the dataset level: on resume, the HuggingFace stream
+    skips already-processed documents, and the token buffer is restored. This gives
+    exact sample-level resumption without needing batch-level skipping.
     
     Usage:
-        loader = ResumableDataLoader(dataset, batch_size=4)
+        # Use the factory function for full resumption support:
+        train_loader, val_loader = create_resumable_dataloaders(
+            repo_id="...",
+            train_state=saved_state,  # from a previous train_loader.get_state()
+        )
         
-        # To resume:
-        state = torch.load("dataloader_state.pt")
-        loader.load_state(state)
-        
-        for batch in loader:
+        for batch in train_loader:
             ...
             # Save periodically:
-            state = loader.get_state()
+            state = train_loader.get_state()
             torch.save(state, "dataloader_state.pt")
     """
     
@@ -203,9 +206,6 @@ class ResumableDataLoader:
             pin_memory=pin_memory,
             num_workers=num_workers
         )
-        
-        # Track batches to skip on resumption
-        self._skip_batches = 0
     
     @staticmethod
     def _default_collate(batch):
@@ -221,55 +221,28 @@ class ResumableDataLoader:
     
     def load_state(self, state_dict: Dict[str, Any]) -> None:
         """
-        Load state from a checkpoint.
+        Load state counters from a checkpoint for tracking purposes.
         
-        Note: This should be called BEFORE iterating. The dataset needs to be
-        recreated with the correct skip_documents for proper resumption.
+        WARNING: This only restores internal counters. For streaming datasets,
+        the dataset must be recreated with the correct skip_documents parameter
+        to actually resume from the right position in the stream.
+        Use create_resumable_dataloaders() for full resumption.
         
         Args:
             state_dict: State dictionary from get_state()
         """
         self.dataset.state = DataLoaderState.from_dict(state_dict)
-        self._skip_batches = self.dataset.state.batches_yielded
         print(f"[DataLoader] Loaded state: {self.dataset.state.batches_yielded} batches, "
               f"{self.dataset.state.documents_processed} documents processed")
     
     def __iter__(self):
         """
-        Iterate over batches, optionally skipping if resuming.
+        Iterate over batches. Resumption is handled at the dataset level via
+        document skipping and buffer restoration — no batch-level skipping needed.
         """
-        batch_iter = iter(self._dataloader)
-        
-        # Skip batches if resuming (this handles the edge case where we saved
-        # mid-way through but the dataset was recreated from documents)
-        # Note: In most cases, the dataset skip handles this, but this is a safety net
-        skipped = 0
-        while skipped < self._skip_batches:
-            try:
-                next(batch_iter)
-                skipped += 1
-                if skipped % 1000 == 0:
-                    print(f"[DataLoader] Skipped {skipped}/{self._skip_batches} batches...")
-            except StopIteration:
-                print(f"[DataLoader] Warning: Ran out of data while skipping. "
-                      f"Skipped {skipped}/{self._skip_batches}")
-                break
-        
-        if self._skip_batches > 0:
-            print(f"[DataLoader] Finished skipping {skipped} batches, resuming training...")
-            self._skip_batches = 0  # Reset so subsequent epochs don't skip
-        
-        # Yield remaining batches
-        for batch in batch_iter:
+        for batch in self._dataloader:
             self.dataset.state.batches_yielded += 1
             yield batch
-    
-    def __len__(self):
-        """
-        Note: For streaming datasets, length is unknown.
-        This returns the number of batches yielded so far.
-        """
-        return self.dataset.state.batches_yielded
 
 
 def create_resumable_dataloaders(
@@ -375,23 +348,25 @@ class CustomDataset(IterableDataset):
                 buffer = buffer[self.context_length + 1:]
                 yield chunk
 
-repo_id = "karpathy/fineweb-edu-100b-shuffle"
-train_files = get_train_files(repo_id)
-ds_for_train, ds_for_val = get_hf_datasets(train_files)
-dataset_train = CustomDataset(ds_for_train)
-dataset_val = CustomDataset(ds_for_val)
-train_data = DataLoader(
-      dataset_train,
-      batch_size = 4,
-      collate_fn = collate_fn,
-      pin_memory=True,
-      num_workers=0,
-)
-val_data = DataLoader(
-      dataset_val,
-      batch_size = 16,
-      collate_fn = collate_fn,
-      pin_memory=True,
-      num_workers=0,
-)        
+# Legacy usage (guarded to prevent execution on import):
+if __name__ == '__main__':
+    repo_id = "karpathy/fineweb-edu-100b-shuffle"
+    train_files = get_train_files(repo_id)
+    ds_for_train, ds_for_val = get_hf_datasets(train_files)
+    dataset_train = CustomDataset(ds_for_train)
+    dataset_val = CustomDataset(ds_for_val)
+    train_data = DataLoader(
+          dataset_train,
+          batch_size = 4,
+          collate_fn = collate_fn,
+          pin_memory=True,
+          num_workers=0,
+    )
+    val_data = DataLoader(
+          dataset_val,
+          batch_size = 16,
+          collate_fn = collate_fn,
+          pin_memory=True,
+          num_workers=0,
+    )        
 
