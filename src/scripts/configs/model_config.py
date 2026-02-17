@@ -1,6 +1,7 @@
 import torch
 from ..tokenizer import tokenizer
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import List, Optional
 
 @dataclass
 class ModelConfig:
@@ -32,8 +33,127 @@ class ModelConfig:
         local_rank : int = -1
         global_rank : int = -1
 
+
+@dataclass
+class DatasetEntry:
+    """Configuration for a single dataset in the mix."""
+    name: str                          
+    repo_id: str                       
+    weight: int                        
+    format_fn: str = "default"         
+    config_name: Optional[str] = None  
+    split: str = "train"               
+    streaming: bool = True
+
+
+@dataclass
+class PhaseConfig:
+    """Per-phase training hyperparameters and dataset specification."""
+    phase_name: str                    
+    phase_num: int = 1                 
+
+    # --- Learning rate schedule ---
+    peak_lr: float = 3e-4
+    min_lr: float = 3e-5
+    warmup_steps: int = 2000
+    total_steps: int = 34_300             
+    scheduler_type: str = "wsd"           
+    wsd_stable_frac: float = 0.76         
+
+    # --- Batch / accumulation ---
+    micro_batch_size: int = 64
+    grad_accum_steps: int = 8             
+    grad_clip: float = 1.0
+
+    # --- Validation / early stopping ---
+    val_interval: int = 2500              
+    val_steps: int = 5000                 
+    patience: int = 5                     
+
+    # --- Datasets ---
+    datasets: List[DatasetEntry] = field(default_factory=list)
+
+    def effective_batch_size(self) -> int:
+        return self.micro_batch_size * self.grad_accum_steps
+
+
+# ──────────────────────────────────────────────────────────────
+# Phase 1:  72B tokens  —  Math / Science / General Knowledge
+# ──────────────────────────────────────────────────────────────
+#   effective_batch = 128 * 8 = 1024 seqs
+#   tokens_per_step ≈ 1024 * 2048 ≈ 2.1M
+#   total_steps     ≈ 72B / 2.1M ≈ 34_300  # 68,664 for 64 micro batch
+# ──────────────────────────────────────────────────────────────
+PHASE_1_CONFIG = PhaseConfig(
+    phase_name="phase_1_math_science",
+    phase_num=1,
+    peak_lr=3e-4,
+    min_lr=3e-5,
+    warmup_steps=2000,
+    total_steps=68_664,
+    scheduler_type="wsd",
+    wsd_stable_frac=0.76,
+    micro_batch_size=128,
+    grad_accum_steps=8,
+    grad_clip=1.0,
+    val_interval=2500,
+    val_steps=5000,
+    patience=5,
+    datasets=[
+        DatasetEntry(
+            name="openmath-instruct-2",
+            repo_id="nvidia/OpenMathInstruct-2",
+            weight=25,
+            format_fn="openmath",
+        ),
+        DatasetEntry(
+            name="proof-pile-2",
+            repo_id="EleutherAI/proof-pile-2",
+            weight=20,
+            format_fn="default",
+            config_name="algebraic-stack",
+        ),
+        DatasetEntry(
+            name="fineweb-edu",
+            repo_id="HuggingFaceFW/fineweb-edu",
+            weight=30,
+            format_fn="fineweb_edu",
+        ),
+        DatasetEntry(
+            name="cosmopedia-v2",
+            repo_id="HuggingFaceTB/cosmopedia-v2",
+            weight=25,
+            format_fn="default",
+        ),
+    ],
+)
+
+# ──────────────────────────────────────────────────────────────
+# Phase 2:  18B tokens  —  Code / Instruction / Replay
+# (Placeholder — user will configure after Phase 1 completes)
+# ──────────────────────────────────────────────────────────────
+PHASE_2_CONFIG = PhaseConfig(
+    phase_name="phase_2_code",
+    phase_num=2,
+    peak_lr=1e-4,
+    min_lr=1e-5,
+    warmup_steps=500,
+    total_steps=8_600,
+    scheduler_type="cosine",
+    wsd_stable_frac=0.0,           # not used for cosine
+    micro_batch_size=128,
+    grad_accum_steps=8,
+    grad_clip=1.0,
+    val_interval=1500,
+    val_steps=5000,
+    patience=5,
+    datasets=[],                    # to be filled after Phase 1
+)
+
+
 config = ModelConfig()
 
 if __name__ == '__main__':
     print(config)
+    print(PHASE_1_CONFIG)
     

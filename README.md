@@ -55,6 +55,7 @@ A production-ready Mixture-of-Experts (MoE) transformer model implementation fea
 - **Comprehensive Logging** - Weights & Biases integration with detailed metrics
 - **Production-Ready** - Enterprise-grade code with extensive error handling
 - **NeMo Curator Integration** - Robust data preprocessing pipeline with filtering, cleaning, and deduplication
+- **Best-Fit Bin Packing** - Segment-tree accelerated document packing with CLI, overflow splitting, and HF Hub upload
 
 ---
 
@@ -204,6 +205,34 @@ python src/scripts/data/preprocess.py --data_tag wiki --download_dir ./data
 Edit `src/scripts/configs/preprocess.json` to enable/disable processing stages.
 
 **[Full Documentation →](src/scripts/data/README.md)**
+
+### Document Packing
+
+The project includes a **best-fit bin packing** pipeline (`packing.py`) for packing variable-length tokenized documents into fixed-capacity bins. This maximises GPU utilisation during training by eliminating most padding waste.
+
+**Key features:**
+- Numba-accelerated segment tree — $O(N \log L)$ packing for millions of documents
+- Overflow splitting — documents longer than `max_seq_len` are split at tokenization, then segments are packed independently
+- Single `--max_seq_len` parameter ensures tokenization truncation and bin capacity always match
+- Carry-forward streaming upload prevents bins from being split at batch boundaries
+- Packing statistics logged after every run (utilisation %, bins, skipped docs)
+
+**Quick usage:**
+
+```bash
+# End-to-end: tokenize → pack → upload
+python -m project_828.src.scripts.data.packing all \
+    --repo_id codeparrot/codeparrot-clean \
+    --upload_repo_id username/packed-dataset \
+    --max_seq_len 2048
+
+# Or run stages independently
+python -m project_828.src.scripts.data.packing tokenize --repo_id codeparrot/codeparrot-clean --max_seq_len 2048
+python -m project_828.src.scripts.data.packing pack --max_seq_len 2048
+python -m project_828.src.scripts.data.packing upload --repo_id username/packed-dataset
+```
+
+**[Full Documentation →](src/scripts/data/README.md#best-fit-bin-packing-pipeline)**
 
 ---
 
@@ -372,9 +401,10 @@ project_828/
 │       │   ├── train.py          # Single GPU training loop
 │       │   └── distributed_training.py  # DeepSpeed distributed training
 │       └── data/
+│           ├── packing.py        # Best-fit bin packing pipeline (tokenize/pack/upload)
 │           ├── preprocess.py     # NeMo Curator data preprocessing
 │           ├── preprocess.json   # Preprocessing configuration
-│           └── README.md         # Data curation documentation
+│           └── README.md         # Data curation & packing documentation
 ├── assets/
 │   ├── train_logs/               # Training log screenshots
 │   │   ├── Load Balancing Logs/  # Expert utilization visualizations

@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import math
 from typing import Tuple
 from ..scripts.configs.model_config import ModelConfig
+from flash_attn import flash_attn_func
 
 class RMS_Norm(nn.Module):
     def __init__(self,
@@ -462,7 +463,6 @@ class Attention(nn.Module):
             )
             attn_out = attn_out.transpose(1,2)
         else:
-            from flash_attn import flash_attn_func
             attn_out = flash_attn_func(Q,K,V,causal = True)
         attn_out = attn_out.view(batch_size,seq_len,-1)
         attn_out = self.wo(attn_out)

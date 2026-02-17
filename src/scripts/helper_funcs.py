@@ -72,15 +72,17 @@ def load_checkpoint(base_dir, model, optimizer=None, scheduler=None, device="cud
         device: Device to map tensors to
         
     Returns:
-        tuple: (start_step, dataloader_state) - step number to resume from (0 if no checkpoint),
-               and dataloader state dict (None if no checkpoint or no dataloader state)
+        tuple: (start_step, dataloader_state, phase) 
+               - step number to resume from (0 if no checkpoint)
+               - dataloader state dict (None if no checkpoint or no dataloader state)
+               - phase number (1 if no metadata)
     """
     base_dir = Path(base_dir)
     latest_step = get_latest_checkpoint_step(base_dir)
     
     if latest_step is None:
         print("No checkpoint found. Starting from scratch.")
-        return 0, None
+        return 0, None, 1
     
     model_path, optim_path, scheduler_path, dataloader_path = get_checkpoint_paths(base_dir, latest_step)
     
@@ -91,7 +93,7 @@ def load_checkpoint(base_dir, model, optimizer=None, scheduler=None, device="cud
         model.load_state_dict(model_state)
     else:
         print(f"Warning: Model checkpoint not found at {model_path}")
-        return 0, None
+        return 0, None, 1
     
     # Load optimizer
     if optimizer is not None and optim_path.exists():
@@ -111,20 +113,36 @@ def load_checkpoint(base_dir, model, optimizer=None, scheduler=None, device="cud
     
     # Load dataloader state
     dataloader_state = None
+    phase = 1
     if dataloader_path.exists():
         print(f"Loading dataloader checkpoint from {dataloader_path}")
         dataloader_state = torch.load(dataloader_path, map_location="cpu", weights_only=False)
-        print(f"  -> Dataloader state: {dataloader_state.get('batches_yielded', 0)} batches, "
-              f"{dataloader_state.get('documents_processed', 0)} documents")
+        # Detect format version
+        version = dataloader_state.get("version", 1)
+        if version >= 2:
+            # New MixerState format
+            phase = dataloader_state.get("phase", 1)
+            ds_states = dataloader_state.get("dataset_states", {})
+            total_docs = sum(s.get("documents_processed", 0) for s in ds_states.values())
+            print(f"  -> Mixer state (v{version}): phase={phase}, "
+                  f"{dataloader_state.get('samples_yielded', 0)} samples, "
+                  f"{total_docs} total documents across {len(ds_states)} datasets")
+            for ds_name, ds_s in ds_states.items():
+                print(f"     {ds_name}: {ds_s.get('documents_processed', 0)} docs, "
+                      f"{len(ds_s.get('buffer_tokens', []))} buffered tokens")
+        else:
+            # Legacy single-dataset format
+            print(f"  -> Legacy state: {dataloader_state.get('batches_yielded', 0)} batches, "
+                  f"{dataloader_state.get('documents_processed', 0)} documents")
     else:
         print(f"Warning: Dataloader checkpoint not found at {dataloader_path}")
     
-    print(f"Resumed from step {latest_step}")
-    return latest_step, dataloader_state
+    print(f"Resumed from step {latest_step} (phase {phase})")
+    return latest_step, dataloader_state, phase
 
 
 def save_checkpoint(ckpt_dir, step, model_data, optimizer_data, scheduler_data, wandb_run, 
-                    dataloader_state=None, meta_data=None):
+                    dataloader_state=None, meta_data=None, phase=1):
     """
     Save model state dict with meta data
     
@@ -137,6 +155,7 @@ def save_checkpoint(ckpt_dir, step, model_data, optimizer_data, scheduler_data, 
         wandb_run: wandb object to save the session details
         dataloader_state: dataloader's state info (dict from ResumableDataLoader.get_state())
         meta_data: meta data
+        phase: current training phase number
     
     Returns:
         None
@@ -152,7 +171,8 @@ def save_checkpoint(ckpt_dir, step, model_data, optimizer_data, scheduler_data, 
         "model": model_data,
         "optimizer": optimizer_data,
         "scheduler": scheduler_data,
-        "step": step
+        "step": step,
+        "phase": phase,
     }
     if meta_data is not None:
         checkpoint_data.update(meta_data)
@@ -161,11 +181,22 @@ def save_checkpoint(ckpt_dir, step, model_data, optimizer_data, scheduler_data, 
     torch.save(optimizer_data, optimizer_path)
     torch.save(scheduler_data, scheduler_path)
     
-    # Save dataloader state
+    # Save dataloader state (inject phase number for resume detection)
     if dataloader_state is not None:
+        dataloader_state["phase"] = phase
         torch.save(dataloader_state, dataloader_path)
-        print(f"[Checkpoint] Saved dataloader state: {dataloader_state.get('batches_yielded', 0)} batches, "
-              f"{dataloader_state.get('documents_processed', 0)} documents")
+        # Log summary depending on state format
+        version = dataloader_state.get("version", 1)
+        if version >= 2:
+            ds_states = dataloader_state.get("dataset_states", {})
+            total_docs = sum(s.get("documents_processed", 0) for s in ds_states.values())
+            print(f"[Checkpoint] Saved mixer state (phase {phase}): "
+                  f"{dataloader_state.get('samples_yielded', 0)} samples, "
+                  f"{total_docs} docs across {len(ds_states)} datasets")
+        else:
+            print(f"[Checkpoint] Saved dataloader state: "
+                  f"{dataloader_state.get('batches_yielded', 0)} batches, "
+                  f"{dataloader_state.get('documents_processed', 0)} documents")
 
     art_name = f"model-checkpoint-test-{step:06d}" 
     artifact = wandb.Artifact(art_name, type="model")    

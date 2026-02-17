@@ -1,17 +1,83 @@
 import torch
+import math
 from datasets import load_dataset
 from huggingface_hub import list_repo_files
 from .tokenizer import tokenizer
 from torch.utils.data import IterableDataset, DataLoader
-from .configs.model_config import config
-from typing import Optional, Dict, Any, List
+from .configs.model_config import config, PhaseConfig, DatasetEntry
+from typing import Optional, Dict, Any, List, Callable, Tuple
 from dataclasses import dataclass, field, asdict
 
+
+# ═══════════════════════════════════════════════════════════════
+#  Format functions  — one per dataset layout
+# ═══════════════════════════════════════════════════════════════
+
+def _fmt_default(row: Dict[str, Any]) -> Optional[str]:
+    """Most datasets: use the 'text' column."""
+    text = row.get("text", "")
+    return text if text else None
+
+
+def _fmt_openmath(row: Dict[str, Any]) -> Optional[str]:
+    """nvidia/OpenMathInstruct-2: problem + solution."""
+    problem = row.get("problem", "")
+    solution = row.get("generated_solution", "")
+    if not problem and not solution:
+        return None
+    return f"{problem}\n\n{solution}"
+
+
+def _fmt_fineweb_edu(row: Dict[str, Any]) -> Optional[str]:
+    """HuggingFaceFW/fineweb-edu — only keep top-10% (score >= 3.0)."""
+    score = row.get("score", 0.0)
+    if score is None or score < 3.0:
+        return None            
+    return row.get("text", "") or None
+
+
+def _fmt_starcoder(row: Dict[str, Any]) -> Optional[str]:
+    """bigcode/the-stack-v2: use 'content' column."""
+    content = row.get("content", "")
+    return content if content else None
+
+
+def _fmt_magicoder(row: Dict[str, Any]) -> Optional[str]:
+    """ise-uiuc/Magicoder-OSS-Instruct-75K: problem + solution."""
+    problem = row.get("problem", "")
+    solution = row.get("solution", "")
+    if not problem and not solution:
+        return None
+    return f"{problem}\n\n{solution}"
+
+
+def _fmt_stackexchange(row: Dict[str, Any]) -> Optional[str]:
+    """HuggingFaceH4/stack-exchange-preferences: question + chosen answer."""
+    question = row.get("question", "")
+    chosen = row.get("chosen", "")
+    if not question:
+        return None
+    return f"{question}\n\n{chosen}" if chosen else question
+
+
+FORMAT_FNS: Dict[str, Callable[[Dict[str, Any]], Optional[str]]] = {
+    "default": _fmt_default,
+    "openmath": _fmt_openmath,
+    "fineweb_edu": _fmt_fineweb_edu,
+    "starcoder": _fmt_starcoder,
+    "magicoder": _fmt_magicoder,
+    "stackexchange": _fmt_stackexchange,
+}
+
+
+# ═══════════════════════════════════════════════════════════════
+#  State containers
+# ═══════════════════════════════════════════════════════════════
 
 @dataclass
 class DataLoaderState:
     """
-    State container for resumable dataloader.
+    State container for resumable dataloader (single-dataset).
     
     Attributes:
         samples_yielded: Total number of complete samples (batches * batch_size) yielded
@@ -36,6 +102,74 @@ class DataLoaderState:
     def from_dict(cls, data: Dict[str, Any]) -> 'DataLoaderState':
         """Create state from dictionary."""
         return cls(**data)
+
+
+@dataclass
+class DatasetStreamState:
+    """Per-dataset state within a weighted mixer."""
+    name: str
+    documents_processed: int = 0      
+    buffer_tokens: List[int] = field(default_factory=list)
+    weight: int = 1                   
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'DatasetStreamState':
+        return cls(**data)
+
+
+@dataclass
+class MixerState:
+    """
+    Full state of a WeightedMixerDataset — everything needed for exact resumption.
+
+    Invariants kept across save / load:
+        - ``dataset_states[name].documents_processed`` counts *all* raw HF rows
+          seen from that stream, including rows filtered out by the format function.
+          This makes ``.skip(n)`` always skip exactly *n* raw rows — O(1) per row.
+        - ``draw_cycle_position`` is the index into the deterministic round-robin
+          schedule, so the draw order is identical after resume.
+        - ``samples_yielded`` counts total chunks yielded globally (for logging).
+    """
+    samples_yielded: int = 0
+    batches_yielded: int = 0
+    context_length: int = 2048
+    batch_size: int = 128
+    draw_cycle_position: int = 0
+    dataset_states: Dict[str, DatasetStreamState] = field(default_factory=dict)
+    version: int = 2                  
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = {
+            "version": self.version,
+            "samples_yielded": self.samples_yielded,
+            "batches_yielded": self.batches_yielded,
+            "context_length": self.context_length,
+            "batch_size": self.batch_size,
+            "draw_cycle_position": self.draw_cycle_position,
+            "dataset_states": {
+                k: v.to_dict() for k, v in self.dataset_states.items()
+            },
+        }
+        return d
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'MixerState':
+        ds_states = {
+            k: DatasetStreamState.from_dict(v)
+            for k, v in data.get("dataset_states", {}).items()
+        }
+        return cls(
+            samples_yielded=data.get("samples_yielded", 0),
+            batches_yielded=data.get("batches_yielded", 0),
+            context_length=data.get("context_length", 2048),
+            batch_size=data.get("batch_size", 128),
+            draw_cycle_position=data.get("draw_cycle_position", 0),
+            dataset_states=ds_states,
+            version=data.get("version", 2),
+        )
 
 
 def get_train_files(repo_id):
@@ -108,7 +242,6 @@ class ResumableDataset(IterableDataset):
         super().__init__()
         self.data = data
         self.context_length = context_length
-        # External state reference - this allows the dataloader wrapper to track state
         self.state = state if state is not None else DataLoaderState(context_length=context_length)
         
     def _prepare_data_with_state(self):
@@ -157,33 +290,20 @@ class ResumableDataset(IterableDataset):
 class ResumableDataLoader:
     """
     A wrapper around DataLoader that provides state management for resumption.
-    
-    This class:
-    1. Wraps the underlying DataLoader
-    2. Tracks batch-level progress
-    3. Provides save/load state functionality
-    
-    Resumption is handled at the dataset level: on resume, the HuggingFace stream
-    skips already-processed documents, and the token buffer is restored. This gives
-    exact sample-level resumption without needing batch-level skipping.
-    
-    Usage:
-        # Use the factory function for full resumption support:
-        train_loader, val_loader = create_resumable_dataloaders(
-            repo_id="...",
-            train_state=saved_state,  # from a previous train_loader.get_state()
-        )
-        
-        for batch in train_loader:
-            ...
-            # Save periodically:
-            state = train_loader.get_state()
-            torch.save(state, "dataloader_state.pt")
+
+    Works with both legacy ``ResumableDataset`` (single-dataset) and the new
+    ``WeightedMixerDataset`` (multi-dataset).  The underlying dataset 
+    exposes a ``.state`` attribute with a ``.to_dict()`` method and a 
+    ``.batches_yielded`` counter.
+
+    Resumption is handled at the dataset level: on resume, each HF stream is
+    ``.skip()``-ed by its own ``documents_processed`` counter and token
+    buffers are restored.  No batch-level skipping is needed.
     """
-    
+
     def __init__(
         self,
-        dataset: ResumableDataset,
+        dataset,                      # ResumableDataset | WeightedMixerDataset
         batch_size: int = 4,
         pin_memory: bool = True,
         num_workers: int = 0,
@@ -194,11 +314,9 @@ class ResumableDataLoader:
         self.pin_memory = pin_memory
         self.num_workers = num_workers
         self.collate_fn = collate_fn if collate_fn else self._default_collate
-        
-        # Update state with batch size
+
         self.dataset.state.batch_size = batch_size
-        
-        # Create underlying dataloader
+
         self._dataloader = DataLoader(
             dataset,
             batch_size=batch_size,
@@ -206,35 +324,20 @@ class ResumableDataLoader:
             pin_memory=pin_memory,
             num_workers=num_workers
         )
-    
+
     @staticmethod
     def _default_collate(batch):
         return torch.stack(batch, dim=0)
-    
+
     def get_state(self) -> Dict[str, Any]:
         """
         Get the current state for checkpointing.
-        
+
         Returns a dictionary containing all information needed to resume.
+        Works for both single-dataset and multi-dataset mixers.
         """
         return self.dataset.state.to_dict()
-    
-    def load_state(self, state_dict: Dict[str, Any]) -> None:
-        """
-        Load state counters from a checkpoint for tracking purposes.
-        
-        WARNING: This only restores internal counters. For streaming datasets,
-        the dataset must be recreated with the correct skip_documents parameter
-        to actually resume from the right position in the stream.
-        Use create_resumable_dataloaders() for full resumption.
-        
-        Args:
-            state_dict: State dictionary from get_state()
-        """
-        self.dataset.state = DataLoaderState.from_dict(state_dict)
-        print(f"[DataLoader] Loaded state: {self.dataset.state.batches_yielded} batches, "
-              f"{self.dataset.state.documents_processed} documents processed")
-    
+
     def __iter__(self):
         """
         Iterate over batches. Resumption is handled at the dataset level via
@@ -267,7 +370,6 @@ def create_resumable_dataloaders(
     """
     train_files = get_train_files(repo_id)
     
-    # Determine how many documents to skip for resumption
     skip_documents = 0
     buffer_tokens = []
     if train_state is not None:
@@ -275,18 +377,14 @@ def create_resumable_dataloaders(
         buffer_tokens = train_state.get('buffer_tokens', [])
         print(f"[DataLoader] Resuming: skipping {skip_documents} documents")
     
-    # Load datasets with skip for training
     ds_for_train, ds_for_val = get_hf_datasets(train_files, skip_documents=skip_documents)
     
-    # Create train dataset with state
     train_dataset_state = DataLoaderState(
         context_length=context_length,
         batch_size=batch_size_train,
         buffer_tokens=buffer_tokens
     )
     if train_state is not None:
-        # Restore full state - keep documents_processed at saved value for cumulative tracking
-        # The dataset skip handles not re-processing, but we track total for next save
         train_dataset_state.samples_yielded = train_state.get('samples_yielded', 0)
         train_dataset_state.batches_yielded = train_state.get('batches_yielded', 0)
         train_dataset_state.documents_processed = train_state.get('documents_processed', 0)
@@ -297,14 +395,12 @@ def create_resumable_dataloaders(
         state=train_dataset_state
     )
     
-    # Create validation dataset (no state needed - always from start)
     val_dataset = ResumableDataset(
         ds_for_val,
         context_length=context_length,
         state=DataLoaderState(context_length=context_length, batch_size=batch_size_val)
     )
-    
-    # Create dataloaders
+
     train_loader = ResumableDataLoader(
         train_dataset,
         batch_size=batch_size_train,
@@ -323,50 +419,285 @@ def create_resumable_dataloaders(
     return train_loader, val_loader
 
 
-def collate_fn(batch):
-    return torch.stack(batch, dim=0)
+# ═══════════════════════════════════════════════════════════════
+#  Weighted multi-dataset mixer with exact resumption
+# ═══════════════════════════════════════════════════════════════
+
+class WeightedMixerDataset(IterableDataset):
+    """
+    Deterministic round-robin mixer over multiple HF streaming datasets.
+
+    **Resumption guarantees** :
+
+    1.  Draw order is purely deterministic — datasets are consumed in a fixed
+        cycle derived from integer weights (e.g. [25,20,30,25] → cycle of 20
+        draws repeating ``[0]*5 + [1]*4 + [2]*6 + [3]*5``).  After resume the
+        cycle restarts from ``state.draw_cycle_position``.
+    2.  Each dataset tracks its own ``documents_processed`` (raw HF rows seen,
+        *including* rows rejected by the format function).  On resume the
+        stream is ``.skip()``-ed by exactly that count.
+    3.  Per-dataset token buffers are saved in full — no truncation.
+    4.  ``samples_yielded`` is incremented and the buffer snapshot is taken
+        *before* each ``yield``, so the state dict is always consistent even
+        if the process is killed between yields.
+
+    Args:
+        dataset_entries: list of ``(name, hf_stream, weight, format_fn)`` tuples.
+            *hf_stream* should already have ``.skip()`` applied if resuming.
+        context_length: number of tokens per sample (chunk size is ctx+1).
+        state: optional ``MixerState`` for resumption.
+    """
+
+    def __init__(
+        self,
+        dataset_entries: List[Tuple[str, Any, int, Callable]],
+        context_length: int = 2048,
+        state: Optional[MixerState] = None,
+    ):
+        super().__init__() 
+        self.context_length = context_length 
+        self.entries = dataset_entries          # [(name, stream, weight, fmt_fn), ...]
+
+        if state is not None:
+            self.state = state
+        else:
+            self.state = MixerState(
+                context_length=context_length,
+                dataset_states={
+                    name: DatasetStreamState(name=name, weight=weight)
+                    for name, _, weight, _ in dataset_entries
+                },
+            )
+
+        weights = [w for _, _, w, _ in self.entries]
+        g = weights[0]
+        for w in weights[1:]:
+            g = math.gcd(g, w)
+        self._draw_schedule: List[int] = []     
+        for idx, w in enumerate(weights):
+            self._draw_schedule.extend([idx] * (w // g))
+        self._cycle_len = len(self._draw_schedule)
+
+    # ── helpers ───────────────────────────────────────────────
+
+    def _drain_buffer(self, buf: List[int]) -> Tuple[List[torch.Tensor], List[int]]:
+        """
+        Extract as many complete ``(context_length + 1)`` chunks as possible
+        from *buf*.  Returns ``(chunks, remaining_buffer)``.
+        """
+        chunks = []
+        chunk_size = self.context_length + 1
+        while len(buf) >= chunk_size:
+            chunks.append(torch.tensor(buf[:chunk_size], dtype=torch.long))
+            buf = buf[chunk_size:]
+        return chunks, buf
+
+    # ── main iterator ────────────────────────────────────────
+
+    def __iter__(self):     
+        iterators: List[Optional[Any]] = [iter(stream) for _, stream, _, _ in self.entries]
+        exhausted: List[bool] = [False] * len(self.entries)
+
+        buffers: List[List[int]] = []
+        for name, _, _, _ in self.entries:
+            ds_state = self.state.dataset_states.get(name)
+            if ds_state is not None and ds_state.buffer_tokens:
+                buffers.append(list(ds_state.buffer_tokens))
+            else:
+                buffers.append([])
+
+        for ds_idx in range(len(self.entries)):
+            name = self.entries[ds_idx][0]
+            chunks, buffers[ds_idx] = self._drain_buffer(buffers[ds_idx])
+            for chunk in chunks:
+                self.state.dataset_states[name].buffer_tokens = buffers[ds_idx].copy()
+                self.state.samples_yielded += 1
+                yield chunk 
+
+        pos = self.state.draw_cycle_position
+
+        while True:
+            if all(exhausted):
+                break
+
+            ds_idx = self._draw_schedule[pos % self._cycle_len]
+            pos += 1
+            self.state.draw_cycle_position = pos
+
+            if exhausted[ds_idx]:
+                continue
+
+            name, _, _, fmt_fn = self.entries[ds_idx]
+            it = iterators[ds_idx]
+
+            try:
+                row = next(it)
+            except StopIteration:
+                exhausted[ds_idx] = True
+                print(f"[Mixer] Dataset '{name}' exhausted after "
+                      f"{self.state.dataset_states[name].documents_processed} documents.")
+                continue
+
+            self.state.dataset_states[name].documents_processed += 1
+
+            text = fmt_fn(row)
+            if text is None:
+                continue
+
+            tokens = tokenizer( 
+                text,
+                return_attention_mask=False,
+            )["input_ids"]  
+            buffers[ds_idx].extend(tokens)
+            buffers[ds_idx].append(tokenizer.eos_token_id)
+
+            # Drain complete chunks
+            chunks, buffers[ds_idx] = self._drain_buffer(buffers[ds_idx])
+            for chunk in chunks:
+                self.state.dataset_states[name].buffer_tokens = buffers[ds_idx].copy()
+                self.state.samples_yielded += 1 
+                yield chunk 
+ 
+            self.state.dataset_states[name].buffer_tokens = buffers[ds_idx].copy()
 
 
-# Legacy dataset class for backward compatibility
-class CustomDataset(IterableDataset):
-    def __init__(self, data, context_length=2048):
-        super().__init__()
-        self.data = data
-        self.context_length = context_length
-    
-    def __iter__(self):
-        buffer = []
-        for doc in self.data:
-            tokens = tokenizer(
-                doc['text'],
-                return_attention_mask=False
-            )["input_ids"]
-            buffer.extend(tokens)
-            buffer.append(tokenizer.eos_token_id)
-            while len(buffer) >= self.context_length + 1:
-                chunk = torch.tensor(buffer[:self.context_length + 1], dtype=torch.long)
-                buffer = buffer[self.context_length + 1:]
-                yield chunk
+# ═══════════════════════════════════════════════════════════════
+#  Factory: build mixer from a PhaseConfig  (+ optional resume)
+# ═══════════════════════════════════════════════════════════════
 
-# Legacy usage (guarded to prevent execution on import):
-if __name__ == '__main__':
-    repo_id = "karpathy/fineweb-edu-100b-shuffle"
-    train_files = get_train_files(repo_id)
-    ds_for_train, ds_for_val = get_hf_datasets(train_files)
-    dataset_train = CustomDataset(ds_for_train)
-    dataset_val = CustomDataset(ds_for_val)
-    train_data = DataLoader(
-          dataset_train,
-          batch_size = 4,
-          collate_fn = collate_fn,
-          pin_memory=True,
-          num_workers=0,
+def load_phase_datasets(
+    phase_config: PhaseConfig,
+    mixer_state: Optional[Dict[str, Any]] = None,
+    context_length: int = 2048,
+) -> WeightedMixerDataset:
+    """
+    Build a ``WeightedMixerDataset`` for a training phase.
+
+    On fresh start, all streams begin at document 0.
+    On resume, each stream is ``.skip()``-ed by its saved
+    ``documents_processed`` and the token buffer is restored.
+
+    Args:
+        phase_config:  ``PhaseConfig`` with ``.datasets`` populated.
+        mixer_state:   Saved state dict (from ``ResumableDataLoader.get_state()``).
+                       Pass ``None`` to start from scratch.
+        context_length: Context length for chunking.
+
+    Returns:
+        A ``WeightedMixerDataset`` ready to iterate.
+    """
+    # Parse saved state if resuming
+    restored_state: Optional[MixerState] = None
+    if mixer_state is not None and mixer_state.get("version", 1) >= 2:
+        restored_state = MixerState.from_dict(mixer_state)
+        saved_names = set(restored_state.dataset_states.keys())
+        config_names = {ds.name for ds in phase_config.datasets}
+        if saved_names != config_names:
+            raise ValueError(
+                f"[DataLoader] Dataset name mismatch on resume!\n"
+                f"  Saved:  {sorted(saved_names)}\n"
+                f"  Config: {sorted(config_names)}\n"
+                f"  Cannot resume — wrong phase config for this checkpoint."
+            )
+        if restored_state.context_length != context_length:
+            raise ValueError(
+                f"[DataLoader] Context length mismatch: "
+                f"saved={restored_state.context_length}, requested={context_length}"
+            )
+        print(f"[DataLoader] Resuming mixer: {restored_state.samples_yielded} samples yielded, "
+              f"cycle position {restored_state.draw_cycle_position}")
+        for name, ds_state in restored_state.dataset_states.items():
+            print(f"  {name}: {ds_state.documents_processed} docs, "
+                  f"{len(ds_state.buffer_tokens)} buffered tokens")
+
+    entries: List[Tuple[str, Any, int, Callable]] = []
+    for ds_entry in phase_config.datasets:
+        fmt_fn = FORMAT_FNS.get(ds_entry.format_fn)
+        if fmt_fn is None:
+            raise ValueError(
+                f"Unknown format_fn={ds_entry.format_fn!r} for dataset {ds_entry.name!r}. "
+                f"Available: {list(FORMAT_FNS.keys())}"
+            )
+
+        # Load HF streaming dataset
+        kwargs = {}
+        if ds_entry.config_name is not None:
+            kwargs["name"] = ds_entry.config_name
+        stream = load_dataset(
+            ds_entry.repo_id,
+            split=ds_entry.split,
+            streaming=ds_entry.streaming,
+            **kwargs,
+        )
+
+        # Skip documents if resuming
+        if restored_state is not None:
+            skip_n = restored_state.dataset_states[ds_entry.name].documents_processed
+            if skip_n > 0:
+                print(f"[DataLoader] Skipping {skip_n} documents for '{ds_entry.name}'")
+                stream = stream.skip(skip_n)
+
+        entries.append((ds_entry.name, stream, ds_entry.weight, fmt_fn))
+
+    return WeightedMixerDataset(
+        dataset_entries=entries,
+        context_length=context_length,
+        state=restored_state,
     )
-    val_data = DataLoader(
-          dataset_val,
-          batch_size = 16,
-          collate_fn = collate_fn,
-          pin_memory=True,
-          num_workers=0,
-    )        
 
+
+def create_phase_dataloaders(
+    phase_config: PhaseConfig,
+    train_state: Optional[Dict[str, Any]] = None,
+    val_repo_id: str = "HuggingFaceFW/fineweb-edu",
+    batch_size_val: int = 16,
+    context_length: int = 2048,
+) -> Tuple['ResumableDataLoader', DataLoader]:
+    """
+    Factory for phase-aware training: builds a ``WeightedMixerDataset`` for
+    training and a simple streaming ``ResumableDataset`` for validation.
+
+    Args:
+        phase_config:   Phase configuration with datasets.
+        train_state:    Saved mixer state dict (or None).
+        val_repo_id:    HF repo for validation data.
+        batch_size_val: Batch size for validation loader.
+        context_length: Token context length.
+
+    Returns:
+        ``(train_loader, val_loader)``
+    """
+
+    # ── Train mixer ──
+    mixer_dataset = load_phase_datasets(
+        phase_config,
+        mixer_state=train_state,
+        context_length=context_length,
+    )
+    train_loader = ResumableDataLoader(
+        mixer_dataset,
+        batch_size=phase_config.micro_batch_size,
+        pin_memory=True,
+        num_workers=0,
+    )   
+
+    # ── Validation ──
+    val_stream = load_dataset(
+        val_repo_id,
+        split="train",
+        streaming=True,
+    )
+    val_dataset = ResumableDataset(
+        val_stream,
+        context_length=context_length,
+        state=DataLoaderState(context_length=context_length, batch_size=batch_size_val),
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size_val,
+        collate_fn=lambda batch: torch.stack(batch, dim=0),
+        pin_memory=True,
+        num_workers=0,
+    )
+            
+    return train_loader, val_loader

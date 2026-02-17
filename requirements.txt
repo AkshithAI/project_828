@@ -13,3 +13,7 @@ packaging
 # nemo-curator>=0.1.0
 # python-dotenv>=1.0.0
 # ray>=2.0.0
+
+# Data packing dependencies
+# numba
+# polars
