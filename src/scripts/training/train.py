@@ -100,16 +100,16 @@ def train_phase(
                 optimizer.zero_grad()
                 metrics["train/grad_norm"] = grad_norm.item()
 
-                for layer_idx, layer in enumerate(model.layers):
-                    if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'get_wandb_metrics'):
-                        moe = layer.mlp
-                        if moe.total_tokens > 0:
-                            moe_metrics = moe.get_wandb_metrics()
-                            for k, v in moe_metrics.items():
-                                metrics[f"moe/layer_{layer_idx}/{k}"] = v
-                            moe.reset_expert_counts()
-
-            wandb_run.log(metrics, step=step)
+            #     for layer_idx, layer in enumerate(model.layers):
+            #         if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'get_wandb_metrics'):
+            #             moe = layer.mlp
+            #             if moe.total_tokens > 0:
+            #                 moe_metrics = moe.get_wandb_metrics()
+            #                 for k, v in moe_metrics.items():
+            #                     metrics[f"moe/layer_{layer_idx}/{k}"] = v
+            #                 moe.reset_expert_counts()
+            
+            # wandb_run.log(metrics, step=step)
             if (step + 1) % 1000 == 0:
                 print(f"Step : {step+1} , Loss : {loss_value:.4f}")
 

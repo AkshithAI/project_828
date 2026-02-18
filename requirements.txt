@@ -8,6 +8,7 @@ deepspeed>=0.10.0
 accelerate>=0.20.0
 ninja
 packaging
+zstandard
 
 # NeMo Curator dependencies
 # nemo-curator>=0.1.0
