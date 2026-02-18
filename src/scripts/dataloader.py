@@ -621,14 +621,35 @@ def load_phase_datasets(
 
         # Load HF streaming dataset
         kwargs = {}
-        if ds_entry.config_name is not None:
-            kwargs["name"] = ds_entry.config_name
-        stream = load_dataset(
-            ds_entry.repo_id,
-            split=ds_entry.split,
-            streaming=ds_entry.streaming,
-            **kwargs,
-        )
+        if ds_entry.data_dir is not None:
+            # Bypass custom loading scripts — load raw files directly
+            repo_files = list_repo_files(ds_entry.repo_id, repo_type="dataset")
+            data_files = [
+                f"https://huggingface.co/datasets/{ds_entry.repo_id}/resolve/main/{f}"
+                for f in sorted(repo_files)
+                if f.startswith(ds_entry.data_dir + "/") and not f.endswith(".md")
+            ]
+            if not data_files:
+                raise ValueError(
+                    f"No data files found under '{ds_entry.data_dir}/' in {ds_entry.repo_id}"
+                )
+            fmt = "parquet" if data_files[0].endswith(".parquet") else "json"
+            stream = load_dataset(
+                fmt,
+                data_files=data_files,
+                split=ds_entry.split,
+                streaming=ds_entry.streaming,
+            )
+        else:
+            if ds_entry.config_name is not None:
+                kwargs["name"] = ds_entry.config_name
+            kwargs["trust_remote_code"] = True
+            stream = load_dataset(
+                ds_entry.repo_id,
+                split=ds_entry.split,
+                streaming=ds_entry.streaming,
+                **kwargs,
+            )
 
         # Skip documents if resuming
         if restored_state is not None:
@@ -684,6 +705,7 @@ def create_phase_dataloaders(
     # ── Validation ──
     val_stream = load_dataset(
         val_repo_id,
+        name="sample-100BT",
         split="train",
         streaming=True,
     )

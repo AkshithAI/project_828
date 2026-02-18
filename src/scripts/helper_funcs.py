@@ -206,4 +206,6 @@ def save_checkpoint(ckpt_dir, step, model_data, optimizer_data, scheduler_data, 
     if dataloader_state is not None and os.path.exists(dataloader_path):
         artifact.add_file(dataloader_path)
     wandb_run.log_artifact(artifact)
-       
+
+if __name__ == '__main__':
+    get_base_dir("checkpoints")

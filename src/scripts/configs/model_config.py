@@ -10,7 +10,7 @@ class ModelConfig:
         num_attn_heads : int = 12 
         num_key_value_heads : int = 6
         hidden_dim : int = 768  
-        intermediate_size : int = 2304
+        intermediate_size : int = 1776
         ffn_dropout : float = 0.0
         head_dim : float = hidden_dim // num_attn_heads 
         num_hidden_layers : int = 6 
@@ -42,6 +42,7 @@ class DatasetEntry:
     weight: int                        
     format_fn: str = "default"         
     config_name: Optional[str] = None  
+    data_dir: Optional[str] = None     
     split: str = "train"               
     streaming: bool = True
 
@@ -61,7 +62,7 @@ class PhaseConfig:
     wsd_stable_frac: float = 0.76         
 
     # --- Batch / accumulation ---
-    micro_batch_size: int = 64
+    micro_batch_size: int = 128
     grad_accum_steps: int = 8             
     grad_clip: float = 1.0
 
@@ -90,14 +91,14 @@ PHASE_1_CONFIG = PhaseConfig(
     peak_lr=3e-4,
     min_lr=3e-5,
     warmup_steps=2000,
-    total_steps=68_664,
+    total_steps=137329,
     scheduler_type="wsd",
     wsd_stable_frac=0.76,
-    micro_batch_size=128,
+    micro_batch_size=32,
     grad_accum_steps=8,
     grad_clip=1.0,
-    val_interval=2500,
-    val_steps=5000,
+    val_interval=10000,
+    val_steps=3000,
     patience=5,
     datasets=[
         DatasetEntry(
@@ -111,19 +112,21 @@ PHASE_1_CONFIG = PhaseConfig(
             repo_id="EleutherAI/proof-pile-2",
             weight=20,
             format_fn="default",
-            config_name="algebraic-stack",
+            data_dir="algebraic-stack",
         ),
         DatasetEntry(
             name="fineweb-edu",
             repo_id="HuggingFaceFW/fineweb-edu",
             weight=30,
             format_fn="fineweb_edu",
+            config_name="sample-100BT",
         ),
         DatasetEntry(
             name="cosmopedia-v2",
             repo_id="HuggingFaceTB/cosmopedia-v2",
             weight=25,
             format_fn="default",
+            config_name="cosmopedia-v2",
         ),
     ],
 )
@@ -141,11 +144,11 @@ PHASE_2_CONFIG = PhaseConfig(
     total_steps=8_600,
     scheduler_type="cosine",
     wsd_stable_frac=0.0,           # not used for cosine
-    micro_batch_size=128,
+    micro_batch_size=32,
     grad_accum_steps=8,
     grad_clip=1.0,
-    val_interval=1500,
-    val_steps=5000,
+    val_interval=10000,
+    val_steps=3000,
     patience=5,
     datasets=[],                    # to be filled after Phase 1
 )

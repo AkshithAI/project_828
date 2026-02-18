@@ -87,6 +87,23 @@ def _build_kv_mask(padding_lengths, kv_len, device):
     return mask
 
 
+def _enable_kv_cache(model):
+    """Temporarily enable KV-cache inference on a model that was built without it."""
+    model.inference = True
+    for layer in model.layers:
+        layer.attention.inference = True
+
+
+def _disable_kv_cache(model):
+    """Restore the model to its non-inference (training) state."""
+    model.inference = False
+    for layer in model.layers:
+        attn = layer.attention
+        attn.inference = False
+        attn.cache_k = None
+        attn.cache_v = None
+
+
 @torch.inference_mode()
 def generate(model,seed_txt,device,max_tokens=500,k=50,temp = 0.8):
     """
@@ -100,7 +117,14 @@ def generate(model,seed_txt,device,max_tokens=500,k=50,temp = 0.8):
         k: topk param for selecting top 'k' words from probability distribution
         temp: temperature for sequence generation
     """
+    was_training = model.training
     model.eval()
+
+    # If the model was not built with inference=True, temporarily enable
+    # KV caching so autoregressive decoding actually works.
+    needs_cache_toggle = not getattr(model, 'inference', False)
+    if needs_cache_toggle:
+        _enable_kv_cache(model)
 
     if hasattr(model, 'reset_cache'):
         model.reset_cache()
@@ -127,6 +151,13 @@ def generate(model,seed_txt,device,max_tokens=500,k=50,temp = 0.8):
         predicted_token = idx
         if idx_item == tokenizer.eos_token_id:
             break
+
+    # Restore original model state
+    if needs_cache_toggle:
+        _disable_kv_cache(model)
+    if was_training:
+        model.train()
+
     print(f"Number of tokens sampled : {len(sampled_tokens)}")
     return tokenizer.decode(sampled_tokens)
 

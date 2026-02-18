@@ -125,10 +125,14 @@ dmypy.json
 # Assets folder
 assets/
 
-# PyTorch model checkpoints
+# PyTorch model checkpoints (except in checkpoints/ directory)
 *.pth
 *.pt
 *.ckpt
+!checkpoints/
+!checkpoints/**/*.pth
+!checkpoints/**/*.pt
+!checkpoints/**/*.ckpt
 
 # Weights & Biases
 wandb/
