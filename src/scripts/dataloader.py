@@ -249,6 +249,11 @@ class ShardedStream:
                 # future resumes so subsequent loads are instant)
                 if remaining_skip > 0:
                     remaining_skip -= 1
+                    skipped = self._total_skip - remaining_skip
+                    if skipped % 200_000 == 0:
+                        print(f"[ShardedStream] Skip progress: "
+                              f"{skipped:,}/{self._total_skip:,} docs "
+                              f"(shard {global_idx})")
                     continue
 
                 yield row
@@ -326,11 +331,54 @@ def _compute_shard_skip(
     cumulative = 0
     for i, count in enumerate(docs_per_shard):
         cumulative += count
-        if cumulative > documents_processed:
+        if cumulative >= documents_processed:
             offset = documents_processed - (cumulative - count)
             return i, offset
     # All recorded shards fully consumed — start after the last one
     return len(docs_per_shard), 0
+
+
+def _count_shard_rows_fast(file_urls: List[str]) -> Optional[List[int]]:
+    """
+    Read per-shard row counts from parquet metadata without downloading
+    the full data.  Uses pyarrow to read only the parquet footer (~few KB
+    per file) via HTTP range requests.
+
+    Returns ``None`` if reading fails for any shard (caller should fall
+    back to the slow row-by-row skip).
+    """
+    try:
+        import pyarrow.parquet as pq
+        import fsspec
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def _count_one(url: str) -> int:
+            with fsspec.open(url, "rb") as f:
+                return pq.ParquetFile(f).metadata.num_rows
+
+        counts = [0] * len(file_urls)
+        with ThreadPoolExecutor(max_workers=16) as executor:
+            futures = {executor.submit(_count_one, url): i
+                       for i, url in enumerate(file_urls)}
+            done = 0
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    counts[idx] = future.result()
+                except Exception:
+                    return None          # any failure → abort
+                done += 1
+                if done % 200 == 0 or done == len(file_urls):
+                    print(f"\r[DataLoader]   Counting shard rows: {done}/{len(file_urls)}",
+                          end="", flush=True)
+        if file_urls:
+            print()  # newline after progress
+        return counts
+    except ImportError:
+        return None
+    except Exception as e:
+        print(f"\n[DataLoader] Fast shard row counting failed: {e}")
+        return None
 
 
 def get_train_files(repo_id):
@@ -837,30 +885,64 @@ def load_phase_datasets(
             file_urls, file_fmt = resolve_dataset_files(ds_entry)
 
             if file_urls is not None:
-                # Resolved to file URLs → use ShardedStream
-                if skip_n > 0 and ds_state_ref is not None:
-                    print(
-                        f"[DataLoader] No shard info for '{ds_entry.name}' — "
-                        f"using naive skip ({skip_n:,} docs). "
-                        f"Shard tracking will be saved in next checkpoint."
-                    )
-
                 _t0 = _time.perf_counter()
-                stream = ShardedStream(
-                    data_files=file_urls,
-                    file_format=file_fmt,
-                    ds_state=ds_state_ref,
-                    initial_skip=0,
-                    total_skip=skip_n,         # slow cross-shard skip; builds tracking
-                    shard_idx_offset=0,
-                )
 
-                # Store resolved file list in state for future shard-aware resumes
-                if ds_state_ref is not None:
-                    ds_state_ref.data_files = file_urls
-                _elapsed = _time.perf_counter() - _t0
-                print(f"[DataLoader] '{ds_entry.name}': resolved {len(file_urls)} data files in {_elapsed:.2f}s")
-                used_shard_path = True  # using ShardedStream (even if no shard skip)
+                # Try fast metadata-based shard skip (reads parquet footers only)
+                if skip_n > 0 and file_fmt == "parquet":
+                    print(f"[DataLoader] Counting rows in {len(file_urls)} shards "
+                          f"for '{ds_entry.name}' (parquet metadata)...")
+                    shard_row_counts = _count_shard_rows_fast(file_urls)
+                    if shard_row_counts is not None:
+                        start_shard, shard_offset = _compute_shard_skip(
+                            shard_row_counts, skip_n
+                        )
+                        remaining_files = file_urls[start_shard:]
+                        print(
+                            f"[DataLoader] Metadata skip for '{ds_entry.name}': "
+                            f"skipping {start_shard} full shards, "
+                            f"offset {shard_offset} in shard {start_shard} "
+                            f"({len(remaining_files)} shards remaining)"
+                        )
+                        stream = ShardedStream(
+                            data_files=remaining_files,
+                            file_format=file_fmt,
+                            ds_state=ds_state_ref,
+                            initial_skip=shard_offset,
+                            shard_idx_offset=start_shard,
+                        )
+                        if ds_state_ref is not None:
+                            ds_state_ref.data_files = file_urls
+                            # Pre-populate docs_per_shard for skipped shards
+                            # + partial count for the current shard (initial_skip rows)
+                            ds_state_ref.docs_per_shard = (
+                                list(shard_row_counts[:start_shard]) + [shard_offset]
+                            )
+                        used_shard_path = True
+                        _elapsed = _time.perf_counter() - _t0
+                        print(f"[DataLoader]   Stream ready in {_elapsed:.2f}s")
+
+                # Fall back to naive skip with progress logging
+                if not used_shard_path:
+                    if skip_n > 0 and ds_state_ref is not None:
+                        print(
+                            f"[DataLoader] No shard info for '{ds_entry.name}' — "
+                            f"using naive skip ({skip_n:,} docs). "
+                            f"Shard tracking will be saved in next checkpoint."
+                        )
+                    stream = ShardedStream(
+                        data_files=file_urls,
+                        file_format=file_fmt,
+                        ds_state=ds_state_ref,
+                        initial_skip=0,
+                        total_skip=skip_n,
+                        shard_idx_offset=0,
+                    )
+                    if ds_state_ref is not None:
+                        ds_state_ref.data_files = file_urls
+                    _elapsed = _time.perf_counter() - _t0
+                    print(f"[DataLoader] '{ds_entry.name}': resolved {len(file_urls)} "
+                          f"data files in {_elapsed:.2f}s")
+                    used_shard_path = True
 
             else:
                 # ── Fallback: original HF loading ────────────
@@ -874,15 +956,48 @@ def load_phase_datasets(
                     ]
                     if not data_files:
                         raise ValueError(
-                            f"No data files found under '{ds_entry.data_dir}/' in {ds_entry.repo_id}"
+                            f"No data files found under '{ds_entry.data_dir}/' "
+                            f"in {ds_entry.repo_id}"
                         )
                     fmt = "parquet" if data_files[0].endswith(".parquet") else "json"
-                    stream = load_dataset(
-                        fmt,
-                        data_files=data_files,
-                        split=ds_entry.split,
-                        streaming=ds_entry.streaming,
-                    )
+
+                    # Try metadata-based shard skip for parquet data_dir files
+                    if skip_n > 0 and fmt == "parquet":
+                        print(f"[DataLoader] Counting rows in {len(data_files)} shards "
+                              f"for '{ds_entry.name}' (data_dir parquet metadata)...")
+                        shard_row_counts = _count_shard_rows_fast(data_files)
+                        if shard_row_counts is not None:
+                            start_shard, shard_offset = _compute_shard_skip(
+                                shard_row_counts, skip_n
+                            )
+                            remaining_files = data_files[start_shard:]
+                            print(
+                                f"[DataLoader] Metadata skip for '{ds_entry.name}': "
+                                f"skipping {start_shard} full shards, "
+                                f"offset {shard_offset} in shard {start_shard} "
+                                f"({len(remaining_files)} shards remaining)"
+                            )
+                            stream = ShardedStream(
+                                data_files=remaining_files,
+                                file_format=fmt,
+                                ds_state=ds_state_ref,
+                                initial_skip=shard_offset,
+                                shard_idx_offset=start_shard,
+                            )
+                            if ds_state_ref is not None:
+                                ds_state_ref.data_files = data_files
+                                ds_state_ref.docs_per_shard = (
+                                    list(shard_row_counts[:start_shard]) + [shard_offset]
+                                )
+                            used_shard_path = True
+
+                    if not used_shard_path:
+                        stream = load_dataset(
+                            fmt,
+                            data_files=data_files,
+                            split=ds_entry.split,
+                            streaming=ds_entry.streaming,
+                        )
                 else:
                     if ds_entry.config_name is not None:
                         kwargs["name"] = ds_entry.config_name
@@ -894,9 +1009,10 @@ def load_phase_datasets(
                         **kwargs,
                     )
 
-                # Legacy naive skip
-                if skip_n > 0:
-                    print(f"[DataLoader] Skipping {skip_n} documents for '{ds_entry.name}' (legacy)")
+                # Legacy naive skip (only if not already using ShardedStream)
+                if not used_shard_path and skip_n > 0:
+                    print(f"[DataLoader] Skipping {skip_n} documents for "
+                          f"'{ds_entry.name}' (legacy)")
                     stream = stream.skip(skip_n)
 
         entries.append((ds_entry.name, stream, ds_entry.weight, fmt_fn))
