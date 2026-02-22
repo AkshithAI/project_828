@@ -110,7 +110,10 @@ class DatasetStreamState:
     name: str
     documents_processed: int = 0      
     buffer_tokens: List[int] = field(default_factory=list)
-    weight: int = 1                   
+    weight: int = 1
+    # Shard-aware fields for fast resume
+    data_files: List[str] = field(default_factory=list)       # ordered file URLs
+    docs_per_shard: List[int] = field(default_factory=list)   # docs consumed per shard
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -170,6 +173,164 @@ class MixerState:
             dataset_states=ds_states,
             version=data.get("version", 2),
         )
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Shard-aware streaming for fast resume
+# ═══════════════════════════════════════════════════════════════
+
+class ShardedStream:
+    """
+    Iterates through data files (shards) one at a time, tracking
+    ``current_shard_idx`` and updating per-shard document counts
+    in a :class:`DatasetStreamState`.
+
+    On resume, entire shards can be skipped by simply not including
+    them in *data_files*, converting an O(total_docs) skip into
+    O(offset_within_current_shard).
+
+    Two skip modes are supported:
+
+    * **initial_skip** — skip *N* rows within the **first** shard only.
+      Used on shard-aware resume (fast).
+    * **total_skip** — skip *N* rows across **all** shards sequentially.
+      Used on legacy resume when ``docs_per_shard`` is not yet populated
+      (same speed as before, but builds shard tracking for future resumes).
+    """
+
+    def __init__(
+        self,
+        data_files: List[str],
+        file_format: str = "parquet",
+        ds_state: Optional[DatasetStreamState] = None,
+        initial_skip: int = 0,
+        total_skip: int = 0,
+        shard_idx_offset: int = 0,
+    ):
+        assert not (initial_skip > 0 and total_skip > 0), (
+            "ShardedStream: initial_skip and total_skip are mutually exclusive. "
+            f"Got initial_skip={initial_skip}, total_skip={total_skip}."
+        )
+        self.data_files = data_files
+        self.all_data_files = list(data_files)   # full copy for state storage
+        self.file_format = file_format
+        self.current_shard_idx = shard_idx_offset
+        self._shard_idx_offset = shard_idx_offset
+        self._ds_state = ds_state
+        self._initial_skip = initial_skip
+        self._total_skip = total_skip
+
+    def __iter__(self):
+        remaining_skip = self._total_skip
+        for local_idx, url in enumerate(self.data_files):
+            global_idx = self._shard_idx_offset + local_idx
+            self.current_shard_idx = global_idx
+
+            shard_ds = load_dataset(
+                self.file_format,
+                data_files=[url],
+                split="train",
+                streaming=True,
+            )
+
+            # Shard-aware skip: skip within the first remaining shard only
+            if local_idx == 0 and self._initial_skip > 0:
+                shard_ds = shard_ds.skip(self._initial_skip)
+
+            for row in shard_ds:
+                # Track per-shard doc count in the live state object
+                if self._ds_state is not None:
+                    dps = self._ds_state.docs_per_shard
+                    while len(dps) <= global_idx:
+                        dps.append(0)
+                    dps[global_idx] += 1
+
+                # Legacy cross-shard skip (slow, builds shard tracking for
+                # future resumes so subsequent loads are instant)
+                if remaining_skip > 0:
+                    remaining_skip -= 1
+                    continue
+
+                yield row
+
+
+def resolve_dataset_files(
+    ds_entry: 'DatasetEntry',
+) -> Tuple[Optional[List[str]], Optional[str]]:
+    """
+    Resolve a :class:`DatasetEntry` to an ordered list of data-file
+    URLs and a format string (``"parquet"`` or ``"json"``).
+
+    Falls back to ``(None, None)`` when the repo layout cannot be
+    determined automatically.
+    """
+    try:
+        all_files = sorted(list_repo_files(ds_entry.repo_id, repo_type="dataset"))
+    except Exception as exc:
+        print(f"  [resolve] Could not list files for {ds_entry.repo_id}: {exc}")
+        return None, None
+
+    matched: List[str] = []
+
+    if ds_entry.data_dir is not None:
+        matched = [
+            f for f in all_files
+            if f.startswith(ds_entry.data_dir + "/")
+            and not f.endswith((".md", ".gitattributes"))
+            and (f.endswith(".parquet") or f.endswith(".json") or f.endswith(".jsonl"))
+        ]
+    else:
+        split = ds_entry.split or "train"
+        _DATA_EXTS = (".parquet", ".json", ".jsonl")
+        # 1. {config_name}/*{split}*.parquet
+        if ds_entry.config_name:
+            matched = [
+                f for f in all_files
+                if ds_entry.config_name in f and split in f
+                and f.endswith(_DATA_EXTS)
+            ]
+        # 2. data/{split}-*.parquet
+        if not matched:
+            matched = [
+                f for f in all_files
+                if f.startswith("data/") and split in f
+                and f.endswith(_DATA_EXTS)
+            ]
+        # 3. {split}-*.parquet at root
+        if not matched:
+            matched = [
+                f for f in all_files
+                if f.startswith(f"{split}-")
+                and f.endswith(_DATA_EXTS)
+            ]
+
+    if not matched:
+        return None, None
+
+    urls = [
+        f"https://huggingface.co/datasets/{ds_entry.repo_id}/resolve/main/{f}"
+        for f in sorted(matched)
+    ]
+    fmt = "parquet" if urls[0].endswith(".parquet") else "json"
+    return urls, fmt
+
+
+def _compute_shard_skip(
+    docs_per_shard: List[int],
+    documents_processed: int,
+) -> Tuple[int, int]:
+    """
+    Given per-shard document counts and total documents processed,
+    return ``(start_shard_idx, offset_within_shard)``.
+    """
+    cumulative = 0
+    for i, count in enumerate(docs_per_shard):
+        cumulative += count
+        if cumulative > documents_processed:
+            offset = documents_processed - (cumulative - count)
+            return i, offset
+    # All recorded shards fully consumed — start after the last one
+    return len(docs_per_shard), 0
 
 
 def get_train_files(repo_id):
@@ -573,9 +734,16 @@ def load_phase_datasets(
     """
     Build a ``WeightedMixerDataset`` for a training phase.
 
-    On fresh start, all streams begin at document 0.
-    On resume, each stream is ``.skip()``-ed by its saved
-    ``documents_processed`` and the token buffer is restored.
+    On fresh start every dataset is resolved to explicit data-file URLs
+    and wrapped in a :class:`ShardedStream` that tracks per-shard document
+    counts.  On resume the saved ``docs_per_shard`` is used to skip
+    entire shard files instantly — only the offset within the *current*
+    shard requires iteration, reducing resume time from O(total_docs) to
+    O(docs_within_one_shard).
+
+    Falls back to the legacy ``stream.skip(N)`` path when the checkpoint
+    was saved before shard tracking was available, or when file-URL
+    resolution fails for a dataset.
 
     Args:
         phase_config:  ``PhaseConfig`` with ``.datasets`` populated.
@@ -586,7 +754,9 @@ def load_phase_datasets(
     Returns:
         A ``WeightedMixerDataset`` ready to iterate.
     """
-    # Parse saved state if resuming
+    import time as _time
+
+    # ── Parse saved state ────────────────────────────────────
     restored_state: Optional[MixerState] = None
     if mixer_state is not None and mixer_state.get("version", 1) >= 2:
         restored_state = MixerState.from_dict(mixer_state)
@@ -610,6 +780,7 @@ def load_phase_datasets(
             print(f"  {name}: {ds_state.documents_processed} docs, "
                   f"{len(ds_state.buffer_tokens)} buffered tokens")
 
+    # ── Build entries ────────────────────────────────────────
     entries: List[Tuple[str, Any, int, Callable]] = []
     for ds_entry in phase_config.datasets:
         fmt_fn = FORMAT_FNS.get(ds_entry.format_fn)
@@ -619,52 +790,136 @@ def load_phase_datasets(
                 f"Available: {list(FORMAT_FNS.keys())}"
             )
 
-        # Load HF streaming dataset
-        kwargs = {}
-        if ds_entry.data_dir is not None:
-            # Bypass custom loading scripts — load raw files directly
-            repo_files = list_repo_files(ds_entry.repo_id, repo_type="dataset")
-            data_files = [
-                f"https://huggingface.co/datasets/{ds_entry.repo_id}/resolve/main/{f}"
-                for f in sorted(repo_files)
-                if f.startswith(ds_entry.data_dir + "/") and not f.endswith(".md")
-            ]
-            if not data_files:
-                raise ValueError(
-                    f"No data files found under '{ds_entry.data_dir}/' in {ds_entry.repo_id}"
-                )
-            fmt = "parquet" if data_files[0].endswith(".parquet") else "json"
-            stream = load_dataset(
-                fmt,
-                data_files=data_files,
-                split=ds_entry.split,
-                streaming=ds_entry.streaming,
-            )
-        else:
-            if ds_entry.config_name is not None:
-                kwargs["name"] = ds_entry.config_name
-            kwargs["trust_remote_code"] = True
-            stream = load_dataset(
-                ds_entry.repo_id,
-                split=ds_entry.split,
-                streaming=ds_entry.streaming,
-                **kwargs,
-            )
-
-        # Skip documents if resuming
+        ds_state_ref: Optional[DatasetStreamState] = None
         if restored_state is not None:
-            skip_n = restored_state.dataset_states[ds_entry.name].documents_processed
-            if skip_n > 0:
-                print(f"[DataLoader] Skipping {skip_n} documents for '{ds_entry.name}'")
-                stream = stream.skip(skip_n)
+            ds_state_ref = restored_state.dataset_states.get(ds_entry.name)
+
+        skip_n = ds_state_ref.documents_processed if ds_state_ref else 0
+
+        # ── Try shard-aware path ─────────────────────────────
+        used_shard_path = False
+
+        if (
+            ds_state_ref is not None
+            and ds_state_ref.docs_per_shard
+            and ds_state_ref.data_files
+            and skip_n > 0
+        ):
+            # We have shard tracking from a previous run → fast skip
+            data_files = ds_state_ref.data_files
+            docs_per_shard = ds_state_ref.docs_per_shard
+            fmt = "parquet" if data_files[0].endswith(".parquet") else "json"
+            start_shard, shard_offset = _compute_shard_skip(docs_per_shard, skip_n)
+
+            remaining_files = data_files[start_shard:]
+            print(
+                f"[DataLoader] Shard-aware skip for '{ds_entry.name}': "
+                f"skipping {start_shard} full shards, "
+                f"offset {shard_offset} in shard {start_shard} "
+                f"({len(remaining_files)} shards remaining)"
+            )
+            _t0 = _time.perf_counter()
+            stream = ShardedStream(
+                data_files=remaining_files,
+                file_format=fmt,
+                ds_state=ds_state_ref,
+                initial_skip=shard_offset,
+                shard_idx_offset=start_shard,
+            )
+            # Keep the full file list in state for future resumes
+            ds_state_ref.data_files = data_files
+            used_shard_path = True
+            _elapsed = _time.perf_counter() - _t0
+            print(f"[DataLoader]   Stream ready in {_elapsed:.2f}s")
+
+        if not used_shard_path:
+            # ── Resolve files and use ShardedStream ──────────
+            file_urls, file_fmt = resolve_dataset_files(ds_entry)
+
+            if file_urls is not None:
+                # Resolved to file URLs → use ShardedStream
+                if skip_n > 0 and ds_state_ref is not None:
+                    print(
+                        f"[DataLoader] No shard info for '{ds_entry.name}' — "
+                        f"using naive skip ({skip_n:,} docs). "
+                        f"Shard tracking will be saved in next checkpoint."
+                    )
+
+                _t0 = _time.perf_counter()
+                stream = ShardedStream(
+                    data_files=file_urls,
+                    file_format=file_fmt,
+                    ds_state=ds_state_ref,
+                    initial_skip=0,
+                    total_skip=skip_n,         # slow cross-shard skip; builds tracking
+                    shard_idx_offset=0,
+                )
+
+                # Store resolved file list in state for future shard-aware resumes
+                if ds_state_ref is not None:
+                    ds_state_ref.data_files = file_urls
+                _elapsed = _time.perf_counter() - _t0
+                print(f"[DataLoader] '{ds_entry.name}': resolved {len(file_urls)} data files in {_elapsed:.2f}s")
+                used_shard_path = True  # using ShardedStream (even if no shard skip)
+
+            else:
+                # ── Fallback: original HF loading ────────────
+                kwargs = {}
+                if ds_entry.data_dir is not None:
+                    repo_files = list_repo_files(ds_entry.repo_id, repo_type="dataset")
+                    data_files = [
+                        f"https://huggingface.co/datasets/{ds_entry.repo_id}/resolve/main/{f}"
+                        for f in sorted(repo_files)
+                        if f.startswith(ds_entry.data_dir + "/") and not f.endswith(".md")
+                    ]
+                    if not data_files:
+                        raise ValueError(
+                            f"No data files found under '{ds_entry.data_dir}/' in {ds_entry.repo_id}"
+                        )
+                    fmt = "parquet" if data_files[0].endswith(".parquet") else "json"
+                    stream = load_dataset(
+                        fmt,
+                        data_files=data_files,
+                        split=ds_entry.split,
+                        streaming=ds_entry.streaming,
+                    )
+                else:
+                    if ds_entry.config_name is not None:
+                        kwargs["name"] = ds_entry.config_name
+                    kwargs["trust_remote_code"] = True
+                    stream = load_dataset(
+                        ds_entry.repo_id,
+                        split=ds_entry.split,
+                        streaming=ds_entry.streaming,
+                        **kwargs,
+                    )
+
+                # Legacy naive skip
+                if skip_n > 0:
+                    print(f"[DataLoader] Skipping {skip_n} documents for '{ds_entry.name}' (legacy)")
+                    stream = stream.skip(skip_n)
 
         entries.append((ds_entry.name, stream, ds_entry.weight, fmt_fn))
 
-    return WeightedMixerDataset(
+    # ── Build mixer ──
+    mixer = WeightedMixerDataset(
         dataset_entries=entries,
         context_length=context_length,
         state=restored_state,
     )
+
+    # Ensure data_files is populated on fresh start (for future shard-aware resumes)
+    # and link ShardedStreams to the mixer's state objects for shard tracking
+    if restored_state is None:
+        for name, stream, _, _ in entries:
+            ds_state = mixer.state.dataset_states.get(name)
+            if ds_state is not None and isinstance(stream, ShardedStream):
+                ds_state.data_files = list(stream.all_data_files)
+                # Connect ShardedStream to the mixer-owned state so
+                # docs_per_shard is populated during iteration
+                stream._ds_state = ds_state
+
+    return mixer
 
 
 def create_phase_dataloaders(
