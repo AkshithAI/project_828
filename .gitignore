@@ -129,7 +129,8 @@ assets/
 *.pth
 *.pt
 *.ckpt
-checkpoints/
+!checkpoints/
+!checkpoints/**/*.pt
 
 # Weights & Biases
 wandb/
