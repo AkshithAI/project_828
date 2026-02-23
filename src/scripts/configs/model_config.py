@@ -81,9 +81,14 @@ class PhaseConfig:
 # ──────────────────────────────────────────────────────────────
 # Phase 1:  72B tokens  —  Math / Science / General Knowledge
 # ──────────────────────────────────────────────────────────────
-#   effective_batch = 128 * 8 = 1024 seqs
-#   tokens_per_step ≈ 1024 * 2048 ≈ 2.1M
-#   total_steps     ≈ 72B / 2.1M ≈ 34_300  # 68,664 for 64 micro batch
+#   effective_batch = 40 * 8 = 320 seqs
+#   tokens_per_step ≈ 320 * 2048 ≈ 655K
+#   total_steps     = 72B / 655K ≈ 109_863  (optimizer steps)
+#
+#   WSD schedule (stable_frac=0.60):
+#     warmup:  0 → 1,999          (2,000 steps)
+#     stable:  2,000 → 66,717     (64,718 steps)
+#     decay:   66,718 → 109,863   (43,145 steps, ~39% of training)
 # ──────────────────────────────────────────────────────────────
 PHASE_1_CONFIG = PhaseConfig(
     phase_name="phase_1_math_science",
@@ -91,9 +96,9 @@ PHASE_1_CONFIG = PhaseConfig(
     peak_lr=3.5e-4,
     min_lr=3e-5,
     warmup_steps=2000,
-    total_steps=137329,
+    total_steps=109_863,
     scheduler_type="wsd",
-    wsd_stable_frac=0.76,
+    wsd_stable_frac=0.60,
     micro_batch_size=40,
     grad_accum_steps=8,
     grad_clip=1.0,

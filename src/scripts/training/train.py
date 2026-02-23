@@ -57,11 +57,11 @@ def train_phase(
         wandb_run:    Active W&B run.
         phase_config: ``PhaseConfig`` for this phase.
         base_dir:     Checkpoint directory path.
-        start_step:   Step to resume from (0 = fresh).
+        start_step:   Optimizer step to resume from (0 = fresh).
     """
-    step = start_step
+    optim_step = start_step
     meta_data = None
-    grad_accumulation_step = phase_config.grad_accum_steps
+    grad_accumulation_steps = phase_config.grad_accum_steps
     val_interval = phase_config.val_interval
     patience = phase_config.patience
     phase_num = phase_config.phase_num
@@ -71,10 +71,10 @@ def train_phase(
         best_val_loss = float('inf')
         patience_counter = 0
         optimizer.zero_grad()
+        accum_loss = 0.0
+        micro_count = 0  # counts micro-batches within current accumulation window
 
-        resume_offset = 1 if start_step > 0 else 0
         for i, batch in enumerate(tqdm(train_data, desc=f"Phase {phase_num} Training")):
-            step = i + start_step + resume_offset
             batch = batch.to(config.device, non_blocking=True).long()
             inputs = batch[:, :-1].contiguous()
             targets = batch[:, 1:].contiguous()
@@ -82,23 +82,28 @@ def train_phase(
                 logits = model(inputs)
                 loss = criterion(logits.view(-1, logits.shape[-1]), targets.view(-1))
                 loss_value = loss.item()
-            loss = loss / grad_accumulation_step
+            loss = loss / grad_accumulation_steps
             loss.backward()
-            metrics = {
-                "train/loss": loss_value,
-                "train/lr": scheduler.get_last_lr()[0],
-                "train/ppl": math.exp(min(loss_value, 10)),
-                "train/phase": phase_num,
-            }
+            accum_loss += loss_value
+            micro_count += 1
 
-            if (step + 1) % grad_accumulation_step == 0:
+            if micro_count == grad_accumulation_steps:
+                optim_step += 1
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     model.parameters(), phase_config.grad_clip
                 )
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
-                metrics["train/grad_norm"] = grad_norm.item()
+
+                avg_accum_loss = accum_loss / grad_accumulation_steps
+                metrics = {
+                    "train/loss": avg_accum_loss,
+                    "train/lr": scheduler.get_last_lr()[0],
+                    "train/ppl": math.exp(min(avg_accum_loss, 10)),
+                    "train/phase": phase_num,
+                    "train/grad_norm": grad_norm.item(),
+                }
 
                 for layer_idx, layer in enumerate(model.layers):
                     if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'get_wandb_metrics'):
@@ -109,62 +114,69 @@ def train_phase(
                                 metrics[f"moe/layer_{layer_idx}/{k}"] = v
                             moe.reset_expert_counts()
 
-            wandb_run.log(metrics, step=step)
-            if (step + 1) % 1000 == 0:
-                print(f"Step : {step+1} , Loss : {loss_value:.4f}")
+                wandb_run.log(metrics, step=optim_step)
+                accum_loss = 0.0
+                micro_count = 0
 
-            if (step + 1) % val_interval == 0:
-                val_loss = validation(
-                    model, criterion, val_data, train_step=step,
-                    wandb_run=wandb_run, phase_config=phase_config,
-                )
-                print(generate(model,
-                        "The old clock in the hallway stopped at midnight, and when I touched it a hidden drawer slid open revealing...",
-                        config.device, max_tokens=60, temp=0.8))
-                print(generate(model,
-                        "Explain like I'm five: how does a battery make electricity?",
-                        config.device, max_tokens=80, temp=0.3))
-                print(generate(model,
-                        "Write a Python function that reverses a string and explain its time complexity in one paragraph.",
-                        config.device, max_tokens=120, temp=0.2))
-                print(generate(model,
-                        "Customer: I received a damaged package yesterday and the item is broken. Agent:",
-                        config.device, max_tokens=80, temp=0.4))
-                print(generate(model,
-                        "In 200-250 words, argue for investing in renewable energy for economic growth. Cite one realistic-sounding statistic and label it as an example (do not invent specific study names).",
-                        config.device, max_tokens=250, temp=0.5))
-                model.train()
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
-                    meta_data = {
-                        "step": step,
-                        "train_loss": loss_value,
-                        "val_loss": val_loss,
-                    }
-                    dataloader_state = train_data.get_state()
-                    save_checkpoint(
-                        base_dir, step,
-                        model_data=model.state_dict(),
-                        optimizer_data=optimizer.state_dict(),
-                        scheduler_data=scheduler.state_dict(),
-                        wandb_run=wandb_run,
-                        dataloader_state=dataloader_state,
-                        meta_data=meta_data,
-                        phase=phase_num,
+                if optim_step % 1000 == 0:
+                    print(f"Step : {optim_step} , Loss : {avg_accum_loss:.4f}")
+
+                if optim_step % val_interval == 0:
+                    val_loss = validation(
+                        model, criterion, val_data, train_step=optim_step,
+                        wandb_run=wandb_run, phase_config=phase_config,
                     )
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
-                    if patience_counter >= patience:
-                        print(f"Early Stopping triggered at step : {step}")
-                        break
+                    print(generate(model,
+                            "Chapter 1. The dark forest was",
+                            config.device, max_tokens=60, temp=0.8))
+                    print(generate(model,
+                            "The following is a Python function that reverses a string:\n\ndef reverse_string(s):",
+                            config.device, max_tokens=80, temp=0.3))
+                    print(generate(model,
+                            "To solve the quadratic equation x^2 - 5x + 6 = 0, we first",
+                            config.device, max_tokens=120, temp=0.2))
+                    print(generate(model,
+                            "The theory of general relativity, published by Albert Einstein in 1915, states that",
+                            config.device, max_tokens=80, temp=0.4))
+                    print(generate(model,
+                            "In this essay, I will argue that renewable energy is essential for economic growth because",
+                            config.device, max_tokens=250, temp=0.5))
+                    model.train()
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        meta_data = {
+                            "step": optim_step,
+                            "train_loss": avg_accum_loss,
+                            "val_loss": val_loss,
+                        }
+                        dataloader_state = train_data.get_state()
+                        save_checkpoint(
+                            base_dir, optim_step,
+                            model_data=model.state_dict(),
+                            optimizer_data=optimizer.state_dict(),
+                            scheduler_data=scheduler.state_dict(),
+                            wandb_run=wandb_run,
+                            dataloader_state=dataloader_state,
+                            meta_data=meta_data,
+                            phase=phase_num,
+                        )
+                        patience_counter = 0
+                    else:
+                        patience_counter += 1
+                        if patience_counter >= patience:
+                            print(f"Early Stopping triggered at step : {optim_step}")
+                            break
 
-        print(f"Phase {phase_num} training complete at step {step}.")
+                if optim_step >= phase_config.total_steps:
+                    print(f"Reached total_steps ({phase_config.total_steps}). Phase complete.")
+                    break
+
+        print(f"Phase {phase_num} training complete at optimizer step {optim_step}.")
     except KeyboardInterrupt:
-        print(f"\n[Interrupt] Saving checkpoint at step {step}...")
+        print(f"\n[Interrupt] Saving checkpoint at optimizer step {optim_step}...")
         dataloader_state = train_data.get_state()
         save_checkpoint(
-            base_dir, step,
+            base_dir, optim_step,
             model_data=model.state_dict(),
             optimizer_data=optimizer.state_dict(),
             scheduler_data=scheduler.state_dict(),
@@ -242,11 +254,15 @@ if __name__ == '__main__':
         phase_config = PHASE_2_CONFIG
         for pg in optimizer.param_groups:
             pg["lr"] = phase_config.peak_lr
+
+    if start_step > 0:
         scheduler = create_phase_scheduler(optimizer, phase_config)
-        if start_step > 0:
-            # Fast-forward scheduler to the saved step
-            for _ in range(start_step):
-                scheduler.step()
+        for _ in range(start_step):
+            scheduler.step()
+        current_lr = scheduler.get_last_lr()[0]
+        print(f"[Scheduler] Rebuilt from config and fast-forwarded to optimizer step {start_step}")
+        print(f"[Scheduler] Current LR: {current_lr:.6e}")
+        print(f"[Scheduler] Remaining steps: {phase_config.total_steps - start_step}")
 
     # ── Dataloaders ────────────────────────────────────────
     train_data, val_data = create_phase_dataloaders(

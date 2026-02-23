@@ -104,8 +104,60 @@ def _disable_kv_cache(model):
         attn.cache_v = None
 
 
+def _apply_sampling(logits, temp, k, top_p, repetition_penalty, generated_ids):
+    """
+    Shared sampling logic: repetition penalty -> temperature -> top-k -> top-p -> sample.
+
+    Args:
+        logits:             Raw logits of shape (batch, vocab_size).
+        temp:               Temperature (>0). Lower = more deterministic.
+        k:                  Top-k filtering. 0 disables top-k.
+        top_p:              Nucleus (top-p) probability mass threshold in (0, 1].
+        repetition_penalty: Multiplicative penalty (>=1.0). 1.0 = no penalty.
+        generated_ids:      Tensor of shape (batch, seq) with previously generated
+                            token ids used for the repetition penalty.
+
+    Returns:
+        Sampled token ids of shape (batch, 1).
+    """
+
+    scores = logits.float()
+
+    if repetition_penalty > 1.0 and generated_ids.numel() > 0:
+        for i in range(scores.size(0)):
+            prev_tokens = generated_ids[i].unique()
+            prev_tokens = prev_tokens[prev_tokens >= 0]  
+            token_scores = scores[i, prev_tokens]
+
+            scores[i, prev_tokens] = torch.where(
+                token_scores > 0,
+                token_scores / repetition_penalty,
+                token_scores * repetition_penalty,
+            )
+
+    scores = scores / max(temp, 1e-5)
+
+    if k > 0:
+        top_k_logits, top_k_indices = torch.topk(scores, min(k, scores.size(-1)), dim=-1)
+        filter_mask = torch.full_like(scores, float('-inf'))
+        filter_mask.scatter_(-1, top_k_indices, top_k_logits)
+        scores = filter_mask
+
+    if 0.0 < top_p < 1.0:
+        sorted_logits, sorted_indices = torch.sort(scores, descending=True, dim=-1)
+        cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+        sorted_mask = cumulative_probs - F.softmax(sorted_logits, dim=-1) >= top_p
+        sorted_logits[sorted_mask] = float('-inf')
+        scores = sorted_logits.scatter(-1, sorted_indices, sorted_logits)
+
+    probs = F.softmax(scores, dim=-1)
+    sampled = torch.multinomial(probs, num_samples=1)
+    return sampled
+
+
 @torch.inference_mode()
-def generate(model,seed_txt,device,max_tokens=500,k=50,temp = 0.8):
+def generate(model, seed_txt, device, max_tokens=500, k=50, temp=0.8,
+            top_p=0.9, repetition_penalty=1.15):
     """
     Sample Inference on the model
     
@@ -116,12 +168,12 @@ def generate(model,seed_txt,device,max_tokens=500,k=50,temp = 0.8):
         max_tokens: max sequence length
         k: topk param for selecting top 'k' words from probability distribution
         temp: temperature for sequence generation
+        top_p: nucleus sampling threshold (0.0-1.0). 1.0 disables it.
+        repetition_penalty: penalise repeated tokens (>=1.0). 1.0 disables it.
     """
     was_training = model.training
     model.eval()
 
-    # If the model was not built with inference=True, temporarily enable
-    # KV caching so autoregressive decoding actually works.
     needs_cache_toggle = not getattr(model, 'inference', False)
     if needs_cache_toggle:
         _enable_kv_cache(model)
@@ -131,22 +183,25 @@ def generate(model,seed_txt,device,max_tokens=500,k=50,temp = 0.8):
 
     sampled_tokens = []
     start_pos = 0
-    tokens = torch.tensor(tokenizer.encode(seed_txt)[:-1], device = device, dtype = torch.long).unsqueeze(0)
-    predicted_token = torch.tensor(tokenizer.encode(seed_txt)[-1], device = device, dtype = torch.long).unsqueeze(0)
-    sampled_tokens.extend(tokens.squeeze(0).tolist())
-    model(tokens,start_pos)
-    start_pos = len(sampled_tokens)
+    all_prompt_ids = tokenizer.encode(seed_txt)
+    tokens = torch.tensor(all_prompt_ids[:-1], device=device, dtype=torch.long).unsqueeze(0)
+    predicted_token = torch.tensor(all_prompt_ids[-1], device=device, dtype=torch.long).unsqueeze(0)
+    sampled_tokens.extend(all_prompt_ids)
+    model(tokens, start_pos)
+    start_pos = len(all_prompt_ids) - 1  
+    generated_ids = torch.tensor([all_prompt_ids], device=device, dtype=torch.long)
+
     for _ in tqdm(range(max_tokens)):
-        with torch.autocast(device_type=device,dtype=torch.bfloat16):
-            logits = model(predicted_token.view(1, 1),start_pos)
-        last_seq = logits[:,-1,:] / max(temp, 1e-5)
-        top_k_logits, top_k_indices = torch.topk(last_seq, k, dim=-1)
-        preds = F.softmax(top_k_logits, dim=-1)
-        sampled_idx = torch.multinomial(preds, num_samples=1)
-        idx = top_k_indices.gather(-1, sampled_idx)
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            logits = model(predicted_token.view(1, 1), start_pos)
+
+        idx = _apply_sampling(
+            logits[:, -1, :], temp, k, top_p, repetition_penalty, generated_ids
+        )
+
         idx_item = idx.item()
         sampled_tokens.append(idx_item)
-        tokens = torch.cat((tokens,idx),dim=-1)
+        generated_ids = torch.cat([generated_ids, idx], dim=-1)
         start_pos += 1
         predicted_token = idx
         if idx_item == tokenizer.eos_token_id:
@@ -163,7 +218,8 @@ def generate(model,seed_txt,device,max_tokens=500,k=50,temp = 0.8):
 
 
 @torch.inference_mode()
-def generate_batch(model, prompts, device, max_tokens=500, k=50, temp=0.8):
+def generate_batch(model, prompts, device, max_tokens=500, k=50, temp=0.8,
+                   top_p=0.9, repetition_penalty=1.15):
     """
     Batched inference with KV caching for multiple prompts simultaneously.
 
@@ -177,6 +233,8 @@ def generate_batch(model, prompts, device, max_tokens=500, k=50, temp=0.8):
         max_tokens: max *new* tokens to generate per sequence
         k: top-k sampling parameter
         temp: temperature for sampling
+        top_p: nucleus sampling threshold (0.0-1.0). 1.0 disables it.
+        repetition_penalty: penalise repeated tokens (>=1.0). 1.0 disables it.
 
     Returns:
         list of generated text strings (prompt + continuation)
@@ -184,7 +242,6 @@ def generate_batch(model, prompts, device, max_tokens=500, k=50, temp=0.8):
     model.eval()
     batch_size = len(prompts)
 
-    # ---- Tokenize & left-pad ----
     encoded = [tokenizer.encode(p) for p in prompts]
     prompt_lengths = [len(e) for e in encoded]
     max_prompt_len = max(prompt_lengths)
@@ -198,35 +255,34 @@ def generate_batch(model, prompts, device, max_tokens=500, k=50, temp=0.8):
 
     tokens = torch.tensor(padded, device=device, dtype=torch.long)
 
-    # ---- Position IDs for prefill (actual positions; 0 for pad slots) ----
     position_ids = torch.zeros(batch_size, max_prompt_len, dtype=torch.long, device=device)
     for i in range(batch_size):
         position_ids[i, padding_lengths[i]:] = torch.arange(
             prompt_lengths[i], device=device
         )
 
-    # ---- Prefill attention mask (causal + padding) ----
     prefill_mask = _build_prefill_mask(padding_lengths, max_prompt_len, device)
 
-    # ---- Reset KV cache for this batch ----
     if hasattr(model, 'reset_cache'):
         model.reset_cache(batch_size)
 
-    # ---- Prefill forward pass ----
     with torch.autocast(device_type=device, dtype=torch.bfloat16):
         logits = model(
             tokens, start_pos=0,
             position_ids=position_ids, attn_mask=prefill_mask,
         )
 
-    next_logits = logits[:, -1, :] / max(temp, 1e-5)
-    top_k_logits, top_k_indices = torch.topk(next_logits, k, dim=-1)
-    preds = F.softmax(top_k_logits, dim=-1)
-    sampled_idx = torch.multinomial(preds, num_samples=1)
-    next_tokens = top_k_indices.gather(-1, sampled_idx)        # (batch, 1)
+    generated_ids = torch.full_like(tokens, -1)
+    for i in range(batch_size):
+        generated_ids[i, padding_lengths[i]:] = tokens[i, padding_lengths[i]:]
+
+    next_tokens = _apply_sampling(
+        logits[:, -1, :], temp, k, top_p, repetition_penalty, generated_ids
+    )   # (batch, 1)
 
     all_tokens = [list(encoded[i]) + [next_tokens[i].item()] for i in range(batch_size)]
     finished = [next_tokens[i].item() == tokenizer.eos_token_id for i in range(batch_size)]
+    generated_ids = torch.cat([generated_ids, next_tokens], dim=-1)
 
     for step in tqdm(range(1, max_tokens), desc="Batch generation"):
         if all(finished):
@@ -235,7 +291,6 @@ def generate_batch(model, prompts, device, max_tokens=500, k=50, temp=0.8):
         start_pos = max_prompt_len + step - 1       
         kv_len = start_pos + 1                     
 
-        # Per-sequence position IDs: (batch, 1)
         step_position_ids = torch.tensor(
             [[prompt_lengths[i] + step - 1] for i in range(batch_size)],
             device=device, dtype=torch.long,
@@ -249,11 +304,10 @@ def generate_batch(model, prompts, device, max_tokens=500, k=50, temp=0.8):
                 position_ids=step_position_ids, attn_mask=kv_mask,
             )
 
-        next_logits = logits[:, -1, :] / max(temp, 1e-5)
-        top_k_logits, top_k_indices = torch.topk(next_logits, k, dim=-1)
-        preds = F.softmax(top_k_logits, dim=-1)
-        sampled_idx = torch.multinomial(preds, num_samples=1)
-        next_tokens = top_k_indices.gather(-1, sampled_idx)
+        next_tokens = _apply_sampling(
+            logits[:, -1, :], temp, k, top_p, repetition_penalty, generated_ids
+        )
+        generated_ids = torch.cat([generated_ids, next_tokens], dim=-1)
 
         for i in range(batch_size):
             if not finished[i]:
@@ -281,7 +335,7 @@ if __name__ == '__main__':
         model = GPT_FLASH(config,device,inference=True)
     else:
         model = GPT(config,device)
-    
+    model.load_state_dict(torch.load("/Users/apple/Documents/project-828/project_828/checkpoints/model_88230.pt",map_location="cpu"))
     # Reset expert counts from training before inference
     for layer in model.layers:
         if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'reset_expert_counts'):
@@ -289,12 +343,9 @@ if __name__ == '__main__':
     
     print("  SINGLE SEQUENCE INFERENCE")
 
-    seed_txt = "The investigation of past cultures of the modern"
+    seed_txt = "The theory of general relativity, published by Albert Einstein in 1915, states that"
     generated_text = generate(model,seed_txt,device)
     print(generated_text)
-    
-    # Display expert usage statistics
-    display_expert_stats(model)
     
     print("\n")
     print("  BATCHED INFERENCE")
@@ -305,15 +356,15 @@ if __name__ == '__main__':
             layer.mlp.reset_expert_counts()
 
     test_prompts = [
-        "The investigation of past cultures of the modern",
-        "In the beginning, there was",
-        "Artificial intelligence has transformed the way we",
-        "The quick brown fox jumped over the",
-        "Deep in the ocean, scientists discovered",
+        "Chapter 1. The dark forest was",
+        "The following is a Python function that reverses a string:\n\ndef reverse_string(s):",
+        "To solve the quadratic equation x^2 - 5x + 6 = 0, we first",
+        "The theory of general relativity, published by Albert Einstein in 1915, states that",
+        "In this essay, I will argue that renewable energy is essential for economic growth because",
     ]
 
     print(f"Running batched inference on {len(test_prompts)} prompts...\n")
     batch_results = generate_batch(model, test_prompts, device, max_tokens=200)
 
     # Display expert stats after batched inference
-    display_expert_stats(model)
+    #display_expert_stats(model)
