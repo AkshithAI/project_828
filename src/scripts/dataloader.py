@@ -111,9 +111,9 @@ class DatasetStreamState:
     documents_processed: int = 0      
     buffer_tokens: List[int] = field(default_factory=list)
     weight: int = 1
-    # Shard-aware fields for fast resume
-    data_files: List[str] = field(default_factory=list)       # ordered file URLs
-    docs_per_shard: List[int] = field(default_factory=list)   # docs consumed per shard
+
+    data_files: List[str] = field(default_factory=list)       
+    docs_per_shard: List[int] = field(default_factory=list)   
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -233,12 +233,10 @@ class ShardedStream:
                 streaming=True,
             )
 
-            # Shard-aware skip: skip within the first remaining shard only
             if local_idx == 0 and self._initial_skip > 0:
                 shard_ds = shard_ds.skip(self._initial_skip)
 
             for row in shard_ds:
-                # Track per-shard doc count in the live state object
                 if self._ds_state is not None:
                     dps = self._ds_state.docs_per_shard
                     while len(dps) <= global_idx:
@@ -334,7 +332,7 @@ def _compute_shard_skip(
         if cumulative >= documents_processed:
             offset = documents_processed - (cumulative - count)
             return i, offset
-    # All recorded shards fully consumed — start after the last one
+
     return len(docs_per_shard), 0
 
 
@@ -372,7 +370,7 @@ def _count_shard_rows_fast(file_urls: List[str]) -> Optional[List[int]]:
                     print(f"\r[DataLoader]   Counting shard rows: {done}/{len(file_urls)}",
                           end="", flush=True)
         if file_urls:
-            print()  # newline after progress
+            print()
         return counts
     except ImportError:
         return None
@@ -465,20 +463,16 @@ class ResumableDataset(IterableDataset):
         buffer = list(self.state.buffer_tokens) if self.state.buffer_tokens else []
         
         for doc in self.data:
-            # Tokenize document
             tokens = tokenizer(
                 doc['text'],
                 return_attention_mask=False
             )["input_ids"]
             
-            # Add tokens and EOS to buffer
             buffer.extend(tokens)
             buffer.append(tokenizer.eos_token_id)
             
-            # Increment document counter AFTER processing
             self.state.documents_processed += 1
             
-            # Yield complete chunks
             while len(buffer) >= self.context_length + 1:
                 chunk = torch.tensor(buffer[:self.context_length + 1], dtype=torch.long)
                 buffer = buffer[self.context_length + 1:]
@@ -853,7 +847,7 @@ def load_phase_datasets(
             and ds_state_ref.data_files
             and skip_n > 0
         ):
-            # We have shard tracking from a previous run → fast skip
+
             data_files = ds_state_ref.data_files
             docs_per_shard = ds_state_ref.docs_per_shard
             fmt = "parquet" if data_files[0].endswith(".parquet") else "json"
@@ -874,7 +868,7 @@ def load_phase_datasets(
                 initial_skip=shard_offset,
                 shard_idx_offset=start_shard,
             )
-            # Keep the full file list in state for future resumes
+
             ds_state_ref.data_files = data_files
             used_shard_path = True
             _elapsed = _time.perf_counter() - _t0

@@ -89,6 +89,14 @@ class PhaseConfig:
 #     warmup:  0 → 1,999          (2,000 steps)
 #     stable:  2,000 → 66,717     (64,718 steps)
 #     decay:   66,718 → 109,863   (43,145 steps, ~39% of training)
+#
+#   Dataset mix (weights sum to 100):
+#     openmath-instruct-2          25   — math reasoning (problem + solution)
+#     proof-pile-algebraic-stack   12   — mathematical code (11B tokens)
+#     proof-pile-open-web-math      9   — accessible math text (15B tokens)
+#     proof-pile-arxiv              4   — arXiv papers, low weight (29B tokens)
+#     fineweb-edu                  30   — general knowledge
+#     cosmopedia-v2                20   — synthetic textbooks
 # ──────────────────────────────────────────────────────────────
 PHASE_1_CONFIG = PhaseConfig(
     phase_name="phase_1_math_science",
@@ -102,7 +110,7 @@ PHASE_1_CONFIG = PhaseConfig(
     micro_batch_size=40,
     grad_accum_steps=8,
     grad_clip=1.0,
-    val_interval=10000,
+    val_interval=2500,
     val_steps=3000,
     patience=5,
     datasets=[
@@ -113,11 +121,25 @@ PHASE_1_CONFIG = PhaseConfig(
             format_fn="openmath",
         ),
         DatasetEntry(
-            name="proof-pile-2",
+            name="proof-pile-algebraic-stack",
             repo_id="EleutherAI/proof-pile-2",
-            weight=20,
+            weight=12,
             format_fn="default",
             data_dir="algebraic-stack",
+        ),
+        DatasetEntry(
+            name="proof-pile-open-web-math",
+            repo_id="EleutherAI/proof-pile-2",
+            weight=9,
+            format_fn="default",
+            data_dir="open-web-math",
+        ),
+        DatasetEntry(
+            name="proof-pile-arxiv",
+            repo_id="EleutherAI/proof-pile-2",
+            weight=4,
+            format_fn="default",
+            data_dir="arxiv",
         ),
         DatasetEntry(
             name="fineweb-edu",
@@ -129,7 +151,7 @@ PHASE_1_CONFIG = PhaseConfig(
         DatasetEntry(
             name="cosmopedia-v2",
             repo_id="HuggingFaceTB/cosmopedia-v2",
-            weight=25,
+            weight=20,
             format_fn="default",
             config_name="cosmopedia-v2",
         ),

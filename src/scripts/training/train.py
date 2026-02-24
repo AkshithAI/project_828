@@ -275,7 +275,7 @@ if __name__ == '__main__':
         print(f"[Scheduler] Remaining steps: {phase_config.total_steps - start_step}")
 
     # ── Compile model ──────────────────────────────────────
-    model = torch.compile(model, mode="max-autotune")
+    model = torch.compile(model, mode="max-autotune-no-cudagraphs")
 
     # ── Dataloaders ────────────────────────────────────────
     train_data, val_data = create_phase_dataloaders(
