@@ -38,7 +38,7 @@ def validation(model, criterion, val_data, train_step, wandb_run, phase_config):
   wandb_run.log({
       "val/loss": avg_val_loss,
       "val/ppl": math.exp(min(avg_val_loss, 10)),
-  }, step=train_step, commit=False)
+  }, step=8*train_step, commit=False)
   return avg_val_loss
 
 def train_phase(
@@ -72,7 +72,7 @@ def train_phase(
         patience_counter = 0
         optimizer.zero_grad()
         accum_loss = 0.0
-        micro_count = 0  # counts micro-batches within current accumulation window
+        micro_count = 0  
 
         for i, batch in enumerate(tqdm(train_data, desc=f"Phase {phase_num} Training")):
             batch = batch.to(config.device, non_blocking=True).long()
@@ -105,16 +105,15 @@ def train_phase(
                     "train/grad_norm": grad_norm.item(),
                 }
 
-                for layer_idx, layer in enumerate(model.layers):
-                    if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'get_wandb_metrics'):
+                # MoE expert count logging disabled
+                raw = _unwrap(model)
+                for layer_idx, layer in enumerate(raw.layers):
+                    if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'reset_expert_counts'):
                         moe = layer.mlp
                         if moe.total_tokens > 0:
-                            moe_metrics = moe.get_wandb_metrics()
-                            for k, v in moe_metrics.items():
-                                metrics[f"moe/layer_{layer_idx}/{k}"] = v
                             moe.reset_expert_counts()
 
-                wandb_run.log(metrics, step=optim_step)
+                wandb_run.log(metrics, step=8*optim_step)
                 accum_loss = 0.0
                 micro_count = 0
 
@@ -126,19 +125,20 @@ def train_phase(
                         model, criterion, val_data, train_step=optim_step,
                         wandb_run=wandb_run, phase_config=phase_config,
                     )
-                    print(generate(model,
+                    raw = _unwrap(model)
+                    print(generate(raw,
                             "Chapter 1. The dark forest was",
                             config.device, max_tokens=60, temp=0.8))
-                    print(generate(model,
+                    print(generate(raw,
                             "The following is a Python function that reverses a string:\n\ndef reverse_string(s):",
                             config.device, max_tokens=80, temp=0.3))
-                    print(generate(model,
+                    print(generate(raw,
                             "To solve the quadratic equation x^2 - 5x + 6 = 0, we first",
                             config.device, max_tokens=120, temp=0.2))
-                    print(generate(model,
+                    print(generate(raw,
                             "The theory of general relativity, published by Albert Einstein in 1915, states that",
                             config.device, max_tokens=80, temp=0.4))
-                    print(generate(model,
+                    print(generate(raw,
                             "In this essay, I will argue that renewable energy is essential for economic growth because",
                             config.device, max_tokens=250, temp=0.5))
                     model.train()
@@ -152,7 +152,7 @@ def train_phase(
                         dataloader_state = train_data.get_state()
                         save_checkpoint(
                             base_dir, optim_step,
-                            model_data=model.state_dict(),
+                            model_data=_unwrap(model).state_dict(),
                             optimizer_data=optimizer.state_dict(),
                             scheduler_data=scheduler.state_dict(),
                             wandb_run=wandb_run,
@@ -177,7 +177,7 @@ def train_phase(
         dataloader_state = train_data.get_state()
         save_checkpoint(
             base_dir, optim_step,
-            model_data=model.state_dict(),
+            model_data=_unwrap(model).state_dict(),
             optimizer_data=optimizer.state_dict(),
             scheduler_data=scheduler.state_dict(),
             wandb_run=wandb_run,
@@ -190,9 +190,19 @@ def train_phase(
 
 
 
+def _unwrap(model):
+    """Return the raw module behind torch.compile (or the model itself)."""
+    return getattr(model, '_orig_mod', model)
+
+
 if __name__ == '__main__':
     warnings.filterwarnings("ignore")
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+    torch.set_float32_matmul_precision('high')       
+    torch.backends.cudnn.benchmark = True            
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
+
     base_dir = get_base_dir("checkpoints")
 
     # ── Model ──────────────────────────────────────────────
@@ -263,6 +273,9 @@ if __name__ == '__main__':
         print(f"[Scheduler] Rebuilt from config and fast-forwarded to optimizer step {start_step}")
         print(f"[Scheduler] Current LR: {current_lr:.6e}")
         print(f"[Scheduler] Remaining steps: {phase_config.total_steps - start_step}")
+
+    # ── Compile model ──────────────────────────────────────
+    model = torch.compile(model, mode="max-autotune")
 
     # ── Dataloaders ────────────────────────────────────────
     train_data, val_data = create_phase_dataloaders(
