@@ -117,23 +117,15 @@ def load_checkpoint(base_dir, model, optimizer=None, scheduler=None, device="cud
     if dataloader_path.exists():
         print(f"Loading dataloader checkpoint from {dataloader_path}")
         dataloader_state = torch.load(dataloader_path, map_location="cpu", weights_only=False)
-        # Detect format version
-        version = dataloader_state.get("version", 1)
-        if version >= 2:
-            # New MixerState format
-            phase = dataloader_state.get("phase", 1)
-            ds_states = dataloader_state.get("dataset_states", {})
-            total_docs = sum(s.get("documents_processed", 0) for s in ds_states.values())
-            print(f"  -> Mixer state (v{version}): phase={phase}, "
-                  f"{dataloader_state.get('samples_yielded', 0)} samples, "
-                  f"{total_docs} total documents across {len(ds_states)} datasets")
-            for ds_name, ds_s in ds_states.items():
-                print(f"     {ds_name}: {ds_s.get('documents_processed', 0)} docs, "
-                      f"{len(ds_s.get('buffer_tokens', []))} buffered tokens")
-        else:
-            # Legacy single-dataset format
-            print(f"  -> Legacy state: {dataloader_state.get('batches_yielded', 0)} batches, "
-                  f"{dataloader_state.get('documents_processed', 0)} documents")
+        phase = dataloader_state.get("phase", 1)
+        ds_states = dataloader_state.get("dataset_states", {})
+        total_docs = sum(s.get("documents_processed", 0) for s in ds_states.values())
+        print(f"  -> Mixer state: phase={phase}, "
+              f"{dataloader_state.get('samples_yielded', 0)} samples, "
+              f"{total_docs} total documents across {len(ds_states)} datasets")
+        for ds_name, ds_s in ds_states.items():
+            print(f"     {ds_name}: {ds_s.get('documents_processed', 0)} docs, "
+                  f"{len(ds_s.get('buffer_tokens', []))} buffered tokens")
     else:
         print(f"Warning: Dataloader checkpoint not found at {dataloader_path}")
     
@@ -185,18 +177,11 @@ def save_checkpoint(ckpt_dir, step, model_data, optimizer_data, scheduler_data, 
     if dataloader_state is not None:
         dataloader_state["phase"] = phase
         torch.save(dataloader_state, dataloader_path)
-        # Log summary depending on state format
-        version = dataloader_state.get("version", 1)
-        if version >= 2:
-            ds_states = dataloader_state.get("dataset_states", {})
-            total_docs = sum(s.get("documents_processed", 0) for s in ds_states.values())
-            print(f"[Checkpoint] Saved mixer state (phase {phase}): "
-                  f"{dataloader_state.get('samples_yielded', 0)} samples, "
-                  f"{total_docs} docs across {len(ds_states)} datasets")
-        else:
-            print(f"[Checkpoint] Saved dataloader state: "
-                  f"{dataloader_state.get('batches_yielded', 0)} batches, "
-                  f"{dataloader_state.get('documents_processed', 0)} documents")
+        ds_states = dataloader_state.get("dataset_states", {})
+        total_docs = sum(s.get("documents_processed", 0) for s in ds_states.values())
+        print(f"[Checkpoint] Saved mixer state (phase {phase}): "
+              f"{dataloader_state.get('samples_yielded', 0)} samples, "
+              f"{total_docs} docs across {len(ds_states)} datasets")
 
     art_name = f"model-checkpoint-test-{step:06d}" 
     artifact = wandb.Artifact(art_name, type="model")    

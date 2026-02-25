@@ -1,7 +1,7 @@
 import torch
 import math
 from datasets import load_dataset
-from huggingface_hub import list_repo_files
+from huggingface_hub import list_repo_files, hf_hub_download
 from .tokenizer import tokenizer
 from torch.utils.data import IterableDataset, DataLoader
 from .configs.model_config import config, PhaseConfig, DatasetEntry
@@ -142,11 +142,9 @@ class MixerState:
     batch_size: int = 128
     draw_cycle_position: int = 0
     dataset_states: Dict[str, DatasetStreamState] = field(default_factory=dict)
-    version: int = 2                  
 
     def to_dict(self) -> Dict[str, Any]:
         d = {
-            "version": self.version,
             "samples_yielded": self.samples_yielded,
             "batches_yielded": self.batches_yielded,
             "context_length": self.context_length,
@@ -171,7 +169,6 @@ class MixerState:
             batch_size=data.get("batch_size", 128),
             draw_cycle_position=data.get("draw_cycle_position", 0),
             dataset_states=ds_states,
-            version=data.get("version", 2),
         )
 
 
@@ -257,12 +254,145 @@ class ShardedStream:
                 yield row
 
 
+class LocalZstStream:
+    """
+    Shard-aware streaming for ``.jsonl.zst`` files via local caching.
+
+    Each shard is downloaded to the HuggingFace cache directory with
+    ``hf_hub_download()`` **before** any rows are read.  This gives us:
+
+    * **Built-in retry + resume** — ``hf_hub_download`` uses HTTP Range
+      headers to resume interrupted downloads automatically.
+    * **Disk caching** — once downloaded, the shard is never re-fetched.
+    * **Zero network errors during reading** — decompression and JSON
+      parsing happen entirely on local disk.
+
+    The API mirrors :class:`ShardedStream` so the rest of the pipeline
+    (``load_phase_datasets``, ``WeightedMixerDataset``) works unchanged.
+    """
+
+    def __init__(
+        self,
+        repo_id: str,
+        data_files: List[str],
+        ds_state: Optional[DatasetStreamState] = None,
+        initial_skip: int = 0,
+        total_skip: int = 0,
+        shard_idx_offset: int = 0,
+    ):
+        assert not (initial_skip > 0 and total_skip > 0), (
+            "LocalZstStream: initial_skip and total_skip are mutually exclusive. "
+            f"Got initial_skip={initial_skip}, total_skip={total_skip}."
+        )
+        self.repo_id = repo_id
+        self.data_files = data_files
+        self.all_data_files = list(data_files)
+        self.current_shard_idx = shard_idx_offset
+        self._shard_idx_offset = shard_idx_offset
+        self._ds_state = ds_state
+        self._initial_skip = initial_skip
+        self._total_skip = total_skip
+
+    # ── helpers ───────────────────────────────────────────────
+
+    @staticmethod
+    def _extract_filename(file_ref: str) -> str:
+        """Extract repo-relative path from an HF resolve URL (or pass through)."""
+        marker = "/resolve/main/"
+        idx = file_ref.find(marker)
+        return file_ref[idx + len(marker):] if idx != -1 else file_ref
+
+    def _download_shard(self, file_ref: str) -> str:
+        """Download a shard to local cache with aggressive retry."""
+        import time as _time_mod
+
+        filename = self._extract_filename(file_ref)
+        max_retries = 10
+        base_backoff = 30  # seconds
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                return hf_hub_download(
+                    repo_id=self.repo_id,
+                    filename=filename,
+                    repo_type="dataset",
+                )
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
+                if attempt >= max_retries:
+                    raise
+                wait = min(base_backoff * (2 ** (attempt - 1)), 600)
+                print(f"[LocalZstStream] Download error for {filename}: {exc!r}")
+                print(f"[LocalZstStream] Retrying in {wait}s "
+                      f"(attempt {attempt}/{max_retries})")
+                _time_mod.sleep(wait)
+
+    @staticmethod
+    def _iter_local_zst(local_path: str):
+        """Yield parsed dicts from a local ``.jsonl.zst`` file."""
+        import io
+        import json as _json
+        import zstandard as zstd
+
+        with open(local_path, "rb") as fh:
+            dctx = zstd.ZstdDecompressor()
+            with dctx.stream_reader(fh) as reader:
+                text_stream = io.TextIOWrapper(reader, encoding="utf-8")
+                for line in text_stream:
+                    line = line.strip()
+                    if line:
+                        yield _json.loads(line)
+
+    # ── main iterator ────────────────────────────────────────
+
+    def __iter__(self):
+        remaining_skip = self._total_skip
+
+        for local_idx, file_ref in enumerate(self.data_files):
+            global_idx = self._shard_idx_offset + local_idx
+            self.current_shard_idx = global_idx
+
+            fname = self._extract_filename(file_ref)
+            print(f"[LocalZstStream] Caching shard {global_idx}: {fname}")
+            local_path = self._download_shard(file_ref)
+            print(f"[LocalZstStream] Reading from cache: {local_path}")
+
+            rows_in_shard = 0
+            for row in self._iter_local_zst(local_path):
+                rows_in_shard += 1
+
+                if local_idx == 0 and rows_in_shard <= self._initial_skip:
+                    continue
+
+                if self._ds_state is not None:
+                    dps = self._ds_state.docs_per_shard
+                    while len(dps) <= global_idx:
+                        dps.append(0)
+                    dps[global_idx] += 1
+
+                if remaining_skip > 0:
+                    remaining_skip -= 1
+                    skipped = self._total_skip - remaining_skip
+                    if skipped % 200_000 == 0:
+                        print(f"[LocalZstStream] Skip progress: "
+                              f"{skipped:,}/{self._total_skip:,} docs "
+                              f"(shard {global_idx})")
+                    continue
+
+                yield row
+
+
 def resolve_dataset_files(
     ds_entry: 'DatasetEntry',
 ) -> Tuple[Optional[List[str]], Optional[str]]:
     """
     Resolve a :class:`DatasetEntry` to an ordered list of data-file
-    URLs and a format string (``"parquet"`` or ``"json"``).
+    URLs and a format string (``"parquet"``, ``"json"``, or ``"zst"``).
+
+    For datasets with ``data_dir`` set, the resolver checks for a
+    ``{data_dir}/{split}/`` subdirectory first (e.g. ``arxiv/train/``),
+    falling back to ``{data_dir}/`` if no split subdirectory exists.
 
     Falls back to ``(None, None)`` when the repo layout cannot be
     determined automatically.
@@ -275,16 +405,27 @@ def resolve_dataset_files(
 
     matched: List[str] = []
 
+    _DATA_EXTS = (".parquet", ".json", ".jsonl", ".jsonl.zst", ".json.zst")
+
     if ds_entry.data_dir is not None:
+        split = ds_entry.split or "train"
+
+        prefix_with_split = f"{ds_entry.data_dir}/{split}/"
         matched = [
             f for f in all_files
-            if f.startswith(ds_entry.data_dir + "/")
-            and not f.endswith((".md", ".gitattributes"))
-            and (f.endswith(".parquet") or f.endswith(".json") or f.endswith(".jsonl"))
+            if f.startswith(prefix_with_split)
+            and f.endswith(_DATA_EXTS)
         ]
+
+        if not matched:
+            matched = [
+                f for f in all_files
+                if f.startswith(ds_entry.data_dir + "/")
+                and not f.endswith((".md", ".gitattributes"))
+                and f.endswith(_DATA_EXTS)
+            ]
     else:
         split = ds_entry.split or "train"
-        _DATA_EXTS = (".parquet", ".json", ".jsonl")
         # 1. {config_name}/*{split}*.parquet
         if ds_entry.config_name:
             matched = [
@@ -314,7 +455,9 @@ def resolve_dataset_files(
         f"https://huggingface.co/datasets/{ds_entry.repo_id}/resolve/main/{f}"
         for f in sorted(matched)
     ]
-    fmt = "parquet" if urls[0].endswith(".parquet") else "json"
+    fmt = "parquet" if urls[0].endswith(".parquet") else (
+        "zst" if urls[0].endswith((".jsonl.zst", ".json.zst")) else "json"
+    )
     return urls, fmt
 
 
@@ -377,55 +520,6 @@ def _count_shard_rows_fast(file_urls: List[str]) -> Optional[List[int]]:
     except Exception as e:
         print(f"\n[DataLoader] Fast shard row counting failed: {e}")
         return None
-
-
-def get_train_files(repo_id):
-    branch = "main"
-
-    # get all file paths from the repo
-    all_shards = sorted(list_repo_files(repo_id, repo_type="dataset"))
-
-    def to_url(path):
-        return f"https://huggingface.co/datasets/{repo_id}/resolve/{branch}/{path}"
-
-    train_urls = [to_url(p) for p in all_shards]
-    return train_urls[2:]  # Exclude readme and .gitattributes file
-
-
-def get_hf_datasets(train_files, skip_documents: int = 0):
-    """
-    Load dataset directly using the datasets library with streaming. 
-    Uses all shards except last 4 for training, and last 4 for validation.
-    
-    Args:
-        train_files: List of file URLs
-        skip_documents: Number of documents to skip for resumption (only for training)
-    """
-    train_urls = train_files[:-4]
-    val_urls = train_files[-4:]
-    
-    # Detect file format from first file extension
-    file_format = 'parquet' if train_urls[0].endswith('.parquet') else 'json'
-    
-    ds_for_train = load_dataset(
-        file_format,
-        data_files=train_urls,
-        split='train',
-        streaming=True
-    )
-    
-    # Skip documents if resuming
-    if skip_documents > 0:
-        ds_for_train = ds_for_train.skip(skip_documents)
-    
-    ds_for_val = load_dataset(
-        file_format,
-        data_files=val_urls,
-        split='train',
-        streaming=True
-    )
-    
-    return ds_for_train, ds_for_val
 
 
 class ResumableDataset(IterableDataset):
@@ -549,77 +643,6 @@ class ResumableDataLoader:
         for batch in self._dataloader:
             self.dataset.state.batches_yielded += 1
             yield batch
-
-
-def create_resumable_dataloaders(
-    repo_id: str = "karpathy/fineweb-edu-100b-shuffle",
-    train_state: Optional[Dict[str, Any]] = None,
-    batch_size_train: int = 4,
-    batch_size_val: int = 16,
-    context_length: int = 2048
-):
-    """
-    Factory function to create resumable train and validation dataloaders.
-    
-    Args:
-        repo_id: HuggingFace dataset repository ID
-        train_state: Optional saved state to resume from
-        batch_size_train: Batch size for training
-        batch_size_val: Batch size for validation
-        context_length: Context length for samples
-        
-    Returns:
-        tuple: (train_dataloader, val_dataloader)
-    """
-    train_files = get_train_files(repo_id)
-    
-    skip_documents = 0
-    buffer_tokens = []
-    if train_state is not None:
-        skip_documents = train_state.get('documents_processed', 0)
-        buffer_tokens = train_state.get('buffer_tokens', [])
-        print(f"[DataLoader] Resuming: skipping {skip_documents} documents")
-    
-    ds_for_train, ds_for_val = get_hf_datasets(train_files, skip_documents=skip_documents)
-    
-    train_dataset_state = DataLoaderState(
-        context_length=context_length,
-        batch_size=batch_size_train,
-        buffer_tokens=buffer_tokens
-    )
-    if train_state is not None:
-        train_dataset_state.samples_yielded = train_state.get('samples_yielded', 0)
-        train_dataset_state.batches_yielded = train_state.get('batches_yielded', 0)
-        train_dataset_state.documents_processed = train_state.get('documents_processed', 0)
-    
-    train_dataset = ResumableDataset(
-        ds_for_train, 
-        context_length=context_length,
-        state=train_dataset_state
-    )
-    
-    val_dataset = ResumableDataset(
-        ds_for_val,
-        context_length=context_length,
-        state=DataLoaderState(context_length=context_length, batch_size=batch_size_val)
-    )
-
-    train_loader = ResumableDataLoader(
-        train_dataset,
-        batch_size=batch_size_train,
-        pin_memory=True,
-        num_workers=0
-    )
-    
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size_val,
-        collate_fn=lambda batch: torch.stack(batch, dim=0),
-        pin_memory=True,
-        num_workers=0
-    )
-    
-    return train_loader, val_loader
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -800,7 +823,7 @@ def load_phase_datasets(
 
     # ── Parse saved state ────────────────────────────────────
     restored_state: Optional[MixerState] = None
-    if mixer_state is not None and mixer_state.get("version", 1) >= 2:
+    if mixer_state is not None:
         restored_state = MixerState.from_dict(mixer_state)
         saved_names = set(restored_state.dataset_states.keys())
         config_names = {ds.name for ds in phase_config.datasets}
@@ -850,7 +873,14 @@ def load_phase_datasets(
 
             data_files = ds_state_ref.data_files
             docs_per_shard = ds_state_ref.docs_per_shard
-            fmt = "parquet" if data_files[0].endswith(".parquet") else "json"
+
+            if data_files[0].endswith(".parquet"):
+                fmt = "parquet"
+            elif data_files[0].endswith((".jsonl.zst", ".json.zst")):
+                fmt = "zst"
+            else:
+                fmt = "json"
+
             start_shard, shard_offset = _compute_shard_skip(docs_per_shard, skip_n)
 
             remaining_files = data_files[start_shard:]
@@ -861,13 +891,22 @@ def load_phase_datasets(
                 f"({len(remaining_files)} shards remaining)"
             )
             _t0 = _time.perf_counter()
-            stream = ShardedStream(
-                data_files=remaining_files,
-                file_format=fmt,
-                ds_state=ds_state_ref,
-                initial_skip=shard_offset,
-                shard_idx_offset=start_shard,
-            )
+            if fmt == "zst":
+                stream = LocalZstStream(
+                    repo_id=ds_entry.repo_id,
+                    data_files=remaining_files,
+                    ds_state=ds_state_ref,
+                    initial_skip=shard_offset,
+                    shard_idx_offset=start_shard,
+                )
+            else:
+                stream = ShardedStream(
+                    data_files=remaining_files,
+                    file_format=fmt,
+                    ds_state=ds_state_ref,
+                    initial_skip=shard_offset,
+                    shard_idx_offset=start_shard,
+                )
 
             ds_state_ref.data_files = data_files
             used_shard_path = True
@@ -923,14 +962,24 @@ def load_phase_datasets(
                             f"using naive skip ({skip_n:,} docs). "
                             f"Shard tracking will be saved in next checkpoint."
                         )
-                    stream = ShardedStream(
-                        data_files=file_urls,
-                        file_format=file_fmt,
-                        ds_state=ds_state_ref,
-                        initial_skip=0,
-                        total_skip=skip_n,
-                        shard_idx_offset=0,
-                    )
+                    if file_fmt == "zst":
+                        stream = LocalZstStream(
+                            repo_id=ds_entry.repo_id,
+                            data_files=file_urls,
+                            ds_state=ds_state_ref,
+                            initial_skip=0,
+                            total_skip=skip_n,
+                            shard_idx_offset=0,
+                        )
+                    else:
+                        stream = ShardedStream(
+                            data_files=file_urls,
+                            file_format=file_fmt,
+                            ds_state=ds_state_ref,
+                            initial_skip=0,
+                            total_skip=skip_n,
+                            shard_idx_offset=0,
+                        )
                     if ds_state_ref is not None:
                         ds_state_ref.data_files = file_urls
                     _elapsed = _time.perf_counter() - _t0
@@ -939,69 +988,19 @@ def load_phase_datasets(
                     used_shard_path = True
 
             else:
-                # ── Fallback: original HF loading ────────────
+                # ── Fallback: native HF loading ─────────────
                 kwargs = {}
                 if ds_entry.data_dir is not None:
-                    repo_files = list_repo_files(ds_entry.repo_id, repo_type="dataset")
-                    data_files = [
-                        f"https://huggingface.co/datasets/{ds_entry.repo_id}/resolve/main/{f}"
-                        for f in sorted(repo_files)
-                        if f.startswith(ds_entry.data_dir + "/") and not f.endswith(".md")
-                    ]
-                    if not data_files:
-                        raise ValueError(
-                            f"No data files found under '{ds_entry.data_dir}/' "
-                            f"in {ds_entry.repo_id}"
-                        )
-                    fmt = "parquet" if data_files[0].endswith(".parquet") else "json"
+                    kwargs["data_dir"] = ds_entry.data_dir
+                if ds_entry.config_name is not None:
+                    kwargs["name"] = ds_entry.config_name
 
-                    # Try metadata-based shard skip for parquet data_dir files
-                    if skip_n > 0 and fmt == "parquet":
-                        print(f"[DataLoader] Counting rows in {len(data_files)} shards "
-                              f"for '{ds_entry.name}' (data_dir parquet metadata)...")
-                        shard_row_counts = _count_shard_rows_fast(data_files)
-                        if shard_row_counts is not None:
-                            start_shard, shard_offset = _compute_shard_skip(
-                                shard_row_counts, skip_n
-                            )
-                            remaining_files = data_files[start_shard:]
-                            print(
-                                f"[DataLoader] Metadata skip for '{ds_entry.name}': "
-                                f"skipping {start_shard} full shards, "
-                                f"offset {shard_offset} in shard {start_shard} "
-                                f"({len(remaining_files)} shards remaining)"
-                            )
-                            stream = ShardedStream(
-                                data_files=remaining_files,
-                                file_format=fmt,
-                                ds_state=ds_state_ref,
-                                initial_skip=shard_offset,
-                                shard_idx_offset=start_shard,
-                            )
-                            if ds_state_ref is not None:
-                                ds_state_ref.data_files = data_files
-                                ds_state_ref.docs_per_shard = (
-                                    list(shard_row_counts[:start_shard]) + [shard_offset]
-                                )
-                            used_shard_path = True
-
-                    if not used_shard_path:
-                        stream = load_dataset(
-                            fmt,
-                            data_files=data_files,
-                            split=ds_entry.split,
-                            streaming=ds_entry.streaming,
-                        )
-                else:
-                    if ds_entry.config_name is not None:
-                        kwargs["name"] = ds_entry.config_name
-                    kwargs["trust_remote_code"] = True
-                    stream = load_dataset(
-                        ds_entry.repo_id,
-                        split=ds_entry.split,
-                        streaming=ds_entry.streaming,
-                        **kwargs,
-                    )
+                stream = load_dataset(
+                    ds_entry.repo_id,
+                    split=ds_entry.split,
+                    streaming=ds_entry.streaming,
+                    **kwargs,
+                )
 
                 # Legacy naive skip (only if not already using ShardedStream)
                 if not used_shard_path and skip_n > 0:
@@ -1018,15 +1017,11 @@ def load_phase_datasets(
         state=restored_state,
     )
 
-    # Ensure data_files is populated on fresh start (for future shard-aware resumes)
-    # and link ShardedStreams to the mixer's state objects for shard tracking
     if restored_state is None:
         for name, stream, _, _ in entries:
             ds_state = mixer.state.dataset_states.get(name)
-            if ds_state is not None and isinstance(stream, ShardedStream):
+            if ds_state is not None and isinstance(stream, (ShardedStream, LocalZstStream)):
                 ds_state.data_files = list(stream.all_data_files)
-                # Connect ShardedStream to the mixer-owned state so
-                # docs_per_shard is populated during iteration
                 stream._ds_state = ds_state
 
     return mixer
