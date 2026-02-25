@@ -193,6 +193,26 @@ class ShardedStream:
     * **total_skip** — skip *N* rows across **all** shards sequentially.
       Used on legacy resume when ``docs_per_shard`` is not yet populated
       (same speed as before, but builds shard tracking for future resumes).
+
+    Supports all formats that HuggingFace ``datasets`` can stream:
+    parquet, json, and jsonl.zst (auto-detected via ``fsspec``).
+    For unreliable network connections (e.g. large ``.jsonl.zst`` shards),
+    per-shard retry logic re-opens the HTTP stream and skips to the
+    failure point — no local caching required.
+
+    Args:
+        data_files:        Ordered list of data-file URLs.
+        file_format:       Format string for ``load_dataset``
+                           (``"parquet"`` or ``"json"``). The HF datasets
+                           library auto-detects ``.zst`` compression.
+        ds_state:          Optional state object for shard tracking.
+        initial_skip:      Rows to skip within the **first** shard only.
+        total_skip:        Rows to skip across all shards sequentially.
+        shard_idx_offset:  Global shard index offset (for shard-aware resume).
+        max_retries:       Max retries per shard on network / decompression errors.
+        base_backoff:      Base backoff in seconds (capped exponential, max 600s).
+        on_shard_complete: Optional callback ``(global_idx, url) -> None``
+                           invoked after a shard is fully iterated.
     """
 
     def __init__(
@@ -203,6 +223,9 @@ class ShardedStream:
         initial_skip: int = 0,
         total_skip: int = 0,
         shard_idx_offset: int = 0,
+        max_retries: int = 8,
+        base_backoff: int = 30,
+        on_shard_complete: Optional[Callable[[int, str], None]] = None,
     ):
         assert not (initial_skip > 0 and total_skip > 0), (
             "ShardedStream: initial_skip and total_skip are mutually exclusive. "
@@ -216,47 +239,118 @@ class ShardedStream:
         self._ds_state = ds_state
         self._initial_skip = initial_skip
         self._total_skip = total_skip
+        self._max_retries = max_retries
+        self._base_backoff = base_backoff
+        self._on_shard_complete = on_shard_complete
+
+    def _open_shard(self, url: str, skip: int = 0):
+        """
+        Open a single shard as a streaming HF dataset, optionally
+        skipping *skip* rows from the start.
+        """
+        ds = load_dataset(
+            self.file_format,
+            data_files=[url],
+            split="train",
+            streaming=True,
+        )
+        if skip > 0:
+            ds = ds.skip(skip)
+        return ds
 
     def __iter__(self):
+        import time as _time_mod
+
         remaining_skip = self._total_skip
         for local_idx, url in enumerate(self.data_files):
             global_idx = self._shard_idx_offset + local_idx
             self.current_shard_idx = global_idx
 
-            shard_ds = load_dataset(
-                self.file_format,
-                data_files=[url],
-                split="train",
-                streaming=True,
-            )
+            # How many rows to skip at the start of this shard
+            shard_initial_skip = self._initial_skip if local_idx == 0 else 0
 
-            if local_idx == 0 and self._initial_skip > 0:
-                shard_ds = shard_ds.skip(self._initial_skip)
+            # Track rows yielded from *this* shard for retry recovery
+            rows_yielded_this_shard = 0
+            # Snapshot docs_per_shard count at shard start for retry reset
+            dps_at_shard_start = 0
+            if self._ds_state is not None:
+                dps = self._ds_state.docs_per_shard
+                while len(dps) <= global_idx:
+                    dps.append(0)
+                dps_at_shard_start = dps[global_idx]
 
-            for row in shard_ds:
-                if self._ds_state is not None:
-                    dps = self._ds_state.docs_per_shard
-                    while len(dps) <= global_idx:
-                        dps.append(0)
-                    dps[global_idx] += 1
+            attempt = 0
+            while True:  # retry loop
+                try:
+                    total_skip_for_open = shard_initial_skip + rows_yielded_this_shard
+                    shard_ds = self._open_shard(url, skip=total_skip_for_open)
 
-                # Legacy cross-shard skip (slow, builds shard tracking for
-                # future resumes so subsequent loads are instant)
-                if remaining_skip > 0:
-                    remaining_skip -= 1
-                    skipped = self._total_skip - remaining_skip
-                    if skipped % 200_000 == 0:
-                        print(f"[ShardedStream] Skip progress: "
-                              f"{skipped:,}/{self._total_skip:,} docs "
-                              f"(shard {global_idx})")
-                    continue
+                    for row in shard_ds:
+                        # Update docs_per_shard tracking
+                        if self._ds_state is not None:
+                            self._ds_state.docs_per_shard[global_idx] = (
+                                dps_at_shard_start + rows_yielded_this_shard + 1
+                            )
 
-                yield row
+                        # Legacy cross-shard skip (slow, builds shard tracking
+                        # for future resumes so subsequent loads are instant)
+                        if remaining_skip > 0:
+                            remaining_skip -= 1
+                            rows_yielded_this_shard += 1
+                            skipped = self._total_skip - remaining_skip
+                            if skipped % 200_000 == 0:
+                                print(f"[ShardedStream] Skip progress: "
+                                      f"{skipped:,}/{self._total_skip:,} docs "
+                                      f"(shard {global_idx})")
+                            continue
+
+                        rows_yielded_this_shard += 1
+                        yield row
+
+                    # Shard fully consumed — invoke callback and break retry loop
+                    if self._on_shard_complete is not None:
+                        try:
+                            self._on_shard_complete(global_idx, url)
+                        except Exception as cb_exc:
+                            print(f"[ShardedStream] on_shard_complete callback "
+                                  f"error for shard {global_idx}: {cb_exc!r}")
+                    break  # success — move to next shard
+
+                except KeyboardInterrupt:
+                    raise
+                except StopIteration:
+                    break  # shard exhausted normally
+                except Exception as exc:
+                    attempt += 1
+                    if attempt >= self._max_retries:
+                        print(f"[ShardedStream] FATAL: shard {global_idx} failed "
+                              f"after {self._max_retries} retries: {exc!r}")
+                        print(f"[ShardedStream]   URL: {url}")
+                        print(f"[ShardedStream]   Rows yielded before failure: "
+                              f"{rows_yielded_this_shard}")
+                        raise
+                    wait = min(
+                        self._base_backoff * (2 ** (attempt - 1)), 600
+                    )
+                    print(f"[ShardedStream] Error in shard {global_idx}: {exc!r}")
+                    print(f"[ShardedStream]   Retrying in {wait}s "
+                          f"(attempt {attempt}/{self._max_retries}, "
+                          f"will skip {rows_yielded_this_shard} already-yielded rows)")
+                    _time_mod.sleep(wait)
 
 
 class LocalZstStream:
     """
-    Shard-aware streaming for ``.jsonl.zst`` files via local caching.
+    **LEGACY FALLBACK** — Shard-aware streaming for ``.jsonl.zst`` files
+    via local download + caching.
+
+    .. deprecated::
+        Prefer :class:`ShardedStream` with ``file_format="json"`` which
+        streams ``.jsonl.zst`` files over HTTP without downloading them.
+        ``ShardedStream`` now includes per-shard retry logic for
+        reliability.  Use ``LocalZstStream`` only if your network is
+        too unstable for streaming (set ``use_local_download=True``
+        on the ``DatasetEntry``).
 
     Each shard is downloaded to the HuggingFace cache directory with
     ``hf_hub_download()`` **before** any rows are read.  This gives us:
@@ -266,6 +360,11 @@ class LocalZstStream:
     * **Disk caching** — once downloaded, the shard is never re-fetched.
     * **Zero network errors during reading** — decompression and JSON
       parsing happen entirely on local disk.
+
+    **Warning:** This approach consumes significant disk space as training
+    progresses through shards, since downloaded files are never cleaned up
+    automatically.  For proof-pile-2 (arxiv: ~88 shards, open-web-math:
+    ~64 shards), this can grow to tens of GB.
 
     The API mirrors :class:`ShardedStream` so the rest of the pipeline
     (``load_phase_datasets``, ``WeightedMixerDataset``) works unchanged.
@@ -388,7 +487,11 @@ def resolve_dataset_files(
 ) -> Tuple[Optional[List[str]], Optional[str]]:
     """
     Resolve a :class:`DatasetEntry` to an ordered list of data-file
-    URLs and a format string (``"parquet"``, ``"json"``, or ``"zst"``).
+    URLs and a format string (``"parquet"`` or ``"json"``).
+
+    ``.jsonl.zst`` and ``.json.zst`` files are returned with format
+    ``"json"`` — the HuggingFace ``datasets`` library auto-detects
+    zstandard compression and streams them transparently over HTTP.
 
     For datasets with ``data_dir`` set, the resolver checks for a
     ``{data_dir}/{split}/`` subdirectory first (e.g. ``arxiv/train/``),
@@ -455,9 +558,9 @@ def resolve_dataset_files(
         f"https://huggingface.co/datasets/{ds_entry.repo_id}/resolve/main/{f}"
         for f in sorted(matched)
     ]
-    fmt = "parquet" if urls[0].endswith(".parquet") else (
-        "zst" if urls[0].endswith((".jsonl.zst", ".json.zst")) else "json"
-    )
+    # HF datasets auto-detects .zst compression when format="json",
+    # so .jsonl.zst files are streamed over HTTP without local download.
+    fmt = "parquet" if urls[0].endswith(".parquet") else "json"
     return urls, fmt
 
 
@@ -788,6 +891,82 @@ class WeightedMixerDataset(IterableDataset):
 
 
 # ═══════════════════════════════════════════════════════════════
+#  Cache cleanup for previously-downloaded .zst shards
+# ═══════════════════════════════════════════════════════════════
+
+def _cleanup_cached_shard(repo_id: str, file_url: str) -> None:
+    """
+    Delete a previously-downloaded ``.jsonl.zst`` shard from the local
+    HuggingFace cache (``~/.cache/huggingface/hub/``).
+
+    This is a best-effort operation — if the file was never cached, or
+    deletion fails, a warning is printed but no exception is raised.
+
+    Only targets ``.jsonl.zst`` / ``.json.zst`` files to avoid
+    accidentally deleting parquet shards (which are never cached).
+    """
+    import os
+
+    if not file_url.endswith((".jsonl.zst", ".json.zst")):
+        return  # only clean up zst files
+
+    # Extract repo-relative filename from HF resolve URL
+    marker = "/resolve/main/"
+    idx = file_url.find(marker)
+    filename = file_url[idx + len(marker):] if idx != -1 else file_url
+
+    try:
+        # hf_hub_download returns the cache path — we can use it to find
+        # the file.  But calling it would re-download if not cached.
+        # Instead, construct the expected cache path directly.
+        from huggingface_hub import scan_cache_dir
+
+        cache_info = scan_cache_dir()
+        for repo_info in cache_info.repos:
+            if repo_info.repo_id == repo_id and repo_info.repo_type == "dataset":
+                for revision in repo_info.revisions:
+                    for cached_file in revision.files:
+                        if cached_file.file_path.name.endswith(
+                            os.path.basename(filename)
+                        ) and filename.replace("/", os.sep) in str(
+                            cached_file.file_path
+                        ):
+                            size_mb = cached_file.size_on_disk / (1024 * 1024)
+                            cached_file.file_path.unlink(missing_ok=True)
+                            print(
+                                f"[CacheCleanup] Deleted cached shard: "
+                                f"{filename} ({size_mb:.1f} MB freed)"
+                            )
+                            return
+        # File not in cache — nothing to do
+    except Exception as exc:
+        print(f"[CacheCleanup] Warning: could not clean up {filename}: {exc!r}")
+
+
+def _make_zst_cleanup_callback(
+    repo_id: str,
+    all_data_files: List[str],
+) -> Optional[Callable[[int, str], None]]:
+    """
+    Create a shard-complete callback that cleans up cached ``.jsonl.zst``
+    files from prior ``LocalZstStream`` runs.
+
+    Returns ``None`` if no zst files are present (parquet-only datasets),
+    avoiding the overhead of scanning the cache on every shard completion.
+    """
+    has_zst = any(
+        f.endswith((".jsonl.zst", ".json.zst")) for f in all_data_files
+    )
+    if not has_zst:
+        return None
+
+    def _callback(global_idx: int, url: str) -> None:
+        _cleanup_cached_shard(repo_id, url)
+
+    return _callback
+
+
+# ═══════════════════════════════════════════════════════════════
 #  Factory: build mixer from a PhaseConfig  (+ optional resume)
 # ═══════════════════════════════════════════════════════════════
 
@@ -874,10 +1053,9 @@ def load_phase_datasets(
             data_files = ds_state_ref.data_files
             docs_per_shard = ds_state_ref.docs_per_shard
 
+            # HF datasets auto-detects .zst compression via format="json"
             if data_files[0].endswith(".parquet"):
                 fmt = "parquet"
-            elif data_files[0].endswith((".jsonl.zst", ".json.zst")):
-                fmt = "zst"
             else:
                 fmt = "json"
 
@@ -891,7 +1069,9 @@ def load_phase_datasets(
                 f"({len(remaining_files)} shards remaining)"
             )
             _t0 = _time.perf_counter()
-            if fmt == "zst":
+
+            # Opt-in local download for extremely unstable networks
+            if getattr(ds_entry, 'use_local_download', False) and fmt == "json":
                 stream = LocalZstStream(
                     repo_id=ds_entry.repo_id,
                     data_files=remaining_files,
@@ -900,12 +1080,17 @@ def load_phase_datasets(
                     shard_idx_offset=start_shard,
                 )
             else:
+                # Build cleanup callback for previously-cached zst shards
+                _cleanup_cb = _make_zst_cleanup_callback(
+                    ds_entry.repo_id, data_files
+                )
                 stream = ShardedStream(
                     data_files=remaining_files,
                     file_format=fmt,
                     ds_state=ds_state_ref,
                     initial_skip=shard_offset,
                     shard_idx_offset=start_shard,
+                    on_shard_complete=_cleanup_cb,
                 )
 
             ds_state_ref.data_files = data_files
@@ -962,7 +1147,13 @@ def load_phase_datasets(
                             f"using naive skip ({skip_n:,} docs). "
                             f"Shard tracking will be saved in next checkpoint."
                         )
-                    if file_fmt == "zst":
+
+                    # Opt-in local download fallback for unstable networks
+                    if (
+                        getattr(ds_entry, 'use_local_download', False)
+                        and file_fmt == "json"
+                        and file_urls[0].endswith((".jsonl.zst", ".json.zst"))
+                    ):
                         stream = LocalZstStream(
                             repo_id=ds_entry.repo_id,
                             data_files=file_urls,
@@ -972,6 +1163,9 @@ def load_phase_datasets(
                             shard_idx_offset=0,
                         )
                     else:
+                        _cleanup_cb = _make_zst_cleanup_callback(
+                            ds_entry.repo_id, file_urls
+                        )
                         stream = ShardedStream(
                             data_files=file_urls,
                             file_format=file_fmt,
@@ -979,6 +1173,7 @@ def load_phase_datasets(
                             initial_skip=0,
                             total_skip=skip_n,
                             shard_idx_offset=0,
+                            on_shard_complete=_cleanup_cb,
                         )
                     if ds_state_ref is not None:
                         ds_state_ref.data_files = file_urls
@@ -1020,9 +1215,10 @@ def load_phase_datasets(
     if restored_state is None:
         for name, stream, _, _ in entries:
             ds_state = mixer.state.dataset_states.get(name)
-            if ds_state is not None and isinstance(stream, (ShardedStream, LocalZstStream)):
+            if ds_state is not None and hasattr(stream, 'all_data_files'):
                 ds_state.data_files = list(stream.all_data_files)
-                stream._ds_state = ds_state
+                if hasattr(stream, '_ds_state'):
+                    stream._ds_state = ds_state
 
     return mixer
 

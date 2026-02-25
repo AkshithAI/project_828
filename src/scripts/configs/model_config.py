@@ -45,6 +45,9 @@ class DatasetEntry:
     data_dir: Optional[str] = None     
     split: str = "train"               
     streaming: bool = True
+    use_local_download: bool = False   # If True, .jsonl.zst shards are downloaded
+                                       # to local cache before reading (legacy).
+                                       # Default False: stream over HTTP with retry.
 
 
 @dataclass
