@@ -81,14 +81,14 @@ class PhaseConfig:
 # ──────────────────────────────────────────────────────────────
 # Phase 1:  72B tokens  —  Math / Science / General Knowledge
 # ──────────────────────────────────────────────────────────────
-#   effective_batch = 40 * 8 = 320 seqs
-#   tokens_per_step ≈ 320 * 2048 ≈ 655K
-#   total_steps     = 72B / 655K ≈ 109_863  (optimizer steps)
+#   effective_batch = 66 * 8 = 528 seqs  (bumped from 40 after step 17945)
+#   tokens_per_step ≈ 528 * 2048 ≈ 1.08M
+#   total_steps     = 73,655  (17,945 @ old bs + 55,710 @ new bs = 72B)
 #
 #   WSD schedule (stable_frac=0.60):
 #     warmup:  0 → 1,999          (2,000 steps)
-#     stable:  2,000 → 66,717     (64,718 steps)
-#     decay:   66,718 → 109,863   (43,145 steps, ~39% of training)
+#     stable:  2,000 → 44,992     (42,993 steps)
+#     decay:   44,993 → 73,655    (28,663 steps, ~39% of training)
 #
 #   Dataset mix (weights sum to 100):
 #     openmath-instruct-2          25   — math reasoning (problem + solution)
@@ -104,13 +104,13 @@ PHASE_1_CONFIG = PhaseConfig(
     peak_lr=3.5e-4,
     min_lr=3e-5,
     warmup_steps=2000,
-    total_steps=109_863,
+    total_steps=73_655,
     scheduler_type="wsd",
     wsd_stable_frac=0.60,
-    micro_batch_size=40,
+    micro_batch_size=66,
     grad_accum_steps=8,
     grad_clip=1.0,
-    val_interval=2500,
+    val_interval=1500,
     val_steps=3000,
     patience=5,
     datasets=[
@@ -170,7 +170,7 @@ PHASE_2_CONFIG = PhaseConfig(
     warmup_steps=500,
     total_steps=8_600,
     scheduler_type="cosine",
-    wsd_stable_frac=0.0,           # not used for cosine
+    wsd_stable_frac=0.0,           
     micro_batch_size=32,
     grad_accum_steps=8,
     grad_clip=1.0,
