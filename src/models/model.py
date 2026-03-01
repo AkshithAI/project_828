@@ -8,16 +8,15 @@ from ..scripts.tokenizer import tokenizer
 
 @dataclass
 class ModelConfig:
-        # Model architecture
         vocab_size : int = tokenizer.vocab_size   
-        num_attn_heads : int = 8 
-        num_key_value_heads : int = 4
-        hidden_dim : int = 512  
-        intermediate_size : int = 768
+        num_attn_heads : int = 12 
+        num_key_value_heads : int = 6
+        hidden_dim : int = 768  
+        intermediate_size : int = 760
         ffn_dropout : float = 0.0
         head_dim : float = hidden_dim // num_attn_heads 
-        num_hidden_layers : int = 6 
-        num_experts : int = 6
+        num_hidden_layers : int = 24 
+        num_experts : int = 4
         num_experts_per_tok : int = 2 
         update_param : float = 1e-3
         route_scale : float = 1.0

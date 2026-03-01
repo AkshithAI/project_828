@@ -5,15 +5,15 @@ from typing import List, Optional
 
 @dataclass
 class ModelConfig:
-        # Model architecture
+        # ── Model architecture ────────────────────────────────────
         vocab_size : int = tokenizer.vocab_size   
         num_attn_heads : int = 12 
         num_key_value_heads : int = 6
         hidden_dim : int = 768  
-        intermediate_size : int = 1776
+        intermediate_size : int = 760
         ffn_dropout : float = 0.0
         head_dim : float = hidden_dim // num_attn_heads 
-        num_hidden_layers : int = 6 
+        num_hidden_layers : int = 24 
         num_experts : int = 4
         num_experts_per_tok : int = 2 
         update_param : float = 1e-3
@@ -82,16 +82,31 @@ class PhaseConfig:
 
 
 # ──────────────────────────────────────────────────────────────
-# Phase 1:  72B tokens  —  Math / Science / General Knowledge
+# Phase 1 (post-growth):  ~60B tokens  —  Math / Science / General Knowledge
 # ──────────────────────────────────────────────────────────────
-#   effective_batch = 66 * 8 = 528 seqs  (bumped from 40 after step 17945)
-#   tokens_per_step ≈ 528 * 2048 ≈ 1.08M
-#   total_steps     = 73,655  (17,945 @ old bs + 55,710 @ new bs = 72B)
+#   Model was grown 6→24 layers (250M→399M) at old step 25,053.
+#   ~27B tokens already consumed pre-growth; ~60B remaining.
 #
-#   WSD schedule (stable_frac=0.60):
-#     warmup:  0 → 1,999          (2,000 steps)
-#     stable:  2,000 → 44,992     (42,993 steps)
-#     decay:   44,993 → 73,655    (28,663 steps, ~39% of training)
+#   Token budget rationale (1.6× params → larger budget):
+#     - 18/24 layers are cyclic duplicates that need tokens to specialize
+#     - MLP experts pruned 1776→760, must adapt to capacity loss
+#     - Depth-growth literature: grown models need ~50% of from-scratch budget
+#     - 399M from scratch ≈ 80-100B; 50% ≈ 50-60B post-growth
+#     - Total lifetime: 27B + 60B ≈ 87B (218:1 token-to-param ratio)
+#
+#   Optimizer & scheduler RESET to step 0 (fresh AdamW).
+#   Short re-warmup (500 steps): weights aren't random.
+#   peak_lr lowered 3.5e-4 → 3e-4 (~1/√size scaling for 1.6× params).
+#
+#   effective_batch = 66 * 8 = 528 seqs
+#   tokens_per_step ≈ 528 * 2048 ≈ 1.08M
+#   total_steps     = 56,000  (~60.5B tokens)
+#   lifetime tokens = 27B (pre-growth) + 60B (post) ≈ 87B
+#
+#   WSD schedule (stable_frac=0.65):
+#     warmup:  0 → 499            (500 steps)
+#     stable:  500 → 36,574       (36,075 steps)
+#     decay:   36,575 → 56,000    (19,425 steps, ~35% of training)
 #
 #   Dataset mix (weights sum to 100):
 #     openmath-instruct-2          25   — math reasoning (problem + solution)
@@ -102,14 +117,14 @@ class PhaseConfig:
 #     cosmopedia-v2                20   — synthetic textbooks
 # ──────────────────────────────────────────────────────────────
 PHASE_1_CONFIG = PhaseConfig(
-    phase_name="phase_1_math_science",
+    phase_name="phase_1_post_growth",
     phase_num=1,
-    peak_lr=3.5e-4,
+    peak_lr=3e-4,
     min_lr=3e-5,
-    warmup_steps=2000,
-    total_steps=73_655,
+    warmup_steps=500,
+    total_steps=56_000,
     scheduler_type="wsd",
-    wsd_stable_frac=0.60,
+    wsd_stable_frac=0.65,
     micro_batch_size=66,
     grad_accum_steps=8,
     grad_clip=1.0,

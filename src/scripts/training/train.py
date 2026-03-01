@@ -229,7 +229,7 @@ if __name__ == '__main__':
     # ── W&B ────────────────────────────────────────────────
     wandb_run = wandb.init(
         entity="akshithmarepally-akai",
-        project="828_testing_h200",
+        project="828_pretraining_h200",
         config={
             "architecture": "GPT_FLASH_MoE",
             "phase": phase_config.phase_name,
