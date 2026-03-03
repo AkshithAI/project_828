@@ -84,29 +84,15 @@ class PhaseConfig:
 # ──────────────────────────────────────────────────────────────
 # Phase 1 (post-growth):  ~60B tokens  —  Math / Science / General Knowledge
 # ──────────────────────────────────────────────────────────────
-#   Model was grown 6→24 layers (250M→399M) at old step 25,053.
-#   ~27B tokens already consumed pre-growth; ~60B remaining.
-#
-#   Token budget rationale (1.6× params → larger budget):
-#     - 18/24 layers are cyclic duplicates that need tokens to specialize
-#     - MLP experts pruned 1776→760, must adapt to capacity loss
-#     - Depth-growth literature: grown models need ~50% of from-scratch budget
-#     - 399M from scratch ≈ 80-100B; 50% ≈ 50-60B post-growth
-#     - Total lifetime: 27B + 60B ≈ 87B (218:1 token-to-param ratio)
-#
-#   Optimizer & scheduler RESET to step 0 (fresh AdamW).
-#   Short re-warmup (500 steps): weights aren't random.
-#   peak_lr lowered 3.5e-4 → 3e-4 (~1/√size scaling for 1.6× params).
-#
-#   effective_batch = 66 * 8 = 528 seqs
-#   tokens_per_step ≈ 528 * 2048 ≈ 1.08M
-#   total_steps     = 56,000  (~60.5B tokens)
+#   effective_batch = 42 * 8 = 336 seqs
+#   tokens_per_step ≈ 336 * 2048 ≈ 0.688M
+#   total_steps     = 87,200  (~60B tokens)
 #   lifetime tokens = 27B (pre-growth) + 60B (post) ≈ 87B
 #
 #   WSD schedule (stable_frac=0.65):
 #     warmup:  0 → 499            (500 steps)
-#     stable:  500 → 36,574       (36,075 steps)
-#     decay:   36,575 → 56,000    (19,425 steps, ~35% of training)
+#     stable:  500 → 56,854       (56,355 steps)
+#     decay:   56,855 → 87,200    (30,345 steps, ~35% of training)
 #
 #   Dataset mix (weights sum to 100):
 #     openmath-instruct-2          25   — math reasoning (problem + solution)
@@ -122,10 +108,10 @@ PHASE_1_CONFIG = PhaseConfig(
     peak_lr=3e-4,
     min_lr=3e-5,
     warmup_steps=500,
-    total_steps=56_000,
+    total_steps=87_200,
     scheduler_type="wsd",
     wsd_stable_frac=0.65,
-    micro_batch_size=66,
+    micro_batch_size=36,
     grad_accum_steps=8,
     grad_clip=1.0,
     val_interval=1500,
