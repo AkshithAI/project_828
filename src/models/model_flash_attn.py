@@ -126,6 +126,7 @@ class Gate(nn.Module):
         load_float = current_load.float()
         e = torch.sign(load_float.mean() - load_float) 
         self.bias.add_(self.update_param * e)
+        self.bias.clamp_(-10.0, 10.0)
     
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """See this paper for implementation details: https://arxiv.org/abs/2408.15664"""
@@ -464,7 +465,7 @@ class Attention(nn.Module):
             attn_out = attn_out.transpose(1,2)
         else:
             attn_out = flash_attn_func(Q,K,V,causal = True)
-        attn_out = attn_out.view(batch_size,seq_len,-1)
+        attn_out = attn_out.reshape(batch_size,seq_len,-1)
         attn_out = self.wo(attn_out)
 
         return attn_out
