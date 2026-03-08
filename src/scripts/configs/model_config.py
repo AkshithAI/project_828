@@ -69,10 +69,9 @@ class PhaseConfig:
     grad_accum_steps: int = 8             
     grad_clip: float = 1.0
 
-    # --- Validation / early stopping ---
+    # --- Validation ---
     val_interval: int = 2500              
     val_steps: int = 5000                 
-    patience: int = 5                     
 
     # --- Datasets ---
     datasets: List[DatasetEntry] = field(default_factory=list)
@@ -116,7 +115,6 @@ PHASE_1_CONFIG = PhaseConfig(
     grad_clip=1.0,
     val_interval=1500,
     val_steps=3000,
-    patience=5,
     datasets=[
         DatasetEntry(
             name="openmath-instruct-2",
@@ -180,7 +178,6 @@ PHASE_2_CONFIG = PhaseConfig(
     grad_clip=1.0,
     val_interval=10000,
     val_steps=3000,
-    patience=5,
     datasets=[],                    # to be filled after Phase 1
 )
 

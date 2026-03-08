@@ -2,6 +2,7 @@ import torch
 import math
 import warnings
 import os
+import time
 import wandb
 import torch.nn as nn
 from tqdm import tqdm
@@ -63,16 +64,24 @@ def train_phase(
     meta_data = None
     grad_accumulation_steps = phase_config.grad_accum_steps
     val_interval = phase_config.val_interval
-    patience = phase_config.patience
     phase_num = phase_config.phase_num
+    seq_len = config.max_context_len
+    micro_bs = phase_config.micro_batch_size
+    tokens_per_step = micro_bs * seq_len * grad_accumulation_steps
+
+    # Estimate model FLOPs per forward pass 
+    raw_model = _unwrap(model)
+    n_params = sum(p.numel() for p in raw_model.parameters())
+    flops_per_token = 6 * n_params  
+    gpu_peak_flops = 989.4e12  # H200 bf16 peak FLOPS
 
     try:
         model.train()
         best_val_loss = float('inf')
-        patience_counter = 0
         optimizer.zero_grad()
         accum_loss = 0.0
-        micro_count = 0  
+        micro_count = 0
+        step_start_time = time.perf_counter()
 
         for i, batch in enumerate(tqdm(train_data, desc=f"Phase {phase_num} Training")):
             batch = batch.to(config.device, non_blocking=True).long()
@@ -97,28 +106,52 @@ def train_phase(
                 optimizer.zero_grad()
 
                 avg_accum_loss = accum_loss / grad_accumulation_steps
+                # ── Throughput & hardware metrics ──
+                step_elapsed = time.perf_counter() - step_start_time
+                tps = tokens_per_step / step_elapsed if step_elapsed > 0 else 0.0
+                step_flops = flops_per_token * tokens_per_step
+                mfu = step_flops / (step_elapsed * gpu_peak_flops) if step_elapsed > 0 else 0.0
+
+                allocated_gb = torch.cuda.memory_allocated() / (1024 ** 3)
+                reserved_gb = torch.cuda.memory_reserved() / (1024 ** 3)
+
                 metrics = {
                     "train/loss": avg_accum_loss,
                     "train/lr": scheduler.get_last_lr()[0],
                     "train/ppl": math.exp(min(avg_accum_loss, 10)),
                     "train/phase": phase_num,
                     "train/grad_norm": grad_norm.item(),
+                    "perf/tokens_per_sec": tps,
+                    "perf/mfu": mfu,
+                    "perf/vram_allocated_gb": allocated_gb,
+                    "perf/vram_reserved_gb": reserved_gb,
+                    "perf/step_time_sec": step_elapsed,
                 }
 
-                # MoE expert count logging disabled
+                # ── Expert usage logging ──
                 raw = _unwrap(model)
                 for layer_idx, layer in enumerate(raw.layers):
-                    if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'reset_expert_counts'):
+                    if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'get_wandb_metrics'):
                         moe = layer.mlp
                         if moe.total_tokens > 0:
+                            moe_metrics = moe.get_wandb_metrics()
+                            metrics.update({
+                                f"moe/layer_{layer_idx}/{k}": v
+                                for k, v in moe_metrics.items()
+                            })
                             moe.reset_expert_counts()
 
                 wandb_run.log(metrics, step=8*optim_step)
                 accum_loss = 0.0
                 micro_count = 0
+                step_start_time = time.perf_counter()
 
-                if optim_step % 1000 == 0:
-                    print(f"Step : {optim_step} , Loss : {avg_accum_loss:.4f}")
+                if optim_step % 100 == 0:
+                    print(
+                        f"Step : {optim_step} , Loss : {avg_accum_loss:.4f} , "
+                        f"TPS : {tps:.0f} , MFU : {mfu:.2%} , "
+                        f"VRAM : {allocated_gb:.2f}/{reserved_gb:.2f} GB"
+                    )
 
                 if optim_step % val_interval == 0:
                     val_loss = validation(
@@ -144,28 +177,22 @@ def train_phase(
                     model.train()
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
-                        meta_data = {
-                            "step": optim_step,
-                            "train_loss": avg_accum_loss,
-                            "val_loss": val_loss,
-                        }
-                        dataloader_state = train_data.get_state()
-                        save_checkpoint(
-                            base_dir, optim_step,
-                            model_data=_unwrap(model).state_dict(),
-                            optimizer_data=optimizer.state_dict(),
-                            scheduler_data=scheduler.state_dict(),
-                            wandb_run=wandb_run,
-                            dataloader_state=dataloader_state,
-                            meta_data=meta_data,
-                            phase=phase_num,
-                        )
-                        patience_counter = 0
-                    else:
-                        patience_counter += 1
-                        if patience_counter >= patience:
-                            print(f"Early Stopping triggered at step : {optim_step}")
-                            break
+                    meta_data = {
+                        "step": optim_step,
+                        "train_loss": avg_accum_loss,
+                        "val_loss": val_loss,
+                    }
+                    dataloader_state = train_data.get_state()
+                    save_checkpoint(
+                        base_dir, optim_step,
+                        model_data=_unwrap(model).state_dict(),
+                        optimizer_data=optimizer.state_dict(),
+                        scheduler_data=scheduler.state_dict(),
+                        wandb_run=wandb_run,
+                        dataloader_state=dataloader_state,
+                        meta_data=meta_data,
+                        phase=phase_num,
+                    )
 
                 if optim_step >= phase_config.total_steps:
                     print(f"Reached total_steps ({phase_config.total_steps}). Phase complete.")

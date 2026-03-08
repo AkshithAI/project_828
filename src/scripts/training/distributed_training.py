@@ -56,12 +56,19 @@ def validation(model, criterion, val_loader, wandb_run=None):
 def train(model_engine, train_loader, criterion, val_loader, wandb_run=None, checkpoint_dir=None):
     model_engine.train()
     best_val_loss = float('inf')
-    patience_counter = 0
-    patience = 8
     global_step = 0
+    seq_len = config.max_context_len
+
+    # Estimate model FLOPs per forward pass
+    base_model = model_engine.module if hasattr(model_engine, 'module') else model_engine
+    n_params = sum(p.numel() for p in base_model.parameters())
+    flops_per_token = 6 * n_params  # 6N per token (fwd + bwd)
+    gpu_peak_flops = 989.4e12  # H200 bf16 peak FLOPS; adjust for your hardware
+    batch_size_per_gpu = 128  # will be overwritten from actual batch below
     
     import time
     start_time = time.time()
+    step_start_time = time.perf_counter()
     
     for step, batch in enumerate(train_loader):
         batch = batch.to(model_engine.local_rank).long()
@@ -107,81 +114,74 @@ def train(model_engine, train_loader, criterion, val_loader, wandb_run=None, che
                     moe.reset_expert_counts()
         
         if dist.get_rank() == 0 and wandb_run is not None:
-            # Calculate tokens per second
-            elapsed = time.time() - start_time
-            tokens_per_sec = (global_step + 1) * 128 * 2048 / elapsed if elapsed > 0 else 0
-            
+            # Calculate throughput metrics
+            step_elapsed = time.perf_counter() - step_start_time
+            actual_bs = batch.shape[0]
+            tokens_this_step = actual_bs * seq_len
+            tps = tokens_this_step / step_elapsed if step_elapsed > 0 else 0.0
+
+            step_flops = flops_per_token * tokens_this_step
+            mfu = step_flops / (step_elapsed * gpu_peak_flops) if step_elapsed > 0 else 0.0
+
+            allocated_gb = torch.cuda.memory_allocated() / (1024 ** 3)
+            reserved_gb = torch.cuda.memory_reserved() / (1024 ** 3)
+
             log_dict = {
                 "train/loss": loss_value,
                 "train/step": global_step,
                 "train/ppl": math.exp(min(loss_value, 10)),
                 "train/lr": model_engine.get_lr()[0],
-                "perf/tokens_per_sec": tokens_per_sec,
+                "perf/tokens_per_sec": tps,
+                "perf/mfu": mfu,
+                "perf/vram_allocated_gb": allocated_gb,
+                "perf/vram_reserved_gb": reserved_gb,
+                "perf/step_time_sec": step_elapsed,
             }
             
-            # Log GPU memory every 100 steps
-            if global_step % 100 == 0:
-                allocated = torch.cuda.memory_allocated() / 1e9
-                reserved = torch.cuda.memory_reserved() / 1e9
-                log_dict["perf/gpu_memory_allocated_gb"] = allocated
-                log_dict["perf/gpu_memory_reserved_gb"] = reserved
-            
             wandb_run.log(log_dict)
+            step_start_time = time.perf_counter()
         
         if (global_step + 1) % 1000 == 0 and dist.get_rank() == 0:
-            allocated = torch.cuda.memory_allocated() / 1e9
-            print(f"Step: {global_step+1}, Loss: {loss_value:.4f}, GPU Memory: {allocated:.2f}GB")
+            allocated = torch.cuda.memory_allocated() / (1024 ** 3)
+            reserved = torch.cuda.memory_reserved() / (1024 ** 3)
+            print(f"Step: {global_step+1}, Loss: {loss_value:.4f}, "
+                  f"VRAM: {allocated:.2f}/{reserved:.2f} GB, TPS: {tps:.0f}")
         
         if (global_step + 1) % 50000 == 0:
             dist.barrier()  
             val_loss = validation(model_engine, criterion, val_loader, wandb_run)
             model_engine.train()
             
-            # Track if we should stop training (broadcast from rank 0)
-            should_stop = torch.tensor([0], device=model_engine.local_rank)
-            
             if dist.get_rank() == 0:
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
-                    ckpt_id = f"step_{global_step}"
+                ckpt_id = f"step_{global_step}"
+                
+                if checkpoint_dir is not None:
+                    ckpt_dir = os.path.join(checkpoint_dir, ckpt_id)
+                    model_engine.save_checkpoint(checkpoint_dir, tag=ckpt_id)
                     
-                    if checkpoint_dir is not None:
-                        ckpt_dir = os.path.join(checkpoint_dir, ckpt_id)
-                        model_engine.save_checkpoint(checkpoint_dir, tag=ckpt_id)
+                    if wandb_run is not None:
+                        artifact = wandb.Artifact(
+                            name=f"model-checkpoint-{ckpt_id}",
+                            type="model",
+                            description=f"Model checkpoint at step {global_step} with val_loss {val_loss:.4f}",
+                            metadata={
+                                "step": global_step,
+                                "val_loss": val_loss,
+                                "train_loss": loss_value,
+                                "best_val_loss": best_val_loss,
+                            }
+                        )
+                        artifact.add_dir(ckpt_dir)
+                        wandb_run.log_artifact(artifact)
                         
-                        if wandb_run is not None:
-                            artifact = wandb.Artifact(
-                                name=f"model-checkpoint-{ckpt_id}",
-                                type="model",
-                                description=f"Model checkpoint at step {global_step} with val_loss {val_loss:.4f}",
-                                metadata={
-                                    "step": global_step,
-                                    "val_loss": val_loss,
-                                    "train_loss": loss_value,
-                                    "best_val_loss": best_val_loss,
-                                }
-                            )
-                            artifact.add_dir(ckpt_dir)
-                            wandb_run.log_artifact(artifact)
-                            
-                            wandb_run.log({
-                                "val/best_loss": best_val_loss,
-                                "val/checkpoint_step": global_step
-                            })
-                        
-                        print(f"Checkpoint saved to {ckpt_dir}")
+                        wandb_run.log({
+                            "val/best_loss": best_val_loss,
+                            "val/checkpoint_step": global_step
+                        })
                     
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
-                    if patience_counter >= patience:
-                        print(f"Early Stopping triggered at step: {global_step}")
-                        should_stop[0] = 1
-            
-            # Broadcast early stopping decision to all ranks
-            dist.broadcast(should_stop, src=0)
-            if should_stop[0] == 1:
-                break
+                    print(f"Checkpoint saved to {ckpt_dir}")
         
         global_step += 1
     

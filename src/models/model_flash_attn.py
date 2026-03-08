@@ -192,9 +192,12 @@ class MoE(nn.Module):
             return {}
         utilization = self.expert_counts.float() / self.total_tokens
         util_list = [utilization[i].item() * 100 for i in range(self.num_experts)]
+        ideal = 100.0 / self.num_experts
+        load_balance = (1.0 - sum(abs(u - ideal) for u in util_list) / (2 * 100.0)) * 100.0
         
         metrics = {
             **{f"expert_{i}": util_list[i] for i in range(self.num_experts)},
+            "load_balance_score": load_balance,
         }
         
         return metrics
