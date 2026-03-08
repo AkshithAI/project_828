@@ -54,7 +54,7 @@ class RMS_Norm(nn.Module):
     
 
 def swiglu(x, alpha: float = 1.702, limit: float = 7.0):
-    x_glu, x_linear = x[..., ::2], x[..., 1::2]
+    x_glu, x_linear = x.chunk(2, dim=-1)
     x_glu = x_glu.clamp(min=None, max=limit)
     x_linear = x_linear.clamp(min=-limit, max=limit)
     out_glu = x_glu * torch.sigmoid(alpha * x_glu)
@@ -88,7 +88,7 @@ class MLPBlock(nn.Module):
         
     def forward(self,x : torch.Tensor) -> torch.Tensor:
         
-        return self.w2(self.dropout(swiglu(self.w1(x) * self.w3(x))))
+        return self.w2(self.dropout(swiglu(self.w1(x)) * self.w3(x)))
     
 
 class Expert(nn.Module):
@@ -118,7 +118,7 @@ class Expert(nn.Module):
         
     def forward(self,x : torch.Tensor) -> torch.Tensor:
         
-        return self.w2(self.dropout(swiglu(self.w1(x) * self.w3(x))))
+        return self.w2(self.dropout(swiglu(self.w1(x)) * self.w3(x)))
     
 
 class Gate(nn.Module):
@@ -127,8 +127,9 @@ class Gate(nn.Module):
                 device : torch.device|None = None
     ) -> None:
         """
-            Router/Gate module for Mixture of Experts.
-    
+            - Router/Gate module for Mixture of Experts.
+            - Loss-Free Balancing, featured by an auxiliary-loss-free load balancing strategy
+
             Args:
                 config: ModelConfig object containing model hyperparameters
                 device: torch device to place the module on
@@ -137,19 +138,35 @@ class Gate(nn.Module):
         self.dim = config.hidden_dim
         self.topk = config.num_experts_per_tok
         self.route_scale = config.route_scale
-        
-        self.weight = nn.Parameter(torch.empty((config.num_experts, config.hidden_dim), device=device, dtype=config.dtype))            
-        self.bias = nn.Parameter(torch.empty((config.num_experts), dtype=torch.float32, device=device))
+        self.update_param = config.update_param
+        self.num_experts = config.num_experts
+        self.router = nn.Linear(config.hidden_dim, config.num_experts, bias = False, device = device, dtype = config.dtype)
+        self.register_buffer("bias", torch.zeros(config.num_experts, dtype=torch.float32, device=device))
 
-    def forward(self,x : torch.Tensor) -> Tuple[torch.Tensor,torch.Tensor] :
-        scores = F.linear(x,self.weight)
-        scores = scores.softmax(dim = -1,dtype = torch.float32)
+    def update_bias(self, current_load: torch.Tensor) -> None:
+        """Update bias in-place using Loss-Free Balancing rule."""
+        load_float = current_load.float()
+        e = torch.sign(load_float.mean() - load_float) 
+        self.bias.add_(self.update_param * e)
+        self.bias.clamp_(-10.0, 10.0)
+    
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """See this paper for implementation details: https://arxiv.org/abs/2408.15664"""
+        scores = self.router(x)
+        scores = torch.sigmoid(scores)
         original_scores = scores
-        scores = scores + self.bias
-        indices = torch.topk(scores, self.topk, dim=-1)[1]
+        biased_scores = scores + self.bias.detach().to(scores.dtype)
+        indices = torch.topk(biased_scores, self.topk, dim=-1)[1]
+        current_load = torch.bincount(indices.flatten(), minlength=self.num_experts)
         weights = original_scores.gather(1, indices)
-        weights *= self.route_scale
-        return weights.type_as(x),indices     
+        weights /= weights.sum(dim=-1, keepdim=True) 
+        weights = weights * self.route_scale
+
+        if self.training:
+            with torch.no_grad():
+                self.update_bias(current_load)
+
+        return weights.type_as(x), indices    
     
 
 class MoE(nn.Module):
@@ -167,49 +184,23 @@ class MoE(nn.Module):
         super().__init__()
         self.dim = config.hidden_dim
         self.gate = Gate(config,device)
-        self.num_experts = config.num_experts
-        self.n_routed_experts = config.num_experts_per_tok
         self.experts = nn.ModuleList(
             [Expert(config,device) 
              for _ in range(config.num_experts)]
         )
-        self.shared_experts = MLPBlock(config,device)
-        self.register_buffer(
-            'expert_counts', 
-            torch.zeros(config.num_experts, dtype=torch.long, device=device)
-        )
-        self.total_tokens = 0
-        
-    def get_expert_utilization(self):
-        """Return expert utilization statistics for logging"""
-        if self.total_tokens == 0:
-            return {}
-        utilization = self.expert_counts.float() / self.total_tokens
-        return {
-            f"experts/expert_{i}_util": utilization[i].item() 
-            for i in range(self.num_experts)
-        }
-
-    def reset_expert_counts(self):
-        """Reset counters (call periodically during training)"""
-        self.expert_counts.zero_()
-        self.total_tokens = 0    
+        self.shared_experts = MLPBlock(config,device) 
         
     def forward(self,x : torch.Tensor) -> torch.Tensor:
         inp_shape = x.shape
         x = x.view(-1,self.dim) 
         xprt_weights,xprt_idxs = self.gate(x)
-        counts = torch.bincount(xprt_idxs.flatten(), minlength=self.num_experts)
-        self.expert_counts += counts
-        self.total_tokens += x.shape[0] * self.n_routed_experts 
         routed_xprt_out = torch.zeros_like(x)
+
         for i,expert in enumerate(self.experts):
-            mask = (xprt_idxs == i).any(dim=-1)
-            if not mask.any():
-                continue
             batch_idx,expert_idx = torch.where(xprt_idxs == i)
             routed_xprt_out[batch_idx] += xprt_weights[batch_idx,expert_idx,None] * expert(x[batch_idx])
         mlp_out = routed_xprt_out + self.shared_experts(x)
+
         return mlp_out.reshape(inp_shape)
     
 
