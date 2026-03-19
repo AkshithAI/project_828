@@ -1004,15 +1004,49 @@ def load_phase_datasets(
     restored_state: Optional[MixerState] = None
     if mixer_state is not None:
         restored_state = MixerState.from_dict(mixer_state)
-        saved_names = set(restored_state.dataset_states.keys())
-        config_names = {ds.name for ds in phase_config.datasets}
-        if saved_names != config_names:
+        cfg_by_name = {ds.name: ds for ds in phase_config.datasets}
+
+        # Guard against accidental duplicate names in config.
+        if len(cfg_by_name) != len(phase_config.datasets):
+            names = [ds.name for ds in phase_config.datasets]
+            dupes = sorted({n for n in names if names.count(n) > 1})
             raise ValueError(
-                f"[DataLoader] Dataset name mismatch on resume!\n"
-                f"  Saved:  {sorted(saved_names)}\n"
-                f"  Config: {sorted(config_names)}\n"
-                f"  Cannot resume — wrong phase config for this checkpoint."
+                f"[DataLoader] Duplicate dataset names in phase config: {dupes}"
             )
+
+        saved_names = set(restored_state.dataset_states.keys())
+        config_names = set(cfg_by_name.keys())
+
+        removed = sorted(saved_names - config_names)
+        added = sorted(config_names - saved_names)
+
+        if removed or added:
+            print("[DataLoader] Dataset set changed since checkpoint; "
+                  "migrating mixer state to current config.")
+            if removed:
+                print(f"  Removed datasets: {removed}")
+            if added:
+                print(f"  Added datasets:   {added}")
+
+            migrated_states: Dict[str, DatasetStreamState] = {}
+            for ds in phase_config.datasets:
+                prev = restored_state.dataset_states.get(ds.name)
+                if prev is None:
+                    migrated_states[ds.name] = DatasetStreamState(
+                        name=ds.name,
+                        weight=ds.weight,
+                    )
+                else:
+                    prev.weight = ds.weight
+                    migrated_states[ds.name] = prev
+
+            restored_state.dataset_states = migrated_states
+
+            restored_state.draw_cycle_position = 0
+        else:
+            for ds in phase_config.datasets:
+                restored_state.dataset_states[ds.name].weight = ds.weight
+
         if restored_state.context_length != context_length:
             raise ValueError(
                 f"[DataLoader] Context length mismatch: "

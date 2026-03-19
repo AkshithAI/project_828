@@ -343,8 +343,8 @@ if __name__ == '__main__':
     
     print("  SINGLE SEQUENCE INFERENCE")
 
-    seed_txt = "The theory of general relativity, published by Albert Einstein in 1915, states that"
-    generated_text = generate(model,seed_txt,device)
+    seed_txt = "Chapter 4: The Solar System.\n\nThe planet Mars has long fascinated astronomers. Unlike Earth, the atmosphere of Mars is primarily composed of"
+    generated_text = generate(model,seed_txt,device,max_tokens=250,temp=0.8,top_p=0.9,k=50)
     print(generated_text)
     
     print("\n")
@@ -356,11 +356,20 @@ if __name__ == '__main__':
             layer.mlp.reset_expert_counts()
 
     test_prompts = [
-        "Chapter 1. The dark forest was",
-        "The following is a Python function that reverses a string:\n\ndef reverse_string(s):",
-        "To solve the quadratic equation x^2 - 5x + 6 = 0, we first",
-        "The theory of general relativity, published by Albert Einstein in 1915, states that",
-        "In this essay, I will argue that renewable energy is essential for economic growth because",
+        # 1. Cosmopedia-v2 / FineWeb-edu (Synthetic textbook / General knowledge - 50% mix)
+        "Chapter 5: Introduction to Macroeconomics\n\nOne of the most important metrics used by economists to measure the overall health of an economy is the Gross Domestic Product (GDP). GDP is defined as",
+        
+        # 2. OpenMath-Instruct-2 (Math reasoning - 25% mix)
+        "Problem: If 3x - 7 = 20, what is the value of x^2?\n\nSolution: First, we need to solve for x. We add 7 to both sides of the equation to get",
+        
+        # 3. Proof-pile-open-web-math (Web math tutorials - 9% mix)
+        "To find the derivative of the function f(x) = x^3 * sin(x), we use the product rule. The product rule states that (uv)' = u'v + uv'. Let u = x^3 and v = sin(x). Then",
+        
+        # 4. Proof-pile-arxiv (Academic papers - 4% mix)
+        "Title: On the Asymptotic Stability of Non-linear Dynamical Systems\nAbstract: We present a novel framework for analyzing these systems. Unlike previous approaches that rely strictly on Lyapunov functions, our proposed method",
+        
+        # 5. Proof-pile-algebraic-stack (Formal math proof / structure - 12% mix)
+        "Theorem: The sum of the first n positive integers is n(n+1)/2.\nProof: We proceed by mathematical induction. Base case: For n=1, the sum is 1, and the formula gives 1(2)/2 = 1. Inductive step: Assume the statement holds for k. Then the sum of the first k+1 integers is"
     ]
 
     print(f"Running batched inference on {len(test_prompts)} prompts...\n")

@@ -150,7 +150,9 @@ def train(model_engine, train_loader, criterion, val_loader, wandb_run=None, che
         if (global_step + 1) % 50000 == 0:
             dist.barrier()  
             val_loss = validation(model_engine, criterion, val_loader, wandb_run)
+            torch.cuda.empty_cache()
             model_engine.train()
+            step_start_time = time.perf_counter()
             
             if dist.get_rank() == 0:
                 if val_loss < best_val_loss:
@@ -191,6 +193,7 @@ def train(model_engine, train_loader, criterion, val_loader, wandb_run=None, che
 if __name__ == '__main__':
     warnings.filterwarnings("ignore")
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     
     parser = argparse.ArgumentParser(description='DeepSpeed GPT Training')
     parser.add_argument('--local_rank', type=int, default=-1, help='Local rank for distributed training')

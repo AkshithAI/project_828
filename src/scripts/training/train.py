@@ -144,7 +144,6 @@ def train_phase(
                 wandb_run.log(metrics, step=8*optim_step)
                 accum_loss = 0.0
                 micro_count = 0
-                step_start_time = time.perf_counter()
 
                 if optim_step % 100 == 0:
                     print(
@@ -174,6 +173,7 @@ def train_phase(
                     print(generate(raw,
                             "In this essay, I will argue that renewable energy is essential for economic growth because",
                             config.device, max_tokens=250, temp=0.5))
+                    torch.cuda.empty_cache()
                     model.train()
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
@@ -194,6 +194,7 @@ def train_phase(
                         phase=phase_num,
                     )
 
+                step_start_time = time.perf_counter()
                 if optim_step >= phase_config.total_steps:
                     print(f"Reached total_steps ({phase_config.total_steps}). Phase complete.")
                     break
@@ -225,6 +226,7 @@ def _unwrap(model):
 if __name__ == '__main__':
     warnings.filterwarnings("ignore")
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
     torch.set_float32_matmul_precision('high')       
     torch.backends.cudnn.benchmark = True            

@@ -217,9 +217,9 @@ class MoE(nn.Module):
         routed_xprt_out = torch.zeros_like(x)
 
         for i,expert in enumerate(self.experts):
-            if not counts[i]:
-                continue
             batch_idx,expert_idx = torch.where(xprt_idxs == i)
+            if batch_idx.numel() == 0:
+                continue
             routed_xprt_out[batch_idx] += xprt_weights[batch_idx,expert_idx,None] * expert(x[batch_idx])
         mlp_out = routed_xprt_out + self.shared_experts(x)
 
