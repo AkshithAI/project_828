@@ -51,6 +51,15 @@ def _fmt_magicoder(row: Dict[str, Any]) -> Optional[str]:
     return f"{problem}\n\n{solution}"
 
 
+def _fmt_numina(row: Dict[str, Any]) -> Optional[str]:
+    """PrimeIntellect/NuminaMath-QwQ-CoT-5M: prompt + response."""
+    problem = row.get("prompt", "")
+    solution = row.get("response", "")
+    if not problem and not solution:
+        return None
+    return f"{problem}\n\n{solution}"
+
+
 def _fmt_stackexchange(row: Dict[str, Any]) -> Optional[str]:
     """HuggingFaceH4/stack-exchange-preferences: question + chosen answer."""
     question = row.get("question", "")
@@ -60,13 +69,39 @@ def _fmt_stackexchange(row: Dict[str, Any]) -> Optional[str]:
     return f"{question}\n\n{chosen}" if chosen else question
 
 
+def _fmt_openhermes(row: Dict[str, Any]) -> Optional[str]:
+    """teknium/OpenHermes-2.5: flatten ShareGPT-style conversations."""
+    conversations = row.get("conversations", [])
+    if not isinstance(conversations, list) or not conversations:
+        return None
+
+    parts: List[str] = []
+    for turn in conversations:
+        if not isinstance(turn, dict):
+            continue
+        value = turn.get("value", "")
+        if not value:
+            continue
+        speaker = turn.get("from", "")
+        if speaker:
+            parts.append(f"{speaker}: {value}")
+        else:
+            parts.append(value)
+
+    if not parts:
+        return None
+    return "\n\n".join(parts)
+
+
 FORMAT_FNS: Dict[str, Callable[[Dict[str, Any]], Optional[str]]] = {
     "default": _fmt_default,
     "openmath": _fmt_openmath,
     "fineweb_edu": _fmt_fineweb_edu,
     "starcoder": _fmt_starcoder,
     "magicoder": _fmt_magicoder,
+    "numina": _fmt_numina,
     "stackexchange": _fmt_stackexchange,
+    "openhermes": _fmt_openhermes,
 }
 
 

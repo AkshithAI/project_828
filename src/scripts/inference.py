@@ -362,11 +362,11 @@ if __name__ == '__main__':
         # 2. OpenMath-Instruct-2 (Math reasoning - 25% mix)
         "Problem: If 3x - 7 = 20, what is the value of x^2?\n\nSolution: First, we need to solve for x. We add 7 to both sides of the equation to get",
         
-        # 3. Proof-pile-open-web-math (Web math tutorials - 9% mix)
-        "To find the derivative of the function f(x) = x^3 * sin(x), we use the product rule. The product rule states that (uv)' = u'v + uv'. Let u = x^3 and v = sin(x). Then",
+        # 3. NuminaMath-QwQ-CoT-5M (Long-form reasoning - 9% mix)
+        "Problem: Find the derivative of f(x) = x^3 * sin(x) and evaluate it at x = pi.\n\nSolution: First, we use the product rule. The product rule states that (uv)' = u'v + uv'. Let u = x^3 and v = sin(x). Then",
         
-        # 4. Proof-pile-arxiv (Academic papers - 4% mix)
-        "Title: On the Asymptotic Stability of Non-linear Dynamical Systems\nAbstract: We present a novel framework for analyzing these systems. Unlike previous approaches that rely strictly on Lyapunov functions, our proposed method",
+        # 4. OpenHermes-2.5 (Instruction/chat data - 4% mix)
+        "User: Every day, a tree drops 7 leaves. How many leaves would it drop in a non-leap-year February?\nAssistant: February has 28 days in a non-leap year, so total leaves dropped = 7 x 28 = 196.",
         
         # 5. Proof-pile-algebraic-stack (Formal math proof / structure - 12% mix)
         "Theorem: The sum of the first n positive integers is n(n+1)/2.\nProof: We proceed by mathematical induction. Base case: For n=1, the sum is 1, and the formula gives 1(2)/2 = 1. Inductive step: Assume the statement holds for k. Then the sum of the first k+1 integers is"

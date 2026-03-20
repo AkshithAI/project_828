@@ -96,8 +96,8 @@ class PhaseConfig:
 #   Dataset mix (weights sum to 100):
 #     openmath-instruct-2          25   — math reasoning (problem + solution)
 #     proof-pile-algebraic-stack   12   — mathematical code (11B tokens)
-#     proof-pile-open-web-math      9   — accessible math text (15B tokens)
-#     proof-pile-arxiv              4   — arXiv papers, low weight (29B tokens)
+#     numina-math-cot               9   — step-by-step math reasoning
+#     openhermes-2.5                4   — instruction/chat corpus
 #     fineweb-edu                  30   — general knowledge
 #     cosmopedia-v2                20   — synthetic textbooks
 # ──────────────────────────────────────────────────────────────
@@ -107,9 +107,9 @@ PHASE_1_CONFIG = PhaseConfig(
     peak_lr=3e-4,
     min_lr=3e-5,
     warmup_steps=500,
-    total_steps=87_200,
+    total_steps=101_726,
     scheduler_type="wsd",
-    wsd_stable_frac=0.65,
+    wsd_stable_frac=0.895,
     micro_batch_size=36,
     grad_accum_steps=8,
     grad_clip=1.0,
@@ -130,18 +130,16 @@ PHASE_1_CONFIG = PhaseConfig(
             data_dir="algebraic-stack",
         ),
         DatasetEntry(
-            name="proof-pile-open-web-math",
-            repo_id="EleutherAI/proof-pile-2",
+            name="numina-math-cot",
+            repo_id="PrimeIntellect/NuminaMath-QwQ-CoT-5M",
             weight=9,
-            format_fn="default",
-            data_dir="open-web-math",
+            format_fn="numina",
         ),
         DatasetEntry(
-            name="proof-pile-arxiv",
-            repo_id="EleutherAI/proof-pile-2",
+            name="openhermes-2.5",
+            repo_id="teknium/OpenHermes-2.5",
             weight=4,
-            format_fn="default",
-            data_dir="arxiv",
+            format_fn="openhermes",
         ),
         DatasetEntry(
             name="fineweb-edu",
