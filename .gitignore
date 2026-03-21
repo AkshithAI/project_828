@@ -122,9 +122,6 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# Assets folder
-assets/
-
 # PyTorch model checkpoints
 *.pth
 *.pt

@@ -7,11 +7,11 @@
 [![DeepSpeed](https://img.shields.io/badge/DeepSpeed-Enabled-green.svg)](https://www.deepspeed.ai/)
 [![License](https://img.shields.io/badge/License-TBD-lightgrey.svg)](LICENSE)
 
-** Mixture-of-Experts Transformer with Advanced Training Pipeline**
+**Mixture-of-Experts Transformer with Advanced Training Pipeline**
 
-A production-ready Mixture-of-Experts (MoE) transformer model implementation featuring custom GPT-style architecture with Grouped Query Attention, RoPE positional encoding, efficient expert routing, and distributed training support via DeepSpeed.
+A Mixture-of-Experts (MoE) transformer implementation featuring a custom GPT-style architecture with Grouped Query Attention, RoPE positional encoding, efficient expert routing, and distributed training support via DeepSpeed.
 
-[Features](#-features) • [Architecture](#️-model-architecture) • [Quick Start](#-quick-start) • [Training](#-training) • [Results](#-training-experiments--results)
+[Features](#features) • [Architecture](#model-architecture) • [Quick Start](#quick-start) • [Training](#training) • [Results](#training-experiments--results)
 
 ---
 
@@ -19,32 +19,32 @@ A production-ready Mixture-of-Experts (MoE) transformer model implementation fea
 
 ## Table of Contents
 
-- [Features](#-features)
-- [Model Architecture](#️-model-architecture)
-- [Dataset](#-dataset)
-- [Data Curation](#-data-curation)
-- [Quick Start](#-quick-start)
+- [Features](#features)
+- [Model Architecture](#model-architecture)
+- [Dataset](#dataset)
+- [Data Curation](#data-curation)
+- [Quick Start](#quick-start)
   - [Prerequisites](#prerequisites)
   - [Installation](#installation)
   - [Training](#training)
-- [Project Structure](#-project-structure)
-- [Advanced Features](#-advanced-features)
-- [Performance Benchmarks](#-performance-benchmarks)
-- [Monitoring Training](#-monitoring-training)
-- [Training Experiments & Results](#-training-experiments--results)
-- [Known Issues & Solutions](#-known-issues--solutions)
-- [Hardware Requirements](#-hardware-requirements)
-- [Troubleshooting Guide](#️-troubleshooting-guide)
-- [Citation](#-citation)
-- [License](#-license)
-- [Contributing](#-contributing)
-- [Contact](#-contact)
+- [Project Structure](#project-structure)
+- [Advanced Features](#advanced-features)
+- [Performance Benchmarks](#performance-benchmarks)
+- [Monitoring Training](#monitoring-training)
+- [Training Experiments & Results](#training-experiments--results)
+- [Known Issues & Solutions](#known-issues--solutions)
+- [Hardware Requirements](#hardware-requirements)
+- [Troubleshooting Guide](#troubleshooting-guide)
+- [Citation](#citation)
+- [License](#license)
+- [Contributing](#contributing)
+- [Contact](#contact)
 
 ---
 
 ## Features
 
-- **Mixture of Experts (MoE)** - 6 routed experts + 1 shared expert with auxiliary-loss-free load balancing
+- **Mixture of Experts (MoE)** - 4 routed experts + 1 shared expert with auxiliary-loss-free load balancing
 - **Grouped Query Attention (GQA)** - Efficient attention with 8 attention heads and 4 KV heads (2:1 ratio)
 - **Q/K Normalization** - RMSNorm applied to Query and Key projections for attention stability
 - **RoPE with YaRN Scaling** - Rotary Position Embeddings with NTK-aware interpolation for context extension
@@ -53,7 +53,7 @@ A production-ready Mixture-of-Experts (MoE) transformer model implementation fea
 - **Flash Attention 2 Support** - Optional 40% speedup with memory efficiency
 - **Mixed Precision Training** - BFloat16 for optimal performance
 - **Comprehensive Logging** - Weights & Biases integration with detailed metrics
-- **Production-Ready** - Enterprise-grade code with extensive error handling
+- **Robust Training Pipeline** - Structured codebase with checkpointing, validation, and recovery workflows
 - **NeMo Curator Integration** - Robust data preprocessing pipeline with filtering, cleaning, and deduplication
 - **Best-Fit Bin Packing** - Segment-tree accelerated document packing with CLI, overflow splitting, and HF Hub upload
 
@@ -64,7 +64,7 @@ A production-ready Mixture-of-Experts (MoE) transformer model implementation fea
 ### Overview
 
 - **Model Type**: GPT-style Decoder-only Transformer with Mixture of Experts
-- **Current Configuration**: ~45M parameters (test configuration)
+- **Current Configuration**: Defined in `src/scripts/configs/model_config.py` (default pretraining setup)
 - **Target Configuration**: 800M parameters (production-ready)
 - **Context Length**: 2048 tokens (initial), 4096 tokens (max with YaRN scaling)
 - **Vocabulary**: StarCoder2-15B tokenizer (~49K tokens)
@@ -118,24 +118,24 @@ A production-ready Mixture-of-Experts (MoE) transformer model implementation fea
 - **Concentration Factor**: 1.0 (default YaRN parameter)
 - **Attention Sinks**: Enabled for improved long-context handling
 
-### Current Model Configuration (~45M params)
+### Current Model Configuration (Default Values)
 
 ```python
 # Current Configuration - src/scripts/configs/model_config.py
-vocab_size: 49,152              # StarCoder2 tokenizer
-hidden_dim: 1024
-intermediate_size: 2730
-num_hidden_layers: 4            # 4 transformer layers
-num_attn_heads: 8
-num_key_value_heads: 4          # 2:1 GQA ratio
-head_dim: 128                   # hidden_dim / num_attn_heads
+vocab_size: tokenizer.vocab_size
+hidden_dim: 768
+intermediate_size: 760
+num_hidden_layers: 24
+num_attn_heads: 12
+num_key_value_heads: 6          # 2:1 GQA ratio
+head_dim: 64                    # hidden_dim / num_attn_heads
 num_experts: 4                  # Routed experts
 num_experts_per_tok: 2          # Active experts per token (top-k)
 update_param: 1e-3              # Bias update rate for load balancing
 route_scale: 1.0                # Expert routing scale
 base: 10000                     # RoPE base frequency
-initial_context_len: 2048       # Initial sequence length
-max_context_len: 2048           # Maximum sequence length
+initial_context_len: 2048
+max_context_len: 2048
 ntk_alpha: 1.0                  # NTK interpolation factor
 ntk_beta: 32.0                  # NTK scaling temperature
 scaling_factor: 1.0             # Overall scaling multiplier
@@ -202,7 +202,7 @@ python src/scripts/data/preprocess.py --data_tag wiki --download_dir ./data
 
 ### Configuration
 
-Edit `src/scripts/configs/preprocess.json` to enable/disable processing stages.
+Edit `src/scripts/data/preprocess.json` to enable/disable processing stages.
 
 **[Full Documentation →](src/scripts/data/README.md)**
 
@@ -270,7 +270,7 @@ pip install flash-attn --no-build-isolation
 export WANDB_API_KEY="your_wandb_key"
 
 # Start training
-python -m src.scripts.train
+python -m src.scripts.training.train
 ```
 
 #### Multi-GPU Distributed Training with DeepSpeed
@@ -288,8 +288,8 @@ nvidia-smi topo -m
 - `NV#` - NVLink connection (excellent)
 
 **Bad topologies (Very Slow):**
-- `NODE` - Cross NUMA node ⚠️ **Use single GPU instead!**
-- `SYS` - Cross CPU socket ⚠️ **Use single GPU instead!**
+- `NODE` - Cross NUMA node (use single GPU)
+- `SYS` - Cross CPU socket (use single GPU)
 
 **Launch distributed training:**
 ```bash
@@ -297,9 +297,9 @@ export WANDB_API_KEY="your_wandb_key"
 export PYTHONPATH=$(pwd)
 
 # Run on 2 GPUs
-deepspeed --num_gpus=2 src/scripts/distributed_training.py \
+deepspeed --num_gpus=2 src/scripts/training/distributed_training.py \
     --deepspeed \
-    --deepspeed_config src/scripts/ds-config.json \
+    --deepspeed_config src/scripts/configs/ds-config.json \
     --batch_size 8
 
 # Or use the launch script
@@ -380,40 +380,32 @@ Edit `src/scripts/configs/ds-config.json` for distributed training settings:
 ```
 project_828/
 ├── src/
-│   ├── __init__.py
 │   ├── models/
-│   │   ├── __init__.py
-│   │   ├── model.py              # Main GPT model with standard attention
-│   │   ├── model_flash_attn.py   # GPT model with Flash Attention + Q/K Norms
-│   │   └── weight_init.py        # Model weight initialization
+│   │   ├── model.py                # Main GPT model with standard attention
+│   │   ├── model_flash_attn.py     # GPT model with Flash Attention + Q/K Norms
+│   │   └── weight_init.py          # Model weight initialization
 │   └── scripts/
-│       ├── __init__.py
-│       ├── tokenizer.py          # StarCoder2 tokenizer setup
-│       ├── dataloader.py         # Resumable data loading with state checkpointing
-│       ├── dist_dataloader.py    # Distributed data loading
-│       ├── testloader.py         # Test data loader
-│       ├── helper_funcs.py       # Utility functions (checkpointing, paths)
-│       ├── inference.py          # Inference with KV cache + expert stats
+│       ├── tokenizer.py            # StarCoder2 tokenizer setup
+│       ├── dataloader.py           # Resumable data loading with state checkpointing
+│       ├── dist_dataloader.py      # Distributed data loading
+│       ├── helper_funcs.py         # Utility functions (checkpointing, paths)
+│       ├── inference.py            # Inference with KV cache + expert stats
 │       ├── configs/
-│       │   ├── model_config.py   # Model configuration (dataclass)
-│       │   └── ds-config.json    # DeepSpeed configuration
+│       │   ├── model_config.py     # Model and phase configuration
+│       │   └── ds-config.json      # DeepSpeed configuration
 │       ├── training/
-│       │   ├── train.py          # Single GPU training loop
-│       │   └── distributed_training.py  # DeepSpeed distributed training
+│       │   ├── train.py            # Single GPU phase-based training loop
+│       │   ├── distributed_training.py
+│       │   └── schedulers.py
 │       └── data/
-│           ├── packing.py        # Best-fit bin packing pipeline (tokenize/pack/upload)
-│           ├── preprocess.py     # NeMo Curator data preprocessing
-│           ├── preprocess.json   # Preprocessing configuration
-│           └── README.md         # Data curation & packing documentation
-├── assets/
-│   ├── train_logs/               # Training log screenshots
-│   │   ├── Load Balancing Logs/  # Expert utilization visualizations
-│   │   └── sigmoid logs/         # Sigmoid gating score logs
-│   ├── model_24999.pt            # Checkpoint at step 24999
-│   └── moe_loss-free_run.pt      # Loss-free load balancing run checkpoint
-├── check_flash_attn_requirements.py  # Flash Attention compatibility check
-├── init.sh                       # Environment setup script
-├── launch_distributed.sh         # Launch script for distributed training
+│           ├── packing.py          # Best-fit bin packing pipeline (tokenize/pack/upload)
+│           ├── preprocess.py       # NeMo Curator data preprocessing
+│           ├── preprocess.json     # Preprocessing configuration
+│           └── README.md           # Data curation & packing documentation
+├── checkpoints/
+├── check_flash_attn_requirements.py
+├── init.sh
+├── launch_distributed.sh
 ├── requirements.txt
 └── README.md
 ```
@@ -683,15 +675,15 @@ export NCCL_P2P_LEVEL=SYS
 ### Single GPU Performance
 | GPU | Speed | Memory | Recommendation |
 |-----|-------|--------|----------------|
-| RTX 4090 | 12 iter/sec | ~12GB | ✅ Best for development |
-| RTX 5090 | 14 iter/sec | ~11GB | ✅ Excellent |
+| RTX 4090 | 12 iter/sec | ~12GB | Recommended for development |
+| RTX 5090 | 14 iter/sec | ~11GB | Recommended |
 
 ### Multi-GPU Performance
 | Configuration | Topology | Speed | Recommendation |
 |--------------|----------|-------|----------------|
-| 2x RTX 4090 | PIX | ~20 iter/sec | ✅ Good speedup |
-| 2x RTX 4090 | NVLink | ~22 iter/sec | ✅ Excellent |
-| 2x RTX 4090 | NODE | 0.01 iter/sec | ❌ **Use 1 GPU instead** |
+| 2x RTX 4090 | PIX | ~20 iter/sec | Good speedup |
+| 2x RTX 4090 | NVLink | ~22 iter/sec | Strong speedup |
+| 2x RTX 4090 | NODE | 0.01 iter/sec | Use 1 GPU instead |
 
 **Key Takeaway:** Multi-GPU only helps with good P2P topology (PIX/PXB/NVLink). With NODE topology, single GPU is ~1200x faster!
 
@@ -706,27 +698,27 @@ export NCCL_P2P_LEVEL=SYS
 5. **Iterations/sec**: ~12 on single RTX 4090
 
 ### Red Flags
-- ⚠️ Loss becomes NaN → Reduce learning rate
-- ⚠️ Loss increases for >5K steps → Check data pipeline
-- ⚠️ Grad norm consistently >10 → Gradient explosion, reduce LR
-- ⚠️ Val loss >> train loss → Overfitting, add regularization
-- ⚠️ Multi-GPU < 1 iter/sec → Bad topology, use single GPU
+- Loss becomes NaN -> reduce learning rate
+- Loss increases for >5K steps -> check data pipeline
+- Grad norm consistently >10 -> gradient explosion, reduce learning rate
+- Val loss >> train loss -> possible overfitting, add regularization
+- Multi-GPU < 1 iter/sec -> likely topology bottleneck, use single GPU
 
 ---
 
 ## Training Experiments & Results
 
-This section documents the training journey, including critical bugs discovered, fixes applied, and lessons learned from three major training runs.
+This section documents the training journey, including critical bugs discovered, fixes applied, and lessons learned from five major training runs.
 
 ### Training Runs Summary
 
 | Run | Steps | Dataset | Key Issue | Grad Norm | Training Stability |
 |-----|-------|---------|-----------|-----------|-------------------|
-| **Run 1** | 240,000 | Code | RoPE shape mismatch (B*S vs B,S) | N/A | ❌ Unstable |
-| **Run 2** | 110,000 | Code | Gradient norm explosion | Peak ~25 | ❌ Very Noisy |
-| **Run 3** | 50,000 | Language | None (all fixes applied) | Peak ~6 | ✅ **Stable** |
-| **Run 4** | 50,000 | Language | Expert collapsing in MoE | Peak ~7 | ✅ **Stable + Balanced** |
-| **Run 5** | Ongoing | FineWeb-Edu | SwiGLU activation overflow | - | ✅ **Stable (with clamping)** |
+| **Run 1** | 240,000 | Code | RoPE shape mismatch (B*S vs B,S) | N/A | Unstable |
+| **Run 2** | 110,000 | Code | Gradient norm explosion | Peak ~25 | Very noisy |
+| **Run 3** | 50,000 | Language | None (all fixes applied) | Peak ~6 | Stable |
+| **Run 4** | 50,000 | Language | Expert collapsing in MoE | Peak ~7 | Stable + balanced |
+| **Run 5** | Ongoing | FineWeb-Edu | SwiGLU activation overflow | - | Stable (with clamping) |
 
 ### Detailed Experiment Analysis
 
@@ -751,7 +743,7 @@ This section documents the training journey, including critical bugs discovered,
 
 **Screenshot**: Training metrics showing unstable loss patterns
 
-![Run 1 - 240k Steps Metrics](https://github.com/AkshithAI/project_828/blob/main/assets/Screenshot%202025-12-11%20at%208.13.10%E2%80%AFPM.png)
+![Run 1 - 240k Steps Metrics](assets/screenshots/Screenshot%202025-12-11%20at%208.13.10%E2%80%AFPM.png)
 
 
 ---
@@ -763,7 +755,7 @@ This section documents the training journey, including critical bugs discovered,
 **Dataset**: Code dataset (CodeParrot-Clean)
 
 **Fixes Applied**:
-- ✅ Fixed RoPE attention reshape issue - corrected positional encoding to match attention layer tensor shapes
+- Fixed RoPE attention reshape issue - corrected positional encoding to match attention layer tensor shapes
 
 **New Issue Discovered**: Gradient Norm Explosion
 - **Problem**: Despite fixing the RoPE bug, training remained highly unstable
@@ -783,7 +775,7 @@ This section documents the training journey, including critical bugs discovered,
 
 **Screenshot**: Training metrics showing gradient explosion and noisy loss
 
-![Run 2 - 110k Steps Metrics](https://github.com/AkshithAI/project_828/blob/main/assets/Screenshot%202025-12-11%20at%208.13.31%E2%80%AFPM.png)
+![Run 2 - 110k Steps Metrics](assets/screenshots/Screenshot%202025-12-11%20at%208.13.31%E2%80%AFPM.png)
 
 
 ---
@@ -795,13 +787,13 @@ This section documents the training journey, including critical bugs discovered,
 **Dataset**: **Language dataset** (switched from code)
 
 **All Fixes Applied**:
-- ✅ RoPE attention reshape fix (from Run 1)
-- ✅ Switched to language dataset for more stable gradients (from Run 2 insights)
+- RoPE attention reshape fix (from Run 1)
+- Switched to language dataset for more stable gradients (from Run 2 insights)
 
-**Results**: **Significantly Improved Stability** 
+**Results**: Significantly improved stability.
 
 **Training Metrics**:
-- **Gradient norm**: Now peaked around **6** (down from 25+) - 4x improvement!
+- **Gradient norm**: Now peaked around **6** (down from 25+) - 4x improvement.
 - **Training loss**: Much less noisy, smoothly decreasing from ~11 to ~5
 - **Perplexity**: Dropping smoothly from 20,000+ to stable low values (proper convergence)
 - **Learning rate**: Following proper cosine warmup schedule
@@ -815,7 +807,7 @@ This section documents the training journey, including critical bugs discovered,
 
 **Screenshot**: Training metrics showing stable convergence
 
-![Run 3 - 50k Steps Metrics](https://github.com/AkshithAI/project_828/blob/main/assets/Screenshot%202025-12-13%20at%2012.33.28%E2%80%AFPM.png)
+![Run 3 - 50k Steps Metrics](assets/screenshots/Screenshot%202025-12-13%20at%2012.33.28%E2%80%AFPM.png)
 
 
 ---
@@ -827,14 +819,14 @@ This section documents the training journey, including critical bugs discovered,
 **Dataset**: Language dataset
 
 **Problems Identified**:
-- ⚠️ Expert collapsing observed in MoE - some experts receiving disproportionate token allocation
-- ⚠️ Residual variance in gradient norms and training loss during training
+- Expert collapsing observed in MoE - some experts receiving disproportionate token allocation
+- Residual variance in gradient norms and training loss during training
 
 **Fixes Applied**:
-- ✅ Added **Q-Norm and K-Norm** to Attention mechanism for improved stability
-- ✅ Implemented **Auxiliary-Loss-Free Load Balancing** in MoE router
+- Added **Q-Norm and K-Norm** to attention for improved stability
+- Implemented **auxiliary-loss-free load balancing** in the MoE router
 
-**Results**: **Perfect Load Balancing Achieved** 🎉
+**Results**: Perfect load balancing achieved.
 
 **Training Metrics**:
 - **Gradient norm**: Peaked around ~7, with some variance but overall stable
@@ -854,9 +846,9 @@ This section documents the training journey, including critical bugs discovered,
 
 **Screenshot**: Training metrics showing stable convergence with load-balanced MoE
 
-![Run 4 - 50k Steps Metrics](https://github.com/AkshithAI/project_828/blob/main/assets/Screenshot%202026-01-14%20at%205.55.34%E2%80%AFPM.png)
+![Run 4 - 50k Steps Metrics](assets/screenshots/Screenshot%202026-01-14%20at%205.55.34%E2%80%AFPM.png)
 
-**Training Logs**: Detailed load balancing and sigmoid gating logs available at [assets/train_logs](assets/train_logs/)
+**Training Logs**: Detailed load balancing and sigmoid gating logs are available in your W&B runs and local training outputs.
 
 ---
 
@@ -867,11 +859,11 @@ This section documents the training journey, including critical bugs discovered,
 **Dataset**: FineWeb-Edu-100B (high-quality educational content)
 
 **New Features Implemented**:
-- ✅ **SwiGLU with Clamping**: Added `limit=7.0` clamping to prevent activation explosions
-- ✅ **Resumable Dataloader**: State checkpointing for seamless training resumption
-- ✅ **Enhanced Checkpointing**: Model, optimizer, scheduler, and dataloader states saved together
-- ✅ **Inline Inference**: Sample generation during validation for qualitative monitoring
-- ✅ **Expert Utilization Logging**: Real-time W&B metrics for MoE load balancing
+- **SwiGLU with Clamping**: Added `limit=7.0` clamping to prevent activation explosions
+- **Resumable Dataloader**: State checkpointing for seamless training resumption
+- **Enhanced Checkpointing**: Model, optimizer, scheduler, and dataloader states saved together
+- **Inline Inference**: Sample generation during validation for qualitative monitoring
+- **Expert Utilization Logging**: Real-time W&B metrics for MoE load balancing
 
 **SwiGLU Clamping Implementation**:
 ```python
@@ -963,7 +955,7 @@ def swiglu(x, alpha: float = 1.702, limit: float = 7.0):
 ### Cloud Provider Tips
 - **Vast.ai:** Filter for "NVLink" in search
 - **Always check topology first:** `nvidia-smi topo -m`
-- If NODE topology: Destroy and find better hardware
+- If NODE topology: prefer hardware with PIX, PXB, or NVLink interconnects
 - Look for "PCIe 4.0 x16" with modern CPUs (AMD EPYC 7xxx series)
 
 ## Troubleshooting Guide
@@ -974,12 +966,12 @@ def swiglu(x, alpha: float = 1.702, limit: float = 7.0):
    ```bash
    nvidia-smi topo -m
    ```
-   - ✅ PIX/PXB/NVLink → Good to go
-   - ❌ NODE/SYS → Use single GPU instead
+  - PIX/PXB/NVLink -> suitable for multi-GPU training
+  - NODE/SYS -> use single GPU instead
 
 2. **Test single GPU first:**
    ```bash
-   python -m src.scripts.train
+  python -m src.scripts.training.train
    ```
    Should get ~12 iter/sec on RTX 4090
 
@@ -1011,7 +1003,7 @@ If you use this code, please cite:
 ```bibtex
 @misc{project828,
   author = {AkshithAI},
-  title = {Project 828: Enterprise-Grade MoE Transformer with Advanced Training Pipeline},
+  title = {Project 828: MoE Transformer with Advanced Training Pipeline},
   year = {2025},
   version = "1.0.0",
   publisher = {GitHub},
@@ -1045,7 +1037,7 @@ For questions or issues, please open an issue on GitHub or contact [@AkshithAI](
 
 **Project 828** | Version 1.0.0
 
-*Enterprise-Grade MoE Transformer Architecture*
+*MoE Transformer Architecture*
 
 **Note**: This is a research project. The ~45M model is for testing pipeline stability, not for production code generation. The 800M model is the target configuration for practical applications.
 
