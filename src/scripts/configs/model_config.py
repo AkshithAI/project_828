@@ -83,15 +83,15 @@ class PhaseConfig:
 # ──────────────────────────────────────────────────────────────
 # Phase 1 (post-growth):  ~60B tokens  —  Math / Science / General Knowledge
 # ──────────────────────────────────────────────────────────────
-#   effective_batch = 42 * 8 = 336 seqs
-#   tokens_per_step ≈ 336 * 2048 ≈ 0.688M
-#   total_steps     = 87,200  (~60B tokens)
+#   effective_batch = 36 * 8 = 288 seqs
+#   tokens_per_step = 288 * 2048 ≈ 0.59M
+#   total_steps     = 101,726  (~60B tokens)
 #   lifetime tokens = 27B (pre-growth) + 60B (post) ≈ 87B
 #
-#   WSD schedule (stable_frac=0.65):
+#   WSD schedule (stable_frac=0.895):
 #     warmup:  0 → 499            (500 steps)
-#     stable:  500 → 56,854       (56,355 steps)
-#     decay:   56,855 → 87,200    (30,345 steps, ~35% of training)
+#     stable:  500 → 91,044       (90,545 steps)
+#     decay:   91,045 → 101,726   (10,682 steps, ~10.5% of training)
 #
 #   Dataset mix (weights sum to 100):
 #     openmath-instruct-2          25   — math reasoning (problem + solution)
