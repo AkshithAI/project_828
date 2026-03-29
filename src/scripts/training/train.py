@@ -158,21 +158,26 @@ def train_phase(
                         wandb_run=wandb_run, phase_config=phase_config,
                     )
                     raw = _unwrap(model)
+                    # 1. Python Code (Source Code)
                     print(generate(raw,
-                            "Chapter 1. The dark forest was",
-                            config.device, max_tokens=60, temp=0.8))
-                    print(generate(raw,
-                            "The following is a Python function that reverses a string:\n\ndef reverse_string(s):",
+                            "def binary_search(arr, target):\n    \"\"\"Find target in sorted array arr.\"\"\"\n    left, right =",
                             config.device, max_tokens=80, temp=0.3))
+                    # 2. JavaScript / Web (Source Code)
                     print(generate(raw,
-                            "To solve the quadratic equation x^2 - 5x + 6 = 0, we first",
+                            "// Node.js Express server setup\nconst express = require('express');\nconst app = express();\n",
+                            config.device, max_tokens=100, temp=0.3))
+                    # 3. Code-Adjacent / Instruct Q&A
+                    print(generate(raw,
+                            "User: Write a systemd service file to run a Python daemon.\nAssistant: Here is an example of a systemd service file",
+                            config.device, max_tokens=150, temp=0.4))
+                    # 4. Math Reasoning
+                    print(generate(raw,
+                            "Problem: Find the derivative of f(x) = x^2 * ln(x).\nSolution: By the product rule, we have f'(x) =",
                             config.device, max_tokens=120, temp=0.2))
+                    # 5. General Knowledge
                     print(generate(raw,
-                            "The theory of general relativity, published by Albert Einstein in 1915, states that",
-                            config.device, max_tokens=80, temp=0.4))
-                    print(generate(raw,
-                            "In this essay, I will argue that renewable energy is essential for economic growth because",
-                            config.device, max_tokens=250, temp=0.5))
+                            "The process of photosynthesis in plants involves converting light energy into chemical energy. The overall equation is:",
+                            config.device, max_tokens=100, temp=0.4))
                     torch.cuda.empty_cache()
                     model.train()
                     if val_loss < best_val_loss:
