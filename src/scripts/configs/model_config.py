@@ -81,7 +81,7 @@ class PhaseConfig:
 
 
 # ──────────────────────────────────────────────────────────────
-# Phase 1 (post-growth):  ~60B tokens  —  Math / Science / General Knowledge
+# Phase 1 (post-growth):  ~60B tokens  —  Code / Math / General Knowledge
 # ──────────────────────────────────────────────────────────────
 #   effective_batch = 36 * 8 = 288 seqs
 #   tokens_per_step = 288 * 2048 ≈ 0.59M
@@ -94,12 +94,31 @@ class PhaseConfig:
 #     decay:   91,045 → 101,726   (10,682 steps, ~10.5% of training)
 #
 #   Dataset mix (weights sum to 100):
-#     openmath-instruct-2          25   — math reasoning (problem + solution)
-#     proof-pile-algebraic-stack   12   — mathematical code (11B tokens)
-#     numina-math-cot               9   — step-by-step math reasoning
-#     openhermes-2.5                4   — instruction/chat corpus
-#     fineweb-edu                  30   — general knowledge
-#     cosmopedia-v2                20   — synthetic textbooks
+#     starcoderdata-python         14   — primary code corpus (Python)
+#     starcoderdata-javascript      6   — web scripting (JavaScript)
+#     starcoderdata-java            5   — enterprise/Android (Java)
+#     starcoderdata-typescript      4   — typed web (TypeScript)
+#     starcoderdata-cpp             4   — systems programming (C++)
+#     starcoderdata-c               3   — low-level systems (C)
+#     starcoderdata-csharp          3   — .NET ecosystem (C#)
+#     starcoderdata-go              3   — cloud-native (Go)
+#     starcoderdata-rust            2   — safety-focused systems (Rust)
+#     starcoderdata-php             1   — web back-end (PHP)
+#     fineweb-edu                  12   — general knowledge (score ≥ 3.5)
+#     cosmopedia-v2                 7   — synthetic textbooks
+#     openmath-instruct-2          10   — math reasoning (problem + solution)
+#     numina-math-cot               4   — step-by-step math (length-filtered)
+#     stack-exchange-preferences    7   — technical Q&A (code↔NL bridge)
+#     proof-pile-algebraic-stack    5   — mathematical code (11B tokens)
+#     magicoder-oss-instruct        5   — code instruction (OSS-grounded)
+#     openhermes-2.5                5   — instruction/chat corpus
+#
+#   Category breakdown:
+#     Source Code          45%  (10 languages from starcoderdata)
+#     General Knowledge    19%  (fineweb-edu + cosmopedia)
+#     Code-adjacent        17%  (stack-exchange + algebraic-stack + magicoder)
+#     Math/Reasoning       14%  (openmath + numina)
+#     Instruction           5%  (openhermes)
 # ──────────────────────────────────────────────────────────────
 PHASE_1_CONFIG = PhaseConfig(
     phase_name="phase_1_post_growth",
@@ -116,44 +135,131 @@ PHASE_1_CONFIG = PhaseConfig(
     val_interval=1500,
     val_steps=3000,
     datasets=[
+        # ── Source Code (45%) — Top 10 Languages ────────────
         DatasetEntry(
-            name="openmath-instruct-2",
-            repo_id="nvidia/OpenMathInstruct-2",
-            weight=25,
-            format_fn="openmath",
+            name="starcoderdata-python",
+            repo_id="bigcode/starcoderdata",
+            weight=14,
+            format_fn="starcoder",
+            data_dir="python",
         ),
         DatasetEntry(
-            name="proof-pile-algebraic-stack",
-            repo_id="EleutherAI/proof-pile-2",
-            weight=12,
-            format_fn="default",
-            data_dir="algebraic-stack",
+            name="starcoderdata-javascript",
+            repo_id="bigcode/starcoderdata",
+            weight=6,
+            format_fn="starcoder",
+            data_dir="javascript",
         ),
         DatasetEntry(
-            name="numina-math-cot",
-            repo_id="PrimeIntellect/NuminaMath-QwQ-CoT-5M",
-            weight=9,
-            format_fn="numina",
+            name="starcoderdata-java",
+            repo_id="bigcode/starcoderdata",
+            weight=5,
+            format_fn="starcoder",
+            data_dir="java",
         ),
         DatasetEntry(
-            name="openhermes-2.5",
-            repo_id="teknium/OpenHermes-2.5",
+            name="starcoderdata-typescript",
+            repo_id="bigcode/starcoderdata",
             weight=4,
-            format_fn="openhermes",
+            format_fn="starcoder",
+            data_dir="typescript",
         ),
+        DatasetEntry(
+            name="starcoderdata-cpp",
+            repo_id="bigcode/starcoderdata",
+            weight=4,
+            format_fn="starcoder",
+            data_dir="cpp",
+        ),
+        DatasetEntry(
+            name="starcoderdata-c",
+            repo_id="bigcode/starcoderdata",
+            weight=3,
+            format_fn="starcoder",
+            data_dir="c",
+        ),
+        DatasetEntry(
+            name="starcoderdata-csharp",
+            repo_id="bigcode/starcoderdata",
+            weight=3,
+            format_fn="starcoder",
+            data_dir="c-sharp",
+        ),
+        DatasetEntry(
+            name="starcoderdata-go",
+            repo_id="bigcode/starcoderdata",
+            weight=3,
+            format_fn="starcoder",
+            data_dir="go",
+        ),
+        DatasetEntry(
+            name="starcoderdata-rust",
+            repo_id="bigcode/starcoderdata",
+            weight=2,
+            format_fn="starcoder",
+            data_dir="rust",
+        ),
+        DatasetEntry(
+            name="starcoderdata-php",
+            repo_id="bigcode/starcoderdata",
+            weight=1,
+            format_fn="starcoder",
+            data_dir="php",
+        ),
+        # ── General Knowledge (19%) ─────────────────────────
         DatasetEntry(
             name="fineweb-edu",
             repo_id="HuggingFaceFW/fineweb-edu",
-            weight=30,
+            weight=12,
             format_fn="fineweb_edu",
             config_name="sample-100BT",
         ),
         DatasetEntry(
             name="cosmopedia-v2",
             repo_id="HuggingFaceTB/cosmopedia-v2",
-            weight=20,
+            weight=7,
             format_fn="default",
             config_name="cosmopedia-v2",
+        ),
+        # ── Math/Reasoning (14%) ────────────────────────────
+        DatasetEntry(
+            name="openmath-instruct-2",
+            repo_id="nvidia/OpenMathInstruct-2",
+            weight=10,
+            format_fn="openmath",
+        ),
+        DatasetEntry(
+            name="numina-math-cot",
+            repo_id="PrimeIntellect/NuminaMath-QwQ-CoT-5M",
+            weight=4,
+            format_fn="numina",
+        ),
+        # ── Code-Adjacent (17%) ─────────────────────────────
+        DatasetEntry(
+            name="stack-exchange-preferences",
+            repo_id="HuggingFaceH4/stack-exchange-preferences",
+            weight=7,
+            format_fn="stackexchange",
+        ),
+        DatasetEntry(
+            name="proof-pile-algebraic-stack",
+            repo_id="EleutherAI/proof-pile-2",
+            weight=5,
+            format_fn="default",
+            data_dir="algebraic-stack",
+        ),
+        DatasetEntry(
+            name="magicoder-oss-instruct",
+            repo_id="ise-uiuc/Magicoder-OSS-Instruct-75K",
+            weight=5,
+            format_fn="magicoder",
+        ),
+        # ── Instruction (5%) ────────────────────────────────
+        DatasetEntry(
+            name="openhermes-2.5",
+            repo_id="teknium/OpenHermes-2.5",
+            weight=5,
+            format_fn="openhermes",
         ),
     ],
 )

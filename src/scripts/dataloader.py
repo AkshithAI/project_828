@@ -29,17 +29,22 @@ def _fmt_openmath(row: Dict[str, Any]) -> Optional[str]:
 
 
 def _fmt_fineweb_edu(row: Dict[str, Any]) -> Optional[str]:
-    """HuggingFaceFW/fineweb-edu — only keep top-10% (score >= 3.0)."""
+    """HuggingFaceFW/fineweb-edu — only keep top-quality (score >= 3.5)."""
     score = row.get("score", 0.0)
-    if score is None or score < 3.0:
+    if score is None or score < 3.5:
         return None            
     return row.get("text", "") or None
 
 
 def _fmt_starcoder(row: Dict[str, Any]) -> Optional[str]:
-    """bigcode/the-stack-v2: use 'content' column."""
+    """bigcode/starcoderdata: 'content' column with quality filtering."""
     content = row.get("content", "")
-    return content if content else None
+    if not content:
+        return None
+    # Skip trivial files (< 100 chars) and likely auto-generated files (> 100K chars)
+    if len(content) < 100 or len(content) > 100_000:
+        return None
+    return content
 
 
 def _fmt_magicoder(row: Dict[str, Any]) -> Optional[str]:
@@ -52,12 +57,16 @@ def _fmt_magicoder(row: Dict[str, Any]) -> Optional[str]:
 
 
 def _fmt_numina(row: Dict[str, Any]) -> Optional[str]:
-    """PrimeIntellect/NuminaMath-QwQ-CoT-5M: prompt + response."""
+    """PrimeIntellect/NuminaMath-QwQ-CoT-5M: prompt + response (length-filtered)."""
     problem = row.get("prompt", "")
     solution = row.get("response", "")
     if not problem and not solution:
         return None
-    return f"{problem}\n\n{solution}"
+    text = f"{problem}\n\n{solution}"
+    # Cap excessively verbose CoT — research shows shorter is better for small models
+    if len(text) > 8000:
+        return None
+    return text
 
 
 def _fmt_stackexchange(row: Dict[str, Any]) -> Optional[str]:
@@ -66,7 +75,10 @@ def _fmt_stackexchange(row: Dict[str, Any]) -> Optional[str]:
     chosen = row.get("chosen", "")
     if not question:
         return None
-    return f"{question}\n\n{chosen}" if chosen else question
+    # Skip entries with very short or missing answers
+    if not chosen or len(chosen) < 50:
+        return None
+    return f"{question}\n\n{chosen}"
 
 
 def _fmt_openhermes(row: Dict[str, Any]) -> Optional[str]:
