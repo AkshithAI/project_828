@@ -12,10 +12,14 @@ from ...models.model import GPT
 from ..tokenizer import tokenizer
 from ..dataloader import create_phase_dataloaders
 from ...models.model_flash_attn import GPT_FLASH
-from ..helper_funcs import get_base_dir, save_checkpoint, load_checkpoint
+from ..helper_funcs import get_base_dir, save_checkpoint, save_checkpoint_async, load_checkpoint
 from .schedulers import create_phase_scheduler
 from ...models.weight_init import init_gpt_model, count_parameters
 from ..inference import generate
+from .validate_domains import validate_domains
+
+# ── Fused cross-entropy (liger-kernel) ──────────────────────────
+from liger_kernel.transformers import LigerFusedLinearCrossEntropyLoss
 
 @torch.inference_mode()
 def validation(model, criterion, val_data, train_step, wandb_run, phase_config):
@@ -43,7 +47,7 @@ def validation(model, criterion, val_data, train_step, wandb_run, phase_config):
   return avg_val_loss
 
 def train_phase(
-    model, optimizer, scheduler, criterion,
+    model, optimizer, scheduler,
     train_data, val_data, wandb_run, phase_config,
     base_dir, start_step=0,
 ):
@@ -52,7 +56,7 @@ def train_phase(
     and MixerState checkpoint.
 
     Args:
-        model, optimizer, scheduler, criterion: the usual.
+        model, optimizer, scheduler: the usual.
         train_data:   ``ResumableDataLoader`` wrapping a ``WeightedMixerDataset``.
         val_data:     Plain ``DataLoader`` for validation.
         wandb_run:    Active W&B run.
@@ -68,12 +72,28 @@ def train_phase(
     seq_len = config.max_context_len
     micro_bs = phase_config.micro_batch_size
     tokens_per_step = micro_bs * seq_len * grad_accumulation_steps
+    eos_id = tokenizer.eos_token_id
+
+    # ── Grab the unembedding weight for fused CE ──
+    raw_model = _unwrap(model)
+    unembed_weight = raw_model.unembedding.weight  # (vocab_size, hidden_dim)
+
+    # ── Fused criterion for training (liger-kernel) ──
+    fused_ce = LigerFusedLinearCrossEntropyLoss(
+        ignore_index=eos_id,
+        reduction="mean",
+    )
+
+    # ── Standard criterion for validation ──
+    criterion = nn.CrossEntropyLoss(ignore_index=eos_id)
 
     # Estimate model FLOPs per forward pass 
-    raw_model = _unwrap(model)
     n_params = sum(p.numel() for p in raw_model.parameters())
     flops_per_token = 6 * n_params  
     gpu_peak_flops = 989.4e12  # H200 bf16 peak FLOPS
+
+    # ── Async checkpoint thread handle ──
+    _save_thread = None
 
     try:
         model.train()
@@ -88,12 +108,23 @@ def train_phase(
             inputs = batch[:, :-1].contiguous()
             targets = batch[:, 1:].contiguous()
             with autocast(device_type="cuda", dtype=torch.bfloat16):
-                logits = model(inputs)
-                loss = criterion(logits.view(-1, logits.shape[-1]), targets.view(-1))
-                loss_value = loss.item()
-            loss = loss / grad_accumulation_steps
-            loss.backward()
-            accum_loss += loss_value
+                # ── Fused Linear Cross-Entropy ──
+                # forward_with_hidden returns (batch, seq, hidden_dim)
+                # The fused kernel computes unembedding + CE in one pass,
+                # never materializing the (batch*seq, vocab) logits tensor.
+                hidden = model.forward_with_hidden(inputs)
+                hidden_flat = hidden.view(-1, hidden.shape[-1])   # (B*T, D)
+                targets_flat = targets.view(-1)                    # (B*T,)
+
+                # fused_ce.forward(weight, input, target, bias)
+                loss = fused_ce(
+                    unembed_weight,     # lin_weight: (vocab_size, hidden_dim)
+                    hidden_flat,        # _input:     (B*T, hidden_dim)
+                    targets_flat,       # target:     (B*T,)
+                )
+
+            (loss / grad_accumulation_steps).backward()
+            accum_loss = accum_loss + loss.detach()  
             micro_count += 1
 
             if micro_count == grad_accumulation_steps:
@@ -105,7 +136,7 @@ def train_phase(
                 scheduler.step()
                 optimizer.zero_grad()
 
-                avg_accum_loss = accum_loss / grad_accumulation_steps
+                avg_accum_loss = (accum_loss / grad_accumulation_steps).item()  
                 # ── Throughput & hardware metrics ──
                 step_elapsed = time.perf_counter() - step_start_time
                 tps = tokens_per_step / step_elapsed if step_elapsed > 0 else 0.0
@@ -157,28 +188,31 @@ def train_phase(
                         model, criterion, val_data, train_step=optim_step,
                         wandb_run=wandb_run, phase_config=phase_config,
                     )
+
+                    # ── Domain-specific validation ──
+                    validate_domains(
+                        model=model,
+                        wandb_run=wandb_run,
+                        train_step=optim_step,
+                        phase_config=phase_config,
+                        device=config.device,
+                        batch_size=16,
+                        max_batches_per_domain=100,
+                    )
+
                     raw = _unwrap(model)
                     # 1. Python Code (Source Code)
                     print(generate(raw,
                             "def binary_search(arr, target):\n    \"\"\"Find target in sorted array arr.\"\"\"\n    left, right =",
                             config.device, max_tokens=80, temp=0.3))
-                    # 2. JavaScript / Web (Source Code)
-                    print(generate(raw,
-                            "// Node.js Express server setup\nconst express = require('express');\nconst app = express();\n",
-                            config.device, max_tokens=100, temp=0.3))
-                    # 3. Code-Adjacent / Instruct Q&A
-                    print(generate(raw,
-                            "User: Write a systemd service file to run a Python daemon.\nAssistant: Here is an example of a systemd service file",
-                            config.device, max_tokens=150, temp=0.4))
-                    # 4. Math Reasoning
+                    # 2. Math Reasoning
                     print(generate(raw,
                             "Problem: Find the derivative of f(x) = x^2 * ln(x).\nSolution: By the product rule, we have f'(x) =",
                             config.device, max_tokens=120, temp=0.2))
-                    # 5. General Knowledge
+                    # 3. General Knowledge
                     print(generate(raw,
                             "The process of photosynthesis in plants involves converting light energy into chemical energy. The overall equation is:",
                             config.device, max_tokens=100, temp=0.4))
-                    torch.cuda.empty_cache()
                     model.train()
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
@@ -188,7 +222,12 @@ def train_phase(
                         "val_loss": val_loss,
                     }
                     dataloader_state = train_data.get_state()
-                    save_checkpoint(
+
+                    # ── Async checkpoint save ──
+                    # Wait for any previous async save to finish first
+                    if _save_thread is not None:
+                        _save_thread.join()
+                    _save_thread = save_checkpoint_async(
                         base_dir, optim_step,
                         model_data=_unwrap(model).state_dict(),
                         optimizer_data=optimizer.state_dict(),
@@ -197,6 +236,7 @@ def train_phase(
                         dataloader_state=dataloader_state,
                         meta_data=meta_data,
                         phase=phase_num,
+                        prefetch_loader=train_data,
                     )
 
                 step_start_time = time.perf_counter()
@@ -204,9 +244,16 @@ def train_phase(
                     print(f"Reached total_steps ({phase_config.total_steps}). Phase complete.")
                     break
 
+        # Wait for any in-flight async save before exiting
+        if _save_thread is not None:
+            _save_thread.join()
         print(f"Phase {phase_num} training complete at optimizer step {optim_step}.")
     except KeyboardInterrupt:
         print(f"\n[Interrupt] Saving checkpoint at optimizer step {optim_step}...")
+        # Wait for any in-flight async save first
+        if _save_thread is not None:
+            _save_thread.join()
+        # Emergency save is SYNCHRONOUS to guarantee completion before exit
         dataloader_state = train_data.get_state()
         save_checkpoint(
             base_dir, optim_step,
@@ -250,7 +297,6 @@ if __name__ == '__main__':
     # ── Phase selection ────────────────────────────────────
     phase_config = PHASE_1_CONFIG
 
-    criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.eos_token_id)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=phase_config.peak_lr,
@@ -285,6 +331,11 @@ if __name__ == '__main__':
                 "effective_batch": phase_config.effective_batch_size(),
                 "grad_accum": phase_config.grad_accum_steps,
             },
+            "optimizations": {
+                "fused_cross_entropy": "liger-kernel",
+                "async_checkpointing": True,
+                "flash_attention": True,
+            },
         },
     )
 
@@ -300,9 +351,9 @@ if __name__ == '__main__':
             pg["lr"] = phase_config.peak_lr
 
     if start_step > 0:
-        scheduler = create_phase_scheduler(optimizer, phase_config)
-        for _ in range(start_step):
-            scheduler.step()
+        for group in optimizer.param_groups:
+            group.setdefault('initial_lr', phase_config.peak_lr)
+        scheduler = create_phase_scheduler(optimizer, phase_config, last_epoch=start_step - 1)
         current_lr = scheduler.get_last_lr()[0]
         print(f"[Scheduler] Rebuilt from config and fast-forwarded to optimizer step {start_step}")
         print(f"[Scheduler] Current LR: {current_lr:.6e}")
@@ -323,7 +374,7 @@ if __name__ == '__main__':
     # ── Train ──────────────────────────────────────────────
     try:
         train_phase(
-            model, optimizer, scheduler, criterion,
+            model, optimizer, scheduler,
             train_data, val_data, wandb_run, phase_config,
             base_dir, start_step=start_step,
         )

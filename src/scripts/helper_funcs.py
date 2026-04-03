@@ -1,4 +1,6 @@
 import os
+import copy
+import threading
 import torch
 import wandb
 from pathlib import Path
@@ -136,7 +138,7 @@ def load_checkpoint(base_dir, model, optimizer=None, scheduler=None, device="cud
 def save_checkpoint(ckpt_dir, step, model_data, optimizer_data, scheduler_data, wandb_run, 
                     dataloader_state=None, meta_data=None, phase=1):
     """
-    Save model state dict with meta data
+    Save model state dict with meta data (synchronous).
     
     Args:
         ckpt_dir: Path to Checkpoint Directory
@@ -157,17 +159,6 @@ def save_checkpoint(ckpt_dir, step, model_data, optimizer_data, scheduler_data, 
     optimizer_path = os.path.join(ckpt_dir, f"optim_{step:05d}.pt")
     scheduler_path = os.path.join(ckpt_dir, f"scheduler_{step:05d}.pt")
     dataloader_path = os.path.join(ckpt_dir, f"dataloader_{step:05d}.pt")
-
-    # For now not tracked
-    checkpoint_data = {
-        "model": model_data,
-        "optimizer": optimizer_data,
-        "scheduler": scheduler_data,
-        "step": step,
-        "phase": phase,
-    }
-    if meta_data is not None:
-        checkpoint_data.update(meta_data)
 
     torch.save(model_data, model_path)
     torch.save(optimizer_data, optimizer_path)
@@ -191,6 +182,126 @@ def save_checkpoint(ckpt_dir, step, model_data, optimizer_data, scheduler_data, 
     if dataloader_state is not None and os.path.exists(dataloader_path):
         artifact.add_file(dataloader_path)
     wandb_run.log_artifact(artifact)
+
+
+# ── Async Checkpoint Saving ──────────────────────────────────────────────────
+
+def _deep_copy_to_cpu(state_dict):
+    """Recursively deep-copy a state dict, moving all tensors to CPU.
+    
+    This performs GPU → CPU transfer + clone in one pass so the GPU
+    tensors can be freed / overwritten immediately after this call returns.
+    """
+    if isinstance(state_dict, dict):
+        return {k: _deep_copy_to_cpu(v) for k, v in state_dict.items()}
+    elif isinstance(state_dict, list):
+        return [_deep_copy_to_cpu(v) for v in state_dict]
+    elif isinstance(state_dict, tuple):
+        return tuple(_deep_copy_to_cpu(v) for v in state_dict)
+    elif isinstance(state_dict, torch.Tensor):
+        return state_dict.detach().cpu().clone()
+    else:
+        return copy.deepcopy(state_dict)
+
+
+def _available_cpu_memory_gb():
+    """Best-effort check of available CPU RAM in GB.
+    
+    Returns None if detection fails (safe fallback: caller proceeds).
+    """
+    # Linux (H200 training environment)
+    try:
+        with open('/proc/meminfo') as f:
+            for line in f:
+                if line.startswith('MemAvailable:'):
+                    return int(line.split()[1]) / (1024 * 1024)  # kB → GB
+    except Exception:
+        pass
+    # psutil fallback (if installed)
+    try:
+        import psutil
+        return psutil.virtual_memory().available / (1024 ** 3)
+    except ImportError:
+        pass
+    return None  # unknown — caller should proceed optimistically
+
+
+# Minimum free CPU RAM (GB) required to start an async save.
+# The model + optimizer state copies need ~2.5 GB; we add headroom
+# for the prefetch thread, tokenizer, and OS.
+_MIN_ASYNC_SAVE_MEMORY_GB = 5.0
+
+
+def save_checkpoint_async(ckpt_dir, step, model_data, optimizer_data, scheduler_data,
+                          wandb_run, dataloader_state=None, meta_data=None, phase=1,
+                          prefetch_loader=None):
+    """Save checkpoint asynchronously in a background thread.
+    
+    1. Pauses the data-prefetch thread (if provided) to reduce CPU contention.
+    2. Checks available CPU memory — falls back to synchronous save if low.
+    3. Deep-copies all state dicts to CPU (fast, ~1-2s D2H transfer).
+    4. Resumes prefetch, then spawns a background thread for disk I/O + W&B upload.
+    5. Returns the thread handle so the caller can ``.join()`` before the
+       next save to prevent overlapping writes.
+    
+    Args:
+        Same as ``save_checkpoint``, plus:
+        prefetch_loader: Optional ``PrefetchedDataLoader`` — its prefetch
+            thread will be paused during the CPU snapshot to avoid memory
+            and CPU contention, then automatically resumed.
+    
+    Returns:
+        threading.Thread | None: The background save thread, or ``None``
+        if a synchronous fallback was used (nothing to join).
+    """
+    import time
+
+    # ── Safety: check available CPU memory ────────────────────────────────
+    avail_gb = _available_cpu_memory_gb()
+    if avail_gb is not None and avail_gb < _MIN_ASYNC_SAVE_MEMORY_GB:
+        print(f"[Checkpoint] WARNING: Low CPU memory ({avail_gb:.1f} GB available, "
+              f"{_MIN_ASYNC_SAVE_MEMORY_GB:.0f} GB required). "
+              f"Falling back to synchronous save at step {step}.")
+        save_checkpoint(
+            ckpt_dir, step, model_data, optimizer_data, scheduler_data,
+            wandb_run, dataloader_state, meta_data, phase,
+        )
+        return None  # no background thread
+
+    # ── Step 1: Pause prefetch to avoid CPU / memory contention ───────────
+    if prefetch_loader is not None:
+        prefetch_loader.pause_prefetch()
+
+    try:
+        t0 = time.perf_counter()
+
+        model_cpu = _deep_copy_to_cpu(model_data)
+        optim_cpu = _deep_copy_to_cpu(optimizer_data)
+        sched_cpu = _deep_copy_to_cpu(scheduler_data)
+        dl_cpu = copy.deepcopy(dataloader_state) if dataloader_state is not None else None
+
+        elapsed = time.perf_counter() - t0
+        print(f"[Checkpoint] CPU snapshot took {elapsed:.2f}s (step {step})")
+    finally:
+        # ── Always resume prefetch, even if the snapshot fails ────────────
+        if prefetch_loader is not None:
+            prefetch_loader.resume_prefetch()
+
+    # ── Step 2: Save in background thread (I/O-bound, low CPU contention) ─
+    def _save():
+        try:
+            save_checkpoint(
+                ckpt_dir, step, model_cpu, optim_cpu, sched_cpu,
+                wandb_run, dl_cpu, meta_data, phase,
+            )
+            print(f"[Checkpoint] Async save completed (step {step})")
+        except Exception as e:
+            print(f"[Checkpoint] ERROR in async save (step {step}): {e}")
+
+    thread = threading.Thread(target=_save, daemon=True)
+    thread.start()
+    return thread
+
 
 if __name__ == '__main__':
     get_base_dir("checkpoints")

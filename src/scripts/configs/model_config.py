@@ -48,6 +48,9 @@ class DatasetEntry:
     use_local_download: bool = False   # If True, .jsonl.zst shards are downloaded
                                        # to local cache before reading (legacy).
                                        # Default False: stream over HTTP with retry.
+    max_epochs: int = 1                # How many times to iterate through this dataset.
+                                       # 1 = single pass (default). Increase for smaller
+                                       # datasets that should be repeated in the mix.
 
 
 @dataclass
@@ -132,8 +135,8 @@ PHASE_1_CONFIG = PhaseConfig(
     micro_batch_size=36,
     grad_accum_steps=8,
     grad_clip=1.0,
-    val_interval=1500,
-    val_steps=3000,
+    val_interval=2500,
+    val_steps=500,
     datasets=[
         # ── Source Code (45%) — Top 10 Languages ────────────
         DatasetEntry(
@@ -253,6 +256,7 @@ PHASE_1_CONFIG = PhaseConfig(
             repo_id="ise-uiuc/Magicoder-OSS-Instruct-75K",
             weight=5,
             format_fn="magicoder",
+            max_epochs=3,
         ),
         # ── Instruction (5%) ────────────────────────────────
         DatasetEntry(
