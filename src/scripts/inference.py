@@ -335,7 +335,7 @@ if __name__ == '__main__':
         model = GPT_FLASH(config,device,inference=True)
     else:
         model = GPT(config,device)
-    model.load_state_dict(torch.load("./project-828/project_828/checkpoints/model_00000.pt",map_location="cpu"))
+    model.load_state_dict(torch.load("/Users/apple/Documents/project-828/project_828/checkpoints/model_34905.pt",map_location="cpu"))
     # Reset expert counts from training before inference
     for layer in model.layers:
         if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'reset_expert_counts'):
@@ -343,7 +343,7 @@ if __name__ == '__main__':
     
     print("  SINGLE SEQUENCE INFERENCE")
 
-    seed_txt = "Chapter 4: The Solar System.\n\nThe planet Mars has long fascinated astronomers. Unlike Earth, the atmosphere of Mars is primarily composed of"
+    seed_txt = "def sliding_window_average(values, window_size):\n    \"\"\"Compute moving averages for a list of numbers.\"\"\"\n    if window_size <= 0:\n        raise ValueError('window_size must be positive')\n    if len(values) < window_size:\n        return []\n    window_sum = sum(values[:window_size])\n    averages = [window_sum / window_size]\n    for i in range(window_size, len(values)):\n        window_sum += values[i] - values[i - window_size]\n        averages.append(window_sum / window_size)\n    return"
     generated_text = generate(model,seed_txt,device,max_tokens=250,temp=0.8,top_p=0.9,k=50)
     print(generated_text)
     
@@ -356,20 +356,29 @@ if __name__ == '__main__':
             layer.mlp.reset_expert_counts()
 
     test_prompts = [
-        # 1. Cosmopedia-v2 / FineWeb-edu (Synthetic textbook / General knowledge - 50% mix)
-        "Chapter 5: Introduction to Macroeconomics\n\nOne of the most important metrics used by economists to measure the overall health of an economy is the Gross Domestic Product (GDP). GDP is defined as",
-        
-        # 2. OpenMath-Instruct-2 (Math reasoning - 25% mix)
-        "Problem: If 3x - 7 = 20, what is the value of x^2?\n\nSolution: First, we need to solve for x. We add 7 to both sides of the equation to get",
-        
-        # 3. NuminaMath-QwQ-CoT-5M (Long-form reasoning - 9% mix)
-        "Problem: Find the derivative of f(x) = x^3 * sin(x) and evaluate it at x = pi.\n\nSolution: First, we use the product rule. The product rule states that (uv)' = u'v + uv'. Let u = x^3 and v = sin(x). Then",
-        
-        # 4. OpenHermes-2.5 (Instruction/chat data - 4% mix)
-        "User: Every day, a tree drops 7 leaves. How many leaves would it drop in a non-leap-year February?\nAssistant: February has 28 days in a non-leap year, so total leaves dropped = 7 x 28 = 196.",
-        
-        # 5. Proof-pile-algebraic-stack (Formal math proof / structure - 12% mix)
-        "Theorem: The sum of the first n positive integers is n(n+1)/2.\nProof: We proceed by mathematical induction. Base case: For n=1, the sum is 1, and the formula gives 1(2)/2 = 1. Inductive step: Assume the statement holds for k. Then the sum of the first k+1 integers is"
+        # 1. Source Code (45%): starcoderdata top-10 languages
+        "def is_valid_parentheses(s: str) -> bool:\n    stack = []\n    pairs = {')': '(', ']': '[', '}': '{'}\n    for ch in s:\n        if ch in '([{':\n            stack.append(ch)\n        elif ch in pairs:\n            if not stack or stack.pop() != pairs[ch]:\n                return False\n    return",
+
+        # 2. General Knowledge (19%): fineweb-edu + cosmopedia-v2
+        "Chapter 2: Plate Tectonics\n\nEarth's lithosphere is divided into tectonic plates that move slowly over the asthenosphere. At convergent boundaries, one plate may subduct beneath another, which often leads to",
+
+        # 3. Math Reasoning (10%): openmath-instruct-2
+        "Problem: Solve for x in the equation 2x^2 - 5x - 3 = 0.\n\nSolution: We can factor this quadratic as (2x + 1)(x - 3) = 0, so the roots are",
+
+        # 4. Long-form Math CoT (4%): numina-math-cot
+        "Problem: Evaluate the integral integral from 0 to 1 of (3x^2 + 2x) dx.\n\nReasoning: First, find an antiderivative. The antiderivative of 3x^2 is x^3, and the antiderivative of 2x is x^2. So F(x) = x^3 + x^2. Next, compute F(1) - F(0):",
+
+        # 5. Code-Adjacent Q&A (7%): stack-exchange-preferences
+        "Question: Why does this Python code raise 'dictionary changed size during iteration' when deleting keys in a loop?\n\nAnswer: This happens because the loop is iterating over a live view of the dictionary while mutating it. A safe pattern is to",
+
+        # 6. Formal Math Structure (5%): proof-pile-algebraic-stack
+        "Theorem: For all integers n >= 1, the sum 1 + 2 + ... + n equals n(n+1)/2.\nProof (induction): Base case n=1 is immediate. Assume true for n=k, i.e., 1 + ... + k = k(k+1)/2. Then for k+1 we have",
+
+        # 7. Code Instruction (5%): magicoder-oss-instruct
+        "Instruction: Write a Python function merge_intervals(intervals) that merges overlapping intervals and returns the merged list sorted by start time.\n\nResponse:\n```python",
+
+        # 8. Instruction/Chat (5%): openhermes-2.5
+        "User: I have 2 hours after work and want to start learning Go. Can you give me a practical 7-day beginner plan with one small coding task per day?\nAssistant:"
     ]
 
     print(f"Running batched inference on {len(test_prompts)} prompts...\n")

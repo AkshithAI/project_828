@@ -1,5 +1,7 @@
 import torch
 import math
+import threading
+import queue
 from datasets import load_dataset
 from huggingface_hub import list_repo_files, hf_hub_download
 from .tokenizer import tokenizer
@@ -158,6 +160,7 @@ class DatasetStreamState:
     documents_processed: int = 0      
     buffer_tokens: List[int] = field(default_factory=list)
     weight: int = 1
+    epochs_completed: int = 0          # How many full passes through this dataset
 
     data_files: List[str] = field(default_factory=list)       
     docs_per_shard: List[int] = field(default_factory=list)   
@@ -707,10 +710,7 @@ class ResumableDataset(IterableDataset):
         buffer = list(self.state.buffer_tokens) if self.state.buffer_tokens else []
         
         for doc in self.data:
-            tokens = tokenizer(
-                doc['text'],
-                return_attention_mask=False
-            )["input_ids"]
+            tokens = tokenizer.encode(doc['text'])
             
             buffer.extend(tokens)
             buffer.append(tokenizer.eos_token_id)
@@ -795,6 +795,112 @@ class ResumableDataLoader:
             yield batch
 
 
+class PrefetchedDataLoader:
+    """
+    Wraps a :class:`ResumableDataLoader` with background-thread prefetching.
+
+    While the GPU processes the current batch, a daemon thread loads the
+    next *num_prefetch* batches into a :class:`queue.Queue`.  Because
+    PyTorch releases the GIL during CUDA forward / backward passes, the
+    CPU-bound work — HTTP streaming, tokenization, buffer management —
+    can proceed concurrently in the background thread.
+
+    **State consistency:**
+    Threads share process memory, so the underlying dataset's ``.state``
+    object is always accessible.  On checkpoint the state may be at most
+    *num_prefetch* batches ahead of what the training loop has consumed;
+    on resume those few hundred documents are simply re-processed, which
+    is negligible at 60B-token scale.
+
+    **Robustness:**
+    - ``q.get(timeout=2.0)`` ensures ``KeyboardInterrupt`` is deliverable
+      on all platforms (a bare ``q.get()`` can block signal delivery in
+      CPython's C-level wait).
+    - A ``threading.Event`` stop flag lets the producer exit promptly
+      when the consumer breaks out of iteration early.
+    - Exceptions from the producer thread are captured and re-raised in
+      the main thread.
+
+    Args:
+        loader:        A ``ResumableDataLoader`` to wrap.
+        num_prefetch:  Number of batches to buffer ahead (default 3).
+    """
+
+    def __init__(self, loader: ResumableDataLoader, num_prefetch: int = 3):
+        self.loader = loader
+        self.num_prefetch = num_prefetch
+        self.dataset = loader.dataset          # expose for state access
+        # Pause/resume mechanism — allows checkpoint code to temporarily
+        # halt prefetching to avoid CPU/memory contention.
+        self.pause_event = threading.Event()
+        self.pause_event.set()  # starts unpaused
+
+    def pause_prefetch(self):
+        """Pause the background prefetch thread (idempotent)."""
+        self.pause_event.clear()
+
+    def resume_prefetch(self):
+        """Resume the background prefetch thread (idempotent)."""
+        self.pause_event.set()
+
+    def get_state(self) -> Dict[str, Any]:
+        """Delegate to the underlying ResumableDataLoader."""
+        return self.loader.get_state()
+
+    def __iter__(self):
+        q: queue.Queue = queue.Queue(maxsize=self.num_prefetch)
+        _sentinel = object()
+        _error: list = [None]
+        _stop = threading.Event()
+
+        def _producer():
+            try:
+                for batch in self.loader:
+                    if _stop.is_set():
+                        break
+                    # Wait if prefetching is paused (e.g. during checkpoint CPU snapshot)
+                    self.pause_event.wait()
+                    # Use timeout so producer doesn't hang forever
+                    # if consumer stops pulling from the queue
+                    while not _stop.is_set():
+                        try:
+                            q.put(batch, timeout=1.0)
+                            break
+                        except queue.Full:
+                            continue
+            except Exception as exc:
+                _error[0] = exc
+            finally:
+                # Always send sentinel so consumer never hangs
+                try:
+                    q.put(_sentinel, timeout=5.0)
+                except queue.Full:
+                    pass  # consumer already stopped
+
+        thread = threading.Thread(target=_producer, daemon=True)
+        thread.start()
+
+        try:
+            while True:
+                # Timeout-based get ensures KeyboardInterrupt is deliverable
+                try:
+                    item = q.get(timeout=2.0)
+                except queue.Empty:
+                    # Check if producer thread died without sending sentinel
+                    if not thread.is_alive() and q.empty():
+                        if _error[0] is not None:
+                            raise _error[0]
+                        break
+                    continue
+                if item is _sentinel:
+                    if _error[0] is not None:
+                        raise _error[0]
+                    break
+                yield item
+        finally:
+            _stop.set()  # signal producer to exit cleanly
+
+
 # ═══════════════════════════════════════════════════════════════
 #  Weighted multi-dataset mixer with exact resumption
 # ═══════════════════════════════════════════════════════════════
@@ -829,10 +935,18 @@ class WeightedMixerDataset(IterableDataset):
         dataset_entries: List[Tuple[str, Any, int, Callable]],
         context_length: int = 2048,
         state: Optional[MixerState] = None,
+        ds_configs: Optional[List] = None,
     ):
         super().__init__() 
         self.context_length = context_length 
         self.entries = dataset_entries          # [(name, stream, weight, fmt_fn), ...]
+
+        # Store dataset configs for stream recreation on epoch restart
+        self._ds_configs = ds_configs or [None] * len(dataset_entries)
+        self._max_epochs = [
+            (cfg.max_epochs if cfg is not None and hasattr(cfg, 'max_epochs') else 1)
+            for cfg in self._ds_configs
+        ]
 
         if state is not None:
             self.state = state
@@ -867,6 +981,51 @@ class WeightedMixerDataset(IterableDataset):
             chunks.append(torch.tensor(buf[:chunk_size], dtype=torch.long))
             buf = buf[chunk_size:]
         return chunks, buf
+
+    # ── stream recreation for epoch restart ───────────────────
+
+    def _create_fresh_stream(self, ds_idx: int):
+        """Recreate a dataset stream from scratch for a new epoch (no skip)."""
+        name = self.entries[ds_idx][0]
+        ds_state = self.state.dataset_states[name]
+        ds_config = self._ds_configs[ds_idx]
+
+        # ── Use stored data_files (fastest path) ──
+        data_files = ds_state.data_files
+        if data_files:
+            fmt = "parquet" if data_files[0].endswith(".parquet") else "json"
+            return ShardedStream(
+                data_files=data_files,
+                file_format=fmt,
+                ds_state=ds_state,
+                initial_skip=0,
+                shard_idx_offset=0,
+            )
+
+        # ── Re-resolve from DatasetEntry config ──
+        if ds_config is not None:
+            file_urls, file_fmt = resolve_dataset_files(ds_config)
+            if file_urls:
+                ds_state.data_files = file_urls
+                return ShardedStream(
+                    data_files=file_urls,
+                    file_format=file_fmt,
+                    ds_state=ds_state,
+                )
+            # Last resort: native HF streaming
+            kwargs = {}
+            if ds_config.data_dir is not None:
+                kwargs["data_dir"] = ds_config.data_dir
+            if ds_config.config_name is not None:
+                kwargs["name"] = ds_config.config_name
+            return load_dataset(
+                ds_config.repo_id,
+                split=ds_config.split,
+                streaming=True,
+                **kwargs,
+            )
+
+        return None
 
     # ── main iterator ────────────────────────────────────────
 
@@ -909,9 +1068,34 @@ class WeightedMixerDataset(IterableDataset):
             try:
                 row = next(it)
             except StopIteration:
-                exhausted[ds_idx] = True
-                print(f"[Mixer] Dataset '{name}' exhausted after "
-                      f"{self.state.dataset_states[name].documents_processed} documents.")
+                ds_state = self.state.dataset_states[name]
+                max_ep = self._max_epochs[ds_idx]
+
+                if ds_state.epochs_completed + 1 < max_ep:
+                    # ── Restart this dataset for another epoch ──
+                    ds_state.epochs_completed += 1
+                    ds_state.documents_processed = 0
+                    ds_state.docs_per_shard = []
+                    buffers[ds_idx] = []
+                    ds_state.buffer_tokens = []
+
+                    print(f"[Mixer] Dataset '{name}' completed epoch "
+                          f"{ds_state.epochs_completed}/{max_ep}. Restarting...")
+
+                    new_stream = self._create_fresh_stream(ds_idx)
+                    if new_stream is not None:
+                        self.entries[ds_idx] = (name, new_stream, self.entries[ds_idx][2], fmt_fn)
+                        iterators[ds_idx] = iter(new_stream)
+                    else:
+                        exhausted[ds_idx] = True
+                        print(f"[Mixer] Failed to restart '{name}'. Marking as exhausted.")
+                else:
+                    ds_state.epochs_completed += 1
+                    exhausted[ds_idx] = True
+                    print(f"[Mixer] Dataset '{name}' exhausted after "
+                          f"{ds_state.epochs_completed} epoch(s) "
+                          f"(max_epochs={max_ep}), "
+                          f"{ds_state.documents_processed} documents in final epoch.")
                 continue
 
             self.state.dataset_states[name].documents_processed += 1
@@ -920,10 +1104,7 @@ class WeightedMixerDataset(IterableDataset):
             if text is None:
                 continue
 
-            tokens = tokenizer( 
-                text,
-                return_attention_mask=False,
-            )["input_ids"]  
+            tokens = tokenizer.encode(text)  
             buffers[ds_idx].extend(tokens)
             buffers[ds_idx].append(tokenizer.eos_token_id)
 
@@ -1291,6 +1472,7 @@ def load_phase_datasets(
         dataset_entries=entries,
         context_length=context_length,
         state=restored_state,
+        ds_configs=list(phase_config.datasets),
     )
 
     if restored_state is None:
@@ -1332,12 +1514,13 @@ def create_phase_dataloaders(
         mixer_state=train_state,
         context_length=context_length,
     )
-    train_loader = ResumableDataLoader(
+    _raw_loader = ResumableDataLoader(
         mixer_dataset,
         batch_size=phase_config.micro_batch_size,
         pin_memory=True,
         num_workers=0,
-    )   
+    )
+    train_loader = PrefetchedDataLoader(_raw_loader, num_prefetch=3)
 
     # ── Validation ──
     val_stream = load_dataset(

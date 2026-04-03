@@ -534,15 +534,29 @@ class GPT_FLASH(nn.Module):
             for layer in self.layers:
                 layer.attention.reset_cache(batch_size)
 
+    def forward_with_hidden(self,
+                x : torch.Tensor,
+                start_pos : int = 0,
+                position_ids : torch.Tensor | None = None,
+                attn_mask : torch.Tensor | None = None,
+        ) -> torch.Tensor:
+        """Return final hidden states (after RMSNorm, before unembedding).
+        
+        Used during training with fused linear cross-entropy to avoid
+        materializing the full (batch, seq, vocab_size) logits tensor.
+        """
+        x = self.embeddings(x)
+        for layer in self.layers:
+            x = layer(x,start_pos,position_ids,attn_mask)
+        x = self.norm(x)
+        return x
+
     def forward(self,
                 x : torch.Tensor,
                 start_pos : int = 0,
                 position_ids : torch.Tensor | None = None,
                 attn_mask : torch.Tensor | None = None,
         ) -> torch.Tensor:
-        x = self.embeddings(x)
-        for layer in self.layers:
-            x = layer(x,start_pos,position_ids,attn_mask)
-        x = self.norm(x)
+        x = self.forward_with_hidden(x,start_pos,position_ids,attn_mask)
         x = self.unembedding(x)  
         return x
