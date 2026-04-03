@@ -179,18 +179,26 @@ def train_phase(
                     )
 
                     raw = _unwrap(model)
-                    # 1. Python Code (Source Code)
+                    # 1. Python — recursive algorithm (Source Code 45%)
                     print(generate(raw,
-                            "def binary_search(arr, target):\n    \"\"\"Find target in sorted array arr.\"\"\"\n    left, right =",
-                            config.device, max_tokens=80, temp=0.3))
-                    # 2. Math Reasoning
+                            "def merge_sort(arr):\n    if len(arr) <= 1:\n        return arr\n    mid = len(arr) // 2\n    left =",
+                            config.device, max_tokens=120, temp=0.3))
+                    # 2. JavaScript — async/await (Source Code 45%)
                     print(generate(raw,
-                            "Problem: Find the derivative of f(x) = x^2 * ln(x).\nSolution: By the product rule, we have f'(x) =",
+                            "async function fetchUserData(userId) {\n  try {\n    const response = await fetch(`/api/users/${userId}`);\n    if (!response.ok)",
+                            config.device, max_tokens=100, temp=0.3))
+                    # 3. Math — step-by-step reasoning (Math/Reasoning 14%)
+                    print(generate(raw,
+                            "Problem: Solve for x: 2x^2 - 5x - 3 = 0\nStep 1: We use the quadratic formula x = (-b ± √(b²-4ac)) / 2a where a=2, b=-5, c=-3.\nStep 2:",
                             config.device, max_tokens=120, temp=0.2))
-                    # 3. General Knowledge
+                    # 4. Technical Q&A (Code-Adjacent 17%)
                     print(generate(raw,
-                            "The process of photosynthesis in plants involves converting light energy into chemical energy. The overall equation is:",
-                            config.device, max_tokens=100, temp=0.4))
+                            "Question: What is the difference between a mutex and a semaphore in concurrent programming?\nAnswer: A mutex (mutual exclusion) is",
+                            config.device, max_tokens=120, temp=0.4))
+                    # 5. Instruction following (Instruction 5%)
+                    print(generate(raw,
+                            "Below is a list of three key differences between TCP and UDP protocols:\n1.",
+                            config.device, max_tokens=120, temp=0.4))
                     model.train()
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss

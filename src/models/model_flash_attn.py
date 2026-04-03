@@ -207,22 +207,54 @@ class MoE(nn.Module):
         self.expert_counts.zero_()
         self.total_tokens = 0
         
-    def forward(self,x : torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         inp_shape = x.shape
-        x = x.view(-1,self.dim) 
-        xprt_weights,xprt_idxs,counts = self.gate(x)
+        x = x.view(-1, self.dim)
+        xprt_weights, xprt_idxs, counts = self.gate(x)
 
         self.expert_counts += counts
-        self.total_tokens += x.shape[0] * self.n_routed_experts 
-        routed_xprt_out = torch.zeros_like(x)
+        self.total_tokens += x.shape[0] * self.n_routed_experts
 
-        for i,expert in enumerate(self.experts):
-            batch_idx,expert_idx = torch.where(xprt_idxs == i)
-            if batch_idx.numel() == 0:
+        # ── Batched expert dispatch: sort tokens by expert ID ──
+        # Flatten top-k indices: each token appears k times
+        flat_idx = xprt_idxs.view(-1)                                        # (N*k,)
+        flat_weights = xprt_weights.view(-1, 1)                              # (N*k, 1)
+        token_idx = torch.arange(x.shape[0], device=x.device)
+        token_idx = token_idx.unsqueeze(1).expand_as(xprt_idxs).reshape(-1)  # (N*k,)
+
+        # Sort by expert ID for contiguous memory access
+        sort_order = flat_idx.argsort(stable=True)
+        sorted_expert_ids = flat_idx[sort_order]
+        sorted_token_idx = token_idx[sort_order]
+        sorted_weights = flat_weights[sort_order]
+
+        # Gather tokens in expert-sorted order (single contiguous gather)
+        sorted_x = x[sorted_token_idx]                                       # (N*k, dim)
+
+        # Find boundaries between experts via searchsorted
+        expert_boundaries = torch.searchsorted(
+            sorted_expert_ids.contiguous(),
+            torch.arange(self.num_experts + 1, device=x.device),
+        )
+
+        # Run each expert on its contiguous slice
+        sorted_out = torch.empty_like(sorted_x)
+        for i, expert in enumerate(self.experts):
+            start, end = expert_boundaries[i].item(), expert_boundaries[i + 1].item()
+            if start == end:
                 continue
-            routed_xprt_out[batch_idx] += xprt_weights[batch_idx,expert_idx,None] * expert(x[batch_idx])
-        mlp_out = routed_xprt_out + self.shared_experts(x)
+            sorted_out[start:end] = expert(sorted_x[start:end])
 
+        # Weighted scatter-add back to original token positions
+        sorted_out = sorted_out * sorted_weights
+        routed_xprt_out = torch.zeros_like(x)
+        routed_xprt_out.scatter_add_(
+            0,
+            sorted_token_idx.unsqueeze(1).expand_as(sorted_out),
+            sorted_out,
+        )
+
+        mlp_out = routed_xprt_out + self.shared_experts(x)
         return mlp_out.reshape(inp_shape)
 
 
