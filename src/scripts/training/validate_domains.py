@@ -26,6 +26,7 @@ Usage in train.py:
 """
 
 import math
+import time
 import torch
 import torch.nn as nn
 from torch.amp import autocast
@@ -37,18 +38,17 @@ from ..tokenizer import tokenizer
 from ..configs.model_config import config
 
 
-# ═══════════════════════════════════════════════════════════════
-#  Domain definitions
-# ═══════════════════════════════════════════════════════════════
+
+#---- Domain definitions ----
 
 @dataclass
 class ValidationDomain:
     """Configuration for a single validation domain."""
-    name: str                   # Human-readable domain name
-    key: str                    # W&B metric key (lowercase, no spaces)
-    repo_id: str                # HuggingFace dataset repository
-    weight_pct: int             # Training weight percentage (for context)
-    format_fn: str              # Name of the format function to apply
+    name: str                   
+    key: str                    
+    repo_id: str                
+    weight_pct: int             
+    format_fn: str              
     config_name: Optional[str] = None
     data_dir: Optional[str] = None
     split: str = "train"
@@ -95,10 +95,6 @@ VALIDATION_DOMAINS: List[ValidationDomain] = [
     ),
 ]
 
-
-# ═══════════════════════════════════════════════════════════════
-#  Format functions (copied from dataloader.py to keep self-contained)
-# ═══════════════════════════════════════════════════════════════
 
 def _fmt_starcoder(row: Dict[str, Any]) -> Optional[str]:
     content = row.get("content", "")
@@ -155,27 +151,38 @@ FORMAT_FNS: Dict[str, Callable] = {
 }
 
 
-# ═══════════════════════════════════════════════════════════════
-#  Domain data streaming + tokenization
-# ═══════════════════════════════════════════════════════════════
+
+#----- Domain data streaming + tokenization -----
+
+
+# Maximum rows to scan from a streaming dataset before giving up.
+_MAX_ROWS_SCANNED = 500_000
+
+# Wall-clock timeout (seconds) for loading + iterating a single domain.
+_DOMAIN_TIMEOUT_SECONDS = 120
+
 
 def _stream_domain_batches(
     domain: ValidationDomain,
     batch_size: int = 16,
     context_length: int = 2048,
     max_batches: int = 100,
+    timeout_seconds: float = _DOMAIN_TIMEOUT_SECONDS,
 ):
     """
     Stream tokenized batches from a single validation domain.
 
     Yields tensors of shape (batch_size, context_length + 1) — same format
-    as the training dataloader.  Stops after ``max_batches`` complete batches.
+    as the training dataloader.  Stops after ``max_batches`` complete batches,
+    after scanning ``_MAX_ROWS_SCANNED`` rows, or after ``timeout_seconds``
+    of wall-clock time — whichever comes first.
 
     Args:
-        domain:         ValidationDomain config.
-        batch_size:     Samples per batch.
-        context_length: Token sequence length per sample.
-        max_batches:    Maximum number of batches to yield.
+        domain:          ValidationDomain config.
+        batch_size:      Samples per batch.
+        context_length:  Token sequence length per sample.
+        max_batches:     Maximum number of batches to yield.
+        timeout_seconds: Wall-clock timeout for the entire domain.
 
     Yields:
         torch.LongTensor of shape (batch_size, context_length + 1)
@@ -186,7 +193,6 @@ def _stream_domain_batches(
               f"for domain '{domain.name}'. Skipping.")
         return
 
-    # Load streaming dataset
     kwargs = {}
     if domain.data_dir is not None:
         kwargs["data_dir"] = domain.data_dir
@@ -209,8 +215,25 @@ def _stream_domain_batches(
     buffer = []
     batch = []
     batches_yielded = 0
+    rows_scanned = 0
+    deadline = time.monotonic() + timeout_seconds
 
     for row in stream:
+        # ── Safety: wall-clock timeout ──
+        if time.monotonic() > deadline:
+            print(f"  [DomainVal] TIMEOUT after {timeout_seconds:.0f}s on domain "
+                  f"'{domain.name}' ({batches_yielded} batches, {rows_scanned} rows scanned). "
+                  f"Returning partial results.")
+            return
+
+        # ── Safety: max rows scanned ──
+        rows_scanned += 1
+        if rows_scanned > _MAX_ROWS_SCANNED:
+            print(f"  [DomainVal] Scanned {_MAX_ROWS_SCANNED} rows on domain "
+                  f"'{domain.name}' but only yielded {batches_yielded}/{max_batches} batches. "
+                  f"Returning partial results.")
+            return
+
         text = fmt_fn(row)
         if text is None:
             continue
@@ -219,7 +242,6 @@ def _stream_domain_batches(
         buffer.extend(tokens)
         buffer.append(tokenizer.eos_token_id)
 
-        # Drain complete chunks from buffer
         while len(buffer) >= chunk_size:
             chunk = torch.tensor(buffer[:chunk_size], dtype=torch.long)
             buffer = buffer[chunk_size:]
@@ -233,9 +255,7 @@ def _stream_domain_batches(
                     return
 
 
-# ═══════════════════════════════════════════════════════════════
-#  Domain validation core
-# ═══════════════════════════════════════════════════════════════
+#---- Domain validation core ----
 
 @dataclass
 class DomainResult:
@@ -295,7 +315,7 @@ def validate_single_domain(
         return None
 
     avg_loss = total_loss / num_batches
-    ppl = math.exp(min(avg_loss, 20))  # cap to avoid overflow
+    ppl = math.exp(min(avg_loss, 20))  
 
     return DomainResult(
         name=domain.name,
@@ -351,15 +371,19 @@ def validate_domains(
 
     for domain in domains:
         print(f"\n  → Validating: {domain.name} ({domain.weight_pct}% of training mix)...")
-        result = validate_single_domain(
-            model=model,
-            criterion=criterion,
-            domain=domain,
-            device=device,
-            batch_size=batch_size,
-            context_length=context_length,
-            max_batches=max_batches_per_domain,
-        )
+        try:
+            result = validate_single_domain(
+                model=model,
+                criterion=criterion,
+                domain=domain,
+                device=device,
+                batch_size=batch_size,
+                context_length=context_length,
+                max_batches=max_batches_per_domain,
+            )
+        except Exception as e:
+            print(f"  [DomainVal] ERROR validating domain '{domain.name}': {e}. Skipping.")
+            result = None
 
         if result is not None:
             results.append(result)
@@ -372,14 +396,11 @@ def validate_domains(
 
     # ── Aggregate metrics ──
     if results:
-        # Weighted average loss (weighted by training mix proportions)
         total_weight = sum(r.weight_pct for r in results)
         weighted_loss = sum(r.avg_loss * r.weight_pct for r in results) / max(total_weight, 1)
         weighted_ppl = math.exp(min(weighted_loss, 20))
         metrics["val_domain/weighted_avg_loss"] = weighted_loss
         metrics["val_domain/weighted_avg_ppl"] = weighted_ppl
-
-        # Simple average (unweighted)
         simple_avg_loss = sum(r.avg_loss for r in results) / len(results)
         metrics["val_domain/simple_avg_loss"] = simple_avg_loss
 
@@ -406,7 +427,6 @@ def _print_summary_table(results: List[DomainResult]) -> None:
 
     print(f"  {'─'*68}")
 
-    # Weighted average
     total_weight = sum(r.weight_pct for r in results)
     if total_weight > 0:
         w_loss = sum(r.avg_loss * r.weight_pct for r in results) / total_weight

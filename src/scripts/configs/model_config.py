@@ -132,10 +132,10 @@ PHASE_1_CONFIG = PhaseConfig(
     total_steps=101_726,
     scheduler_type="wsd",
     wsd_stable_frac=0.895,
-    micro_batch_size=36,
+    micro_batch_size=37,
     grad_accum_steps=8,
     grad_clip=1.0,
-    val_interval=2500,
+    val_interval=2000,
     val_steps=500,
     datasets=[
         # ── Source Code (45%) — Top 10 Languages ────────────

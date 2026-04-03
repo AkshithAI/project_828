@@ -18,8 +18,6 @@ from ...models.weight_init import init_gpt_model, count_parameters
 from ..inference import generate
 from .validate_domains import validate_domains
 
-# ── Fused cross-entropy (liger-kernel) ──────────────────────────
-from liger_kernel.transformers import LigerFusedLinearCrossEntropyLoss
 
 @torch.inference_mode()
 def validation(model, criterion, val_data, train_step, wandb_run, phase_config):
@@ -74,21 +72,10 @@ def train_phase(
     tokens_per_step = micro_bs * seq_len * grad_accumulation_steps
     eos_id = tokenizer.eos_token_id
 
-    # ── Grab the unembedding weight for fused CE ──
-    raw_model = _unwrap(model)
-    unembed_weight = raw_model.unembedding.weight  # (vocab_size, hidden_dim)
-
-    # ── Fused criterion for training (liger-kernel) ──
-    fused_ce = LigerFusedLinearCrossEntropyLoss(
-        ignore_index=eos_id,
-        reduction="mean",
-    )
-
-    # ── Standard criterion for validation ──
     criterion = nn.CrossEntropyLoss(ignore_index=eos_id)
 
     # Estimate model FLOPs per forward pass 
-    n_params = sum(p.numel() for p in raw_model.parameters())
+    n_params = sum(p.numel() for p in _unwrap(model).parameters())
     flops_per_token = 6 * n_params  
     gpu_peak_flops = 989.4e12  # H200 bf16 peak FLOPS
 
@@ -108,19 +95,10 @@ def train_phase(
             inputs = batch[:, :-1].contiguous()
             targets = batch[:, 1:].contiguous()
             with autocast(device_type="cuda", dtype=torch.bfloat16):
-                # ── Fused Linear Cross-Entropy ──
-                # forward_with_hidden returns (batch, seq, hidden_dim)
-                # The fused kernel computes unembedding + CE in one pass,
-                # never materializing the (batch*seq, vocab) logits tensor.
-                hidden = model.forward_with_hidden(inputs)
-                hidden_flat = hidden.view(-1, hidden.shape[-1])   # (B*T, D)
-                targets_flat = targets.view(-1)                    # (B*T,)
-
-                # fused_ce.forward(weight, input, target, bias)
-                loss = fused_ce(
-                    unembed_weight,     # lin_weight: (vocab_size, hidden_dim)
-                    hidden_flat,        # _input:     (B*T, hidden_dim)
-                    targets_flat,       # target:     (B*T,)
+                logits = model(inputs)
+                loss = criterion(
+                    logits.view(-1, logits.shape[-1]),
+                    targets.view(-1),
                 )
 
             (loss / grad_accumulation_steps).backward()
@@ -332,7 +310,6 @@ if __name__ == '__main__':
                 "grad_accum": phase_config.grad_accum_steps,
             },
             "optimizations": {
-                "fused_cross_entropy": "liger-kernel",
                 "async_checkpointing": True,
                 "flash_attention": True,
             },
