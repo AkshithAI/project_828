@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import math
 from typing import Tuple
 from ..scripts.configs.model_config import ModelConfig
-from flash_attn import flash_attn_func
+#from flash_attn import flash_attn_func
 
 class RMS_Norm(nn.Module):
     def __init__(self,
@@ -102,30 +102,40 @@ class Expert(nn.Module):
 class Gate(nn.Module):
     def __init__(self,
                 config : ModelConfig,
-                device : torch.device|None = None
+                device : torch.device|None = None,
+                layer_idx : int = 0,
     ) -> None:
         """
             - Router/Gate module for Mixture of Experts.
             - Loss-Free Balancing, featured by an auxiliary-loss-free load balancing strategy
+            - Per-layer update scaling: deeper layers get more aggressive bias updates
+              (1.0× at layer 0, up to 1.5× at the deepest layer) to counteract
+              deep-layer expert polarization.
 
             Args:
                 config: ModelConfig object containing model hyperparameters
                 device: torch device to place the module on
+                layer_idx: index of this layer (0-indexed), used for per-layer scaling
         """
         super().__init__()
         self.dim = config.hidden_dim
         self.topk = config.num_experts_per_tok
         self.route_scale = config.route_scale
-        self.update_param = config.update_param
         self.num_experts = config.num_experts
         self.router = nn.Linear(config.hidden_dim, config.num_experts, bias = False, device = device, dtype = config.dtype)
         self.register_buffer("bias", torch.zeros(config.num_experts, dtype=torch.float32, device=device))
+
+        # Per-layer scaling: deeper layers get more aggressive bias correction
+        # Scale ranges from 1.0 (layer 0) to 1.5 (deepest layer)
+        num_layers = config.num_hidden_layers
+        layer_scale = 1.0 + 0.5 * (layer_idx / max(num_layers - 1, 1))
+        self.effective_update = config.update_param * layer_scale
 
     def update_bias(self, current_load: torch.Tensor) -> None:
         """Update bias in-place using Loss-Free Balancing rule."""
         load_float = current_load.float()
         e = torch.sign(load_float.mean() - load_float) 
-        self.bias.add_(self.update_param * e)
+        self.bias.add_(self.effective_update * e)
         self.bias.clamp_(-10.0, 10.0)
     
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -151,7 +161,8 @@ class Gate(nn.Module):
 class MoE(nn.Module):
     def __init__(self,
                  config : ModelConfig,
-                 device : torch.device|None = None
+                 device : torch.device|None = None,
+                 layer_idx : int = 0,
     ) -> None:
         """
             Mixture of Experts module with shared experts.
@@ -159,10 +170,11 @@ class MoE(nn.Module):
             Args:
                 config: ModelConfig object containing model hyperparameters
                 device: torch device to place the module on
+                layer_idx: index of this layer (0-indexed), passed to Gate for per-layer scaling
         """
         super().__init__()
         self.dim = config.hidden_dim
-        self.gate = Gate(config,device)
+        self.gate = Gate(config, device, layer_idx=layer_idx)
         self.n_routed_experts = config.num_experts_per_tok
         self.num_experts = config.num_experts
         self.experts = nn.ModuleList(
@@ -511,6 +523,7 @@ class TransformerDecoderBLK(nn.Module):
                 config : ModelConfig,
                 device : torch.device | None = None,
                 inference : bool = False,
+                layer_idx : int = 0,
     ) -> None:
         """
             Transformer Decoder Block with pre-normalization.
@@ -519,12 +532,13 @@ class TransformerDecoderBLK(nn.Module):
                 config: ModelConfig object containing model hyperparameters
                 device: torch device to place the module on
                 inference: whether to enable KV caching for inference
+                layer_idx: index of this layer (0-indexed), passed to MoE for per-layer scaling
         """
         super().__init__()
         self.norm1 = RMS_Norm(config.hidden_dim,device = device)
         self.norm2 = RMS_Norm(config.hidden_dim,device = device)
         self.attention = Attention(config,device,inference)
-        self.mlp = MoE(config,device)
+        self.mlp = MoE(config, device, layer_idx=layer_idx)
 
     def forward(self,x,start_pos : int = 0,position_ids = None,attn_mask = None): 
         x = x + self.attention(self.norm1(x),start_pos,position_ids,attn_mask)        
@@ -555,8 +569,8 @@ class GPT_FLASH(nn.Module):
                 dtype=config.dtype
         )
         self.layers = nn.ModuleList(
-            [TransformerDecoderBLK(config,device,inference)
-             for _ in range(config.num_hidden_layers)]
+            [TransformerDecoderBLK(config, device, inference, layer_idx=i)
+             for i in range(config.num_hidden_layers)]
         )
         self.unembedding = nn.Linear(config.hidden_dim,config.vocab_size,device = device, dtype=config.dtype)
 

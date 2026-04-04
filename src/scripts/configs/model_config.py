@@ -16,7 +16,7 @@ class ModelConfig:
         num_hidden_layers : int = 24 
         num_experts : int = 4
         num_experts_per_tok : int = 2 
-        update_param : float = 1e-3
+        update_param : float = 2e-3
         route_scale : float = 1.0
         base : int = 10000
         initial_context_len : int = 2048

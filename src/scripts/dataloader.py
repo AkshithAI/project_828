@@ -43,7 +43,6 @@ def _fmt_starcoder(row: Dict[str, Any]) -> Optional[str]:
     content = row.get("content", "")
     if not content:
         return None
-    # Skip trivial files (< 100 chars) and likely auto-generated files (> 100K chars)
     if len(content) < 100 or len(content) > 100_000:
         return None
     return content
@@ -65,7 +64,6 @@ def _fmt_numina(row: Dict[str, Any]) -> Optional[str]:
     if not problem and not solution:
         return None
     text = f"{problem}\n\n{solution}"
-    # Cap excessively verbose CoT — research shows shorter is better for small models
     if len(text) > 8000:
         return None
     return text
@@ -77,7 +75,6 @@ def _fmt_stackexchange(row: Dict[str, Any]) -> Optional[str]:
     chosen = row.get("chosen", "")
     if not question:
         return None
-    # Skip entries with very short or missing answers
     if not chosen or len(chosen) < 50:
         return None
     return f"{question}\n\n{chosen}"
@@ -1031,7 +1028,13 @@ class WeightedMixerDataset(IterableDataset):
 
     def __iter__(self):     
         iterators: List[Optional[Any]] = [iter(stream) for _, stream, _, _ in self.entries]
-        exhausted: List[bool] = [False] * len(self.entries)
+        exhausted: List[bool] = [
+            self.state.dataset_states[name].epochs_completed >= self._max_epochs[i]
+            for i, (name, _, _, _) in enumerate(self.entries)
+        ]
+        if any(exhausted):
+            already = [self.entries[i][0] for i, e in enumerate(exhausted) if e]
+            print(f"[Mixer] Already exhausted on resume: {already}")
 
         buffers: List[List[int]] = []
         for name, _, _, _ in self.entries:

@@ -21,7 +21,7 @@ A Mixture-of-Experts (MoE) transformer implementation featuring a custom GPT-sty
 
 - [Features](#features)
 - [Model Architecture](#model-architecture)
-- [Dataset](#dataset)
+- [Dataset & Data Mix](#dataset--data-mix)
 - [Data Curation](#data-curation)
 - [Quick Start](#quick-start)
   - [Prerequisites](#prerequisites)
@@ -45,15 +45,17 @@ A Mixture-of-Experts (MoE) transformer implementation featuring a custom GPT-sty
 ## Features
 
 - **Mixture of Experts (MoE)** - 4 routed experts + 1 shared expert with auxiliary-loss-free load balancing
-- **Grouped Query Attention (GQA)** - Efficient attention with 8 attention heads and 4 KV heads (2:1 ratio)
+- **Batched Sort-and-Slice Dispatch** - High-performance expert routing via argsort + searchsorted for contiguous memory access
+- **Grouped Query Attention (GQA)** - Efficient attention with 12 attention heads and 6 KV heads (2:1 ratio)
 - **Q/K Normalization** - RMSNorm applied to Query and Key projections for attention stability
 - **RoPE with YaRN Scaling** - Rotary Position Embeddings with NTK-aware interpolation for context extension
-- **SwiGLU Activation** - State-of-the-art gated activation function with clamping for numerical stability
+- **SwiGLU Activation** - Gated activation function with clamping (`limit=7.0`) for numerical stability
 - **DeepSpeed Integration** - ZeRO optimization stages 1-3 for distributed training
 - **Flash Attention 2 Support** - Optional 40% speedup with memory efficiency
 - **Mixed Precision Training** - BFloat16 for optimal performance
-- **Comprehensive Logging** - Weights & Biases integration with detailed metrics
-- **Robust Training Pipeline** - Structured codebase with checkpointing, validation, and recovery workflows
+- **Comprehensive Logging** - Weights & Biases integration with per-layer expert utilization and per-domain validation metrics
+- **Robust Training Pipeline** - Phase-aware training with async checkpointing, data prefetching, and recovery workflows
+- **Domain-Specific Validation** - Per-domain loss/perplexity tracking across 5 macro categories matching the training mix
 - **NeMo Curator Integration** - Robust data preprocessing pipeline with filtering, cleaning, and deduplication
 - **Best-Fit Bin Packing** - Segment-tree accelerated document packing with CLI, overflow splitting, and HF Hub upload
 
@@ -64,11 +66,36 @@ A Mixture-of-Experts (MoE) transformer implementation featuring a custom GPT-sty
 ### Overview
 
 - **Model Type**: GPT-style Decoder-only Transformer with Mixture of Experts
-- **Current Configuration**: Defined in `src/scripts/configs/model_config.py` (default pretraining setup)
-- **Target Configuration**: 800M parameters (production-ready)
-- **Context Length**: 2048 tokens (initial), 4096 tokens (max with YaRN scaling)
+- **Total Parameters**: ~398.7M (286M active per token)
+- **Context Length**: 2048 tokens (initial), extensible to 4096+ with YaRN scaling
 - **Vocabulary**: StarCoder2-15B tokenizer (~49K tokens)
 - **Precision**: BFloat16 mixed precision training
+
+---
+
+### Current Model Configuration
+
+```python
+# src/scripts/configs/model_config.py
+vocab_size: tokenizer.vocab_size    # ~49,152
+hidden_dim: 768
+intermediate_size: 760
+num_hidden_layers: 24
+num_attn_heads: 12
+num_key_value_heads: 6              # 2:1 GQA ratio
+head_dim: 64                        # hidden_dim / num_attn_heads
+num_experts: 4                      # Routed experts
+num_experts_per_tok: 2              # Active experts per token (top-k)
+update_param: 1e-3                  # Bias update rate for load balancing
+route_scale: 1.0                    # Expert routing scale
+base: 10000                         # RoPE base frequency
+initial_context_len: 2048
+max_context_len: 2048
+dtype: bfloat16                     # Mixed precision training
+ffn_dropout: 0.0
+```
+
+**Parameter breakdown**: Embedding 37.7M + Unembedding 37.8M + 24×(Attention 1.8M + MoE 11.7M) + Norm 768 = **398.7M total**, **~286M active per token** (2 of 4 routed experts + shared expert).
 
 ---
 
@@ -78,11 +105,11 @@ A Mixture-of-Experts (MoE) transformer implementation featuring a custom GPT-sty
 
 **1. Attention Mechanism**
 - **Type**: Grouped Query Attention (GQA) with RoPE
-- **Attention Heads**: 8 (configurable)
-- **KV Heads**: 4 (2:1 ratio for efficiency)
+- **Attention Heads**: 12
+- **KV Heads**: 6 (2:1 ratio for efficiency)
 - **Q/K Normalization**: RMSNorm applied to Query and Key projections before RoPE
 - **Position Encoding**: Rotary Position Embeddings (RoPE) with YaRN scaling
-- **Special Feature**: Attention sinks for improved long-context handling
+- **Special Feature**: Attention sinks (standard model) for improved long-context handling
 
 **2. Mixture of Experts (MoE)**
 - **Number of Experts**: 4 routed experts + 1 shared expert
@@ -94,85 +121,72 @@ A Mixture-of-Experts (MoE) transformer implementation featuring a custom GPT-sty
 - **SwiGLU Activation**: Includes clamping (`limit=7.0`) to prevent activation explosions
 - **Routing**: Sigmoid gating with Auxiliary-Loss-Free Load Balancing (no auxiliary loss required)
 - **Load Balancing**: Dynamic bias adjustment based on real-time token routing statistics
-- **Route Scale**: `route_scale: 1.0` for balanced expert utilization
+- **Dispatch**: Batched sort-and-slice — argsort by expert ID + searchsorted for contiguous slices
 
 **3. Feed-Forward Network**
-- **Hidden Dimension**: 1024 (test) / 1536+ (production)
-- **Intermediate Size**: 2730 (test) / 4096+ (production)
+- **Hidden Dimension**: 768
+- **Intermediate Size**: 760
 - **Activation**: SwiGLU (Swish-Gated Linear Unit) with clamping for numerical stability
-- **Dropout**: 0.0 (disabled for stability)
+- **Dropout**: 0.0
 
 **4. Normalization**
 - **Type**: RMSNorm (Root Mean Square Layer Normalization)
-- **Epsilon**: 1e-5
+- **Epsilon**: 1e-8 (flash model) / 1e-5 (standard model)
 - **Applied**: Pre-normalization (before attention and FFN)
 
 **5. Rotary Position Embeddings (RoPE)**
 - **Base Frequency**: `base: 10000`
 - **Scaling Method**: YaRN (Yet another RoPE extensioN method)
-- **Context Extension**: `initial_context_len: 2048`, `max_context_len: 4096`
-- **NTK Scaling Parameters**:
-  - `ntk_alpha: 1.0` - NTK-aware interpolation factor
-  - `ntk_beta: 32.0` - NTK scaling temperature
-  - `scaling_factor: 1.0` - Overall scaling multiplier
-- **Concentration Factor**: 1.0 (default YaRN parameter)
-- **Attention Sinks**: Enabled for improved long-context handling
-
-### Current Model Configuration (Default Values)
-
-```python
-# Current Configuration - src/scripts/configs/model_config.py
-vocab_size: tokenizer.vocab_size
-hidden_dim: 768
-intermediate_size: 760
-num_hidden_layers: 24
-num_attn_heads: 12
-num_key_value_heads: 6          # 2:1 GQA ratio
-head_dim: 64                    # hidden_dim / num_attn_heads
-num_experts: 4                  # Routed experts
-num_experts_per_tok: 2          # Active experts per token (top-k)
-update_param: 1e-3              # Bias update rate for load balancing
-route_scale: 1.0                # Expert routing scale
-base: 10000                     # RoPE base frequency
-initial_context_len: 2048
-max_context_len: 2048
-ntk_alpha: 1.0                  # NTK interpolation factor
-ntk_beta: 32.0                  # NTK scaling temperature
-scaling_factor: 1.0             # Overall scaling multiplier
-ffn_dropout: 0.0                # Dropout in expert FFN
-dtype: bfloat16                 # Mixed precision training
-```
+- **Context Extension**: `initial_context_len: 2048`, `max_context_len: 2048` (extensible to 4096+)
+- **NTK Scaling Parameters**: `ntk_alpha: 1.0`, `ntk_beta: 32.0`, `scaling_factor: 1.0`
 
 ---
 
-### Planned 800M Configuration
+## Dataset & Data Mix
 
-```python
-# Production Configuration (Recommended)
-hidden_dim: 1536
-intermediate_size: 4096
-num_hidden_layers: 24
-num_attn_heads: 24
-num_key_value_heads: 8          # 3:1 GQA ratio
-head_dim: 64
-num_experts: 8
-num_experts_per_tok: 2
-update_param: 1e-3              # Loss-free load balancing
-route_scale: 1.0
-initial_context_len: 2048
-max_context_len: 8192           # Extended context with YaRN
+### Phase 1 — Post-Growth (~60B tokens)
+
+The training uses 18 datasets in a weighted mix:
+
+| Dataset | Weight | Category |
+|:---|:---:|:---|
+| `starcoderdata-python` | 14 | Source Code |
+| `starcoderdata-javascript` | 6 | Source Code |
+| `starcoderdata-java` | 5 | Source Code |
+| `starcoderdata-typescript` | 4 | Source Code |
+| `starcoderdata-cpp` | 4 | Source Code |
+| `starcoderdata-c` | 3 | Source Code |
+| `starcoderdata-csharp` | 3 | Source Code |
+| `starcoderdata-go` | 3 | Source Code |
+| `starcoderdata-rust` | 2 | Source Code |
+| `starcoderdata-php` | 1 | Source Code |
+| `fineweb-edu` (score ≥ 3.5) | 12 | General Knowledge |
+| `cosmopedia-v2` | 7 | General Knowledge |
+| `openmath-instruct-2` | 10 | Math/Reasoning |
+| `numina-math-cot` (len ≤ 8000) | 4 | Math/Reasoning |
+| `stack-exchange-preferences` | 7 | Code-Adjacent |
+| `proof-pile-algebraic-stack` | 5 | Code-Adjacent |
+| `magicoder-oss-instruct` (3 epochs) | 5 | Code-Adjacent |
+| `openhermes-2.5` | 5 | Instruction |
+
+**Category breakdown**:
+```
+Source Code:         45%  (10 languages from starcoderdata)
+General Knowledge:   19%  (fineweb-edu + cosmopedia)
+Code-Adjacent:       17%  (stack-exchange + algebraic-stack + magicoder)
+Math/Reasoning:      14%  (openmath + numina)
+Instruction:          5%  (openhermes)
 ```
 
----
+### Phase 2 — Code/Instruction (~18B tokens)
 
-## Dataset
+Placeholder — datasets TBD after Phase 1 completes.
 
-- **Training**: FineWeb-Edu-100B (streaming) / AllenAI C4 (alternative)
-- **Validation**: Last 4 shards reserved for validation
-- **Tokenizer**: StarCoder2-15B tokenizer (~49K vocabulary)
-- **Data Format**: Parquet/JSON with text content
+### Tokenizer
+
+- **Source**: `bigcode/starcoder2-15b` (~49K vocabulary)
+- **Format**: Parquet/JSON with text content
 - **Preprocessing**: Document-level packing with EOS tokens, resumable dataloader with state checkpointing
-- **Note**: Language datasets (FineWeb-Edu, C4) provide more stable training compared to code-only datasets
 
 ---
 
@@ -200,24 +214,14 @@ python src/scripts/data/preprocess.py --custom --dedup
 python src/scripts/data/preprocess.py --data_tag wiki --download_dir ./data
 ```
 
-### Configuration
-
-Edit `src/scripts/data/preprocess.json` to enable/disable processing stages.
-
-**[Full Documentation →](src/scripts/data/README.md)**
-
 ### Document Packing
 
-The project includes a **best-fit bin packing** pipeline (`packing.py`) for packing variable-length tokenized documents into fixed-capacity bins. This maximises GPU utilisation during training by eliminating most padding waste.
+The project includes a **best-fit bin packing** pipeline (`packing.py`) for packing variable-length tokenized documents into fixed-capacity bins:
 
-**Key features:**
 - Numba-accelerated segment tree — $O(N \log L)$ packing for millions of documents
-- Overflow splitting — documents longer than `max_seq_len` are split at tokenization, then segments are packed independently
+- Overflow splitting — documents longer than `max_seq_len` are split at tokenization
 - Single `--max_seq_len` parameter ensures tokenization truncation and bin capacity always match
-- Carry-forward streaming upload prevents bins from being split at batch boundaries
-- Packing statistics logged after every run (utilisation %, bins, skipped docs)
-
-**Quick usage:**
+- Carry-forward streaming upload
 
 ```bash
 # End-to-end: tokenize → pack → upload
@@ -241,7 +245,7 @@ python -m project_828.src.scripts.data.packing upload --repo_id username/packed-
 ### Prerequisites
 
 - Python 3.8+
-- CUDA-capable GPU (tested on RTX 4090/5090)
+- CUDA-capable GPU (tested on RTX 4090/5090, H200)
 - 16GB+ GPU memory recommended
 - DeepSpeed (for multi-GPU training)
 
@@ -262,8 +266,6 @@ pip install flash-attn --no-build-isolation
 ### Training
 
 #### Single GPU Training (Recommended for Development)
-
-**Performance:** ~12 iterations/second on RTX 4090
 
 ```bash
 # Set your Weights & Biases credentials
@@ -301,79 +303,25 @@ deepspeed --num_gpus=2 src/scripts/training/distributed_training.py \
     --deepspeed \
     --deepspeed_config src/scripts/configs/ds-config.json \
     --batch_size 8
-
-# Or use the launch script
-bash launch_distributed.sh
 ```
 
-#### Configuration
+#### Phase 1 Hyperparameters
 
-Edit `src/scripts/configs/model_config.py` to modify model architecture:
-
-```python
-@dataclass
-class ModelConfig:
-    # Model architecture
-    hidden_dim: int = 1024
-    intermediate_size: int = 2730
-    num_hidden_layers: int = 4
-    num_attn_heads: int = 8
-    num_key_value_heads: int = 4
-    num_experts: int = 4
-    num_experts_per_tok: int = 2
-    update_param: float = 1e-3  # Load balancing bias update rate
-    route_scale: float = 1.0
-    
-    # Training
-    learning_rate: float = 3e-4
-    batch_size: int = 8
-```
-
-Edit `src/scripts/training/train.py` for single-GPU training hyperparameters:
-
-```python
-# Training settings
-grad_accumulation_step = 16      # Effective batch size = batch_size * grad_accum
-num_warmup_steps = 2000          # Linear warmup steps
-num_training_steps = 1000000     # Total training steps
-batch_size_train = 64            # Training batch size
-batch_size_val = 16              # Validation batch size
-patience = 8                     # Early stopping patience
-```
-
-Edit `src/scripts/configs/ds-config.json` for distributed training settings:
-
-```json
-{
-  "train_batch_size": 32,
-  "train_micro_batch_size_per_gpu": 8,
-  "gradient_accumulation_steps": 2,
-  "zero_optimization": {
-    "stage": 2
-  }
-}
-```
-
-### Training Hyperparameters
-
-**Recommended for ~45M model (1M steps):**
-- **Learning Rate**: 3e-4
-- **Warmup Steps**: 2,000 (single GPU) / 100 (distributed)
-- **Batch Size**: 64 sequences (training) / 16 sequences (validation)
-- **Gradient Accumulation**: 16 steps (single GPU) / 2 steps (distributed)
-- **Effective Batch Size**: 1024 sequences (~2M tokens)
-- **Optimizer**: AdamW (β1=0.9, β2=0.95, weight_decay=0.01, eps=1e-8)
-- **LR Schedule**: Cosine with warmup (0.5 cycles)
-- **Gradient Clipping**: 1.0
-- **Precision**: BFloat16 mixed precision
-- **Early Stopping**: Patience of 8 validation checks
-- **Validation Frequency**: Every 25,000 steps
-- **Checkpoint Frequency**: Best validation loss checkpoints saved
-
-**Expected Training Time:**
-- 45M model (single GPU): ~24-48 hours for 100K steps (RTX 5090)
-- 45M model (2 GPUs with good P2P): ~12-24 hours for 100K steps
-- 800M model: ~7-14 days for 500K steps (8x A100 with NVLink)
+| Param | Value |
+|:---|:---|
+| Optimizer | AdamW (β₁=0.9, β₂=0.95, weight_decay=0.1, ε=1e-8) |
+| Peak LR | 3e-4 |
+| Min LR | 3e-5 |
+| Scheduler | WSD (Warmup → Stable → Cosine Decay) |
+| WSD stable fraction | 0.895 |
+| Warmup steps | 500 |
+| Total steps | 101,726 |
+| Micro batch size | 37 |
+| Grad accumulation | 8 steps |
+| Effective batch | 296 sequences (~606K tokens/step) |
+| Gradient clipping | 1.0 |
+| Precision | BF16 autocast |
+| Validation interval | every 2,000 steps |
 
 ## Project Structure
 
@@ -387,25 +335,27 @@ project_828/
 │   └── scripts/
 │       ├── tokenizer.py            # StarCoder2 tokenizer setup
 │       ├── dataloader.py           # Resumable data loading with state checkpointing
-│       ├── dist_dataloader.py      # Distributed data loading
-│       ├── helper_funcs.py         # Utility functions (checkpointing, paths)
+│       ├── dist_dataloader.py      # Legacy distributed data loading
+│       ├── helper_funcs.py         # Utility functions (sync + async checkpointing, paths)
 │       ├── inference.py            # Inference with KV cache + expert stats
 │       ├── configs/
-│       │   ├── model_config.py     # Model and phase configuration
+│       │   ├── model_config.py     # Model, Phase, and Dataset configuration
 │       │   └── ds-config.json      # DeepSpeed configuration
 │       ├── training/
 │       │   ├── train.py            # Single GPU phase-based training loop
-│       │   ├── distributed_training.py
-│       │   └── schedulers.py
+│       │   ├── distributed_training.py  # DeepSpeed multi-GPU training
+│       │   ├── schedulers.py       # WSD + Cosine LR schedulers
+│       │   └── validate_domains.py # Per-domain validation suite
 │       └── data/
-│           ├── packing.py          # Best-fit bin packing pipeline (tokenize/pack/upload)
+│           ├── packing.py          # Best-fit bin packing pipeline
 │           ├── preprocess.py       # NeMo Curator data preprocessing
 │           ├── preprocess.json     # Preprocessing configuration
 │           └── README.md           # Data curation & packing documentation
+├── tests/
+│   ├── eval_model_30b.py           # 30B-token checkpoint evaluation suite
+│   ├── eval_results_30b.json       # Evaluation results
+│   └── test_moe_batched_dispatch.py # MoE dispatch correctness tests
 ├── checkpoints/
-├── check_flash_attn_requirements.py
-├── init.sh
-├── launch_distributed.sh
 ├── requirements.txt
 └── README.md
 ```
@@ -414,15 +364,10 @@ project_828/
 
 ### Flash Attention Support
 
-The model supports Flash Attention 2 for faster training:
-
 ```python
-# In train.py or distributed_training.py
+# In train.py
 use_flash_attn = True  # Set to True to enable
-if use_flash_attn:
-    model = GPT_FLASH(config, "cuda")
-else:
-    model = GPT(config, "cuda")
+model = GPT_FLASH(config, "cuda") if use_flash_attn else GPT(config, "cuda")
 ```
 
 ### Key-Value (KV) Cache for Inference
@@ -477,206 +422,71 @@ for _ in range(max_new_tokens):
 
 ### Auxiliary-Loss-Free Load Balancing for MoE
 
-The Mixture of Experts module implements **Loss-Free Load Balancing** based on the DeepSeek-V3 paper ([arXiv:2408.15664](https://arxiv.org/abs/2408.15664)). This approach eliminates the need for auxiliary load balancing losses while achieving near-perfect expert utilization.
+Based on the [DeepSeek-V3 paper](https://arxiv.org/abs/2408.15664):
 
-**The Problem with Traditional MoE:**
-Standard MoE routers often suffer from **expert collapsing** — a phenomenon where a few experts receive most tokens while others are underutilized. Traditional solutions add an auxiliary loss term to encourage balanced routing, but this introduces additional hyperparameters and can conflict with the primary training objective.
+1. **Sigmoid gating**: `scores = sigmoid(Linear(x))` — not softmax
+2. **Decoupled selection vs. weighting**: Biased scores select experts, original scores weight them
+3. **Dynamic bias**: `bias += update_param * sign(mean_load - current_load)`, clamped to [-10, 10]
+4. **No auxiliary loss**: No interference with the primary training objective
 
-**How Loss-Free Balancing Works:**
+### Batched Expert Dispatch
 
-The router uses a learnable bias term that dynamically adjusts expert selection probabilities based on real-time load statistics:
+High-performance sort-and-slice dispatch replaces sequential expert loop:
 
 ```python
-# Gate/Router Implementation
-class Gate(nn.Module):
-    def __init__(self, config):
-        self.router = nn.Linear(hidden_dim, num_experts, bias=False)
-        self.register_buffer("bias", torch.zeros(num_experts))  # Adaptive bias
-        self.update_param = 1e-3  # Bias update rate
-    
-    def forward(self, x):
-        # 1. Compute sigmoid gating scores
-        scores = torch.sigmoid(self.router(x))
-        
-        # 2. Add bias for expert selection (bias detached from gradients)
-        biased_scores = scores + self.bias.detach()
-        
-        # 3. Select top-k experts based on biased scores
-        indices = torch.topk(biased_scores, k=2, dim=-1)[1]
-        
-        # 4. Use ORIGINAL scores (not biased) for weighting
-        weights = scores.gather(1, indices)
-        
-        # 5. Update bias based on current load imbalance
-        current_load = torch.bincount(indices.flatten(), minlength=num_experts)
-        average_load = current_load.sum() / num_experts
-        error = average_load - current_load
-        self.bias += self.update_param * error  # Increase bias for underused experts
-        
-        return weights, indices
+# Sort tokens by expert ID for contiguous memory access
+sort_order = flat_idx.argsort(stable=True)
+# Find expert boundaries via searchsorted
+expert_boundaries = torch.searchsorted(sorted_expert_ids, arange(num_experts + 1))
+# Each expert processes its contiguous slice
+for i, expert in enumerate(self.experts):
+    start, end = expert_boundaries[i], expert_boundaries[i + 1]
+    sorted_out[start:end] = expert(sorted_x[start:end])
+# Weighted scatter-add back to original positions
+routed_output.scatter_add_(0, sorted_token_idx.expand_as(sorted_out), sorted_out)
 ```
 
-**Key Design Principles:**
+### Async Checkpointing
 
-1. **Decoupled Selection vs. Weighting**:
-   - Expert **selection** uses biased scores: `scores + bias`
-   - Expert **weighting** uses original scores: `scores`
-   - This allows the bias to influence routing without affecting gradient flow through the router
+Avoids blocking training during checkpoint saves:
 
-2. **Dynamic Bias Adjustment**:
-   - After each forward pass, compute the load imbalance: `error = avg_load - current_load`
-   - Underutilized experts get a positive bias boost → more likely to be selected
-   - Overutilized experts get a negative bias penalty → less likely to be selected
-   - Update rate `update_param = 1e-3` provides stable, gradual adjustment
+1. Pauses data prefetch thread (reduces CPU contention)
+2. Snapshots state dicts to CPU (fast D2H transfer, ~1-2s)
+3. Resumes prefetch immediately
+4. Background thread handles disk I/O + W&B artifact upload
+5. Falls back to synchronous save when CPU memory < 5GB
 
-3. **No Auxiliary Loss Required**:
-   - The bias mechanism operates entirely at inference time
-   - No additional loss terms to balance or hyperparameters to tune
-   - Training objective remains purely focused on language modeling
+### Domain-Specific Validation
 
-**Why Sigmoid Gating?**
+Per-domain loss/perplexity evaluation across 5 macro categories:
 
-Unlike softmax-based routing which produces competitive probabilities (experts compete for activation), sigmoid gating:
-- Allows multiple experts to have high scores simultaneously
-- Scores represent absolute "relevance" rather than relative probability
-- Works naturally with the bias-based selection mechanism
-- Saturated sigmoid scores (approaching 0 or 1) don't harm load balancing since the bias term compensates
-
-**Implementation Details:**
 ```python
-# In ModelConfig (configs/model_config.py)
-num_experts: int = 4              # Total routed experts
-num_experts_per_tok: int = 2      # Active experts per token (top-k)
-update_param: float = 1e-3        # Bias update rate
-route_scale: float = 1.0          # Weight scaling factor
+from .validate_domains import validate_domains
+domain_results = validate_domains(model, wandb_run, optim_step, phase_config)
 ```
 
-**Results:**
-- Achieves near-perfect load balancing: ~25% utilization per expert (for 4 experts)
-- No expert collapsing observed
-- Training remains stable without auxiliary loss interference
-- Bias values converge to stable offsets that maintain balance
-
-**Note**: The bias term is registered as a buffer (not a parameter) and updated via direct addition during training. It is saved with the model checkpoint and used during inference to maintain consistent routing behavior.
+Tracks relative model performance across Source Code, General Knowledge, Math/Reasoning, Code-Adjacent, and Instruction domains.
 
 ### DeepSpeed ZeRO Optimization
 
-**ZeRO Stage 1:** Optimizer state partitioning
-- Moderate memory savings
-- May cause OOM on 24GB GPUs
-
-**ZeRO Stage 2:** Optimizer + Gradient partitioning (Recommended)
-- Good balance of memory and speed
-- Works well with NODE topology (though slow)
-
-**ZeRO Stage 3:** Optimizer + Gradient + Parameter partitioning
-- Maximum memory savings
-- Slower but enables larger models
-
-Configure in `ds-config.json`:
-```json
-{
-  "zero_optimization": {
-    "stage": 2,
-    "contiguous_gradients": true,
-    "overlap_comm": false,
-    "reduce_bucket_size": 50000000,
-    "allgather_bucket_size": 50000000
-  }
-}
-```
+**ZeRO Stage 3** (recommended): Optimizer + Gradient + Parameter partitioning with CPU offloading. Configure in `ds-config.json`.
 
 ### Checkpoint Management
 
-Checkpoints are automatically saved on best validation loss with early stopping:
+Files per step: `model_{step:05d}.pt`, `optim_{step:05d}.pt`, `scheduler_{step:05d}.pt`, `dataloader_{step:05d}.pt`
 
-**Single GPU:**
-```python
-# Checkpoints include:
-# - Model weights (model_{step:05d}.pt)
-# - Optimizer state (optim_{step:05d}.pt)
-# - Scheduler state (scheduler_{step:05d}.pt)
-# - Dataloader state (dataloader_{step:05d}.pt)
-# - Training metadata (step, loss, etc.)
+Dataloader checkpoints include full mixer state: per-dataset document counts, token buffers, shard positions, and draw cycle position for exact resumption.
 
-# Automatic loading on resume:
-start_step, dataloader_state = load_checkpoint(
-    base_dir, model, optimizer, scheduler, device=config.device
-)
-```
-
-**DeepSpeed (Distributed):**
-```bash
-# Saves to checkpoint directory with DeepSpeed format
-# Includes ZeRO optimizer states partitioned across GPUs
-# Use model_engine.load_checkpoint() to resume
-```
-
-### Weights & Biases Logging
-
-The training script automatically logs to W&B:
-- Training loss and perplexity
-- Validation loss
-- Learning rate schedule
-- Gradient norms (single GPU only)
-- Expert utilization per layer (MoE metrics)
-- GPU memory usage
-- Tokens per second
-- Model configuration
-
-## Known Issues & Solutions
-
-### Training Instability
-- **Fixed**: Loss logging bug (incorrect gradient accumulation scaling)
-- **Fixed**: Data pipeline context length mismatch
-- **Fixed**: Dtype mismatch in attention output
-
-### Memory Issues
-- Use ZeRO Stage 2 or 3 for distributed training
-- Reduce batch size if OOM (`train_micro_batch_size_per_gpu: 4`)
-- Enable Flash Attention for 40% memory reduction
-- Increase gradient accumulation to maintain effective batch size
-
-### Distributed Training Issues
-
-**1. NCCL Timeout Errors**
-```
-[Rank 0] Watchdog caught collective operation timeout
-```
-
-**Solution:** Poor GPU P2P topology (NODE/SYS). Options:
-- **Best:** Use single GPU training (12 iter/sec vs 0.01 iter/sec!)
-- Increase timeout: `export NCCL_TIMEOUT=3600`
-- Reduce bucket sizes in `ds-config.json`
-
-**2. Multi-GPU Slower Than Single GPU**
-
-**Cause:** NODE or SYS topology forces all gradient syncs through CPU
-
-**Solution:**
-- Check topology: `nvidia-smi topo -m`
-- If NODE/SYS: **Use single GPU** (much faster!)
-- If on cloud: Look for instances with NVLink/PIX topology
-
-**3. NCCL P2P Disabled Warning**
-```
-NCCL INFO P2P is disabled between connected GPUs
-```
-
-**Expected with NODE topology.** Configure NCCL:
-```bash
-export NCCL_SOCKET_IFNAME=eth0
-export NCCL_IB_DISABLE=1
-export NCCL_P2P_LEVEL=SYS
-```
+---
 
 ## Performance Benchmarks
 
 ### Single GPU Performance
 | GPU | Speed | Memory | Recommendation |
 |-----|-------|--------|----------------|
-| RTX 4090 | 12 iter/sec | ~12GB | Recommended for development |
-| RTX 5090 | 14 iter/sec | ~11GB | Recommended |
+| RTX 4090 | ~12 iter/sec | ~12GB | Recommended for development |
+| RTX 5090 | ~14 iter/sec | ~11GB | Recommended |
+| H200 | ~110K tokens/sec | — | Primary training GPU |
 
 ### Multi-GPU Performance
 | Configuration | Topology | Speed | Recommendation |
@@ -691,24 +501,24 @@ export NCCL_P2P_LEVEL=SYS
 
 ### Key Metrics to Watch
 
-1. **Training Loss**: Should decrease smoothly from ~10 to ~4 (60M) or ~3 (800M)
+1. **Training Loss**: Should decrease smoothly
 2. **Validation Loss**: Should track training loss closely
 3. **Gradient Norm**: Should stay below 5.0 (clipped at 1.0)
-4. **Learning Rate**: Should follow cosine schedule
-5. **Iterations/sec**: ~12 on single RTX 4090
+4. **Learning Rate**: Should follow WSD schedule
+5. **Per-Domain Validation**: Check relative domain losses for data mix balance
+6. **Expert Utilization**: Near 25% per expert (for 4 experts)
 
 ### Red Flags
-- Loss becomes NaN -> reduce learning rate
-- Loss increases for >5K steps -> check data pipeline
-- Grad norm consistently >10 -> gradient explosion, reduce learning rate
-- Val loss >> train loss -> possible overfitting, add regularization
-- Multi-GPU < 1 iter/sec -> likely topology bottleneck, use single GPU
+- Loss becomes NaN → reduce learning rate
+- Loss increases for >5K steps → check data pipeline
+- Grad norm consistently >10 → gradient explosion, reduce learning rate
+- Val loss >> train loss → possible overfitting, add regularization
+- Expert utilization <10% for any expert → check update_param setting
+- Multi-GPU < 1 iter/sec → likely topology bottleneck, use single GPU
 
 ---
 
 ## Training Experiments & Results
-
-This section documents the training journey, including critical bugs discovered, fixes applied, and lessons learned from five major training runs.
 
 ### Training Runs Summary
 
@@ -718,7 +528,7 @@ This section documents the training journey, including critical bugs discovered,
 | **Run 2** | 110,000 | Code | Gradient norm explosion | Peak ~25 | Very noisy |
 | **Run 3** | 50,000 | Language | None (all fixes applied) | Peak ~6 | Stable |
 | **Run 4** | 50,000 | Language | Expert collapsing in MoE | Peak ~7 | Stable + balanced |
-| **Run 5** | Ongoing | FineWeb-Edu | SwiGLU activation overflow | - | Stable (with clamping) |
+| **Run 5** | Ongoing | Multi-dataset | SwiGLU activation overflow | - | Stable (with clamping) |
 
 ### Detailed Experiment Analysis
 
@@ -744,7 +554,6 @@ This section documents the training journey, including critical bugs discovered,
 **Screenshot**: Training metrics showing unstable loss patterns
 
 ![Run 1 - 240k Steps Metrics](assets/screenshots/Screenshot%202025-12-11%20at%208.13.10%E2%80%AFPM.png)
-
 
 ---
 
@@ -777,10 +586,9 @@ This section documents the training journey, including critical bugs discovered,
 
 ![Run 2 - 110k Steps Metrics](assets/screenshots/Screenshot%202025-12-11%20at%208.13.31%E2%80%AFPM.png)
 
-
 ---
 
-#### Run 3: 50k Steps - Stable Training Achieved 
+#### Run 3: 50k Steps - Stable Training Achieved
 
 **Configuration**: Latest run (ongoing/best results)
 
@@ -809,10 +617,9 @@ This section documents the training journey, including critical bugs discovered,
 
 ![Run 3 - 50k Steps Metrics](assets/screenshots/Screenshot%202025-12-13%20at%2012.33.28%E2%80%AFPM.png)
 
-
 ---
 
-#### Run 4: 50k Steps - MoE Load Balancing & Attention Stability 
+#### Run 4: 50k Steps - MoE Load Balancing & Attention Stability
 
 **Configuration**: denim-dew-45
 
@@ -848,11 +655,9 @@ This section documents the training journey, including critical bugs discovered,
 
 ![Run 4 - 50k Steps Metrics](assets/screenshots/Screenshot%202026-01-14%20at%205.55.34%E2%80%AFPM.png)
 
-**Training Logs**: Detailed load balancing and sigmoid gating logs are available in your W&B runs and local training outputs.
-
 ---
 
-#### Run 5: Ongoing - SwiGLU Stability & Resumable Training
+#### Run 5: SwiGLU Stability & Resumable Training
 
 **Configuration**: 828_testing_5090
 
@@ -884,45 +689,32 @@ def swiglu(x, alpha: float = 1.702, limit: float = 7.0):
 
 ### Lessons Learned
 
-#### 1. **Positional Encoding Must Match Tensor Operations**
-- **Critical**: RoPE positional encoding calculations must match the exact tensor shapes used in attention mechanisms
-- **Bug Pattern**: Calculating positions for `(B*S, ...)` but applying to `(B, S, ...)` causes severe position misalignment
-- **Prevention**: Always verify tensor shapes at each transformation step in attention layers
+1. **RoPE shape must match attention**: Positional encoding dimensions must align with attention tensor reshape operations
+2. **Code datasets cause gradient instability**: Start with language dataset, then fine-tune on code
+3. **SwiGLU needs clamping**: `limit=7.0` prevents activation explosions in long training runs
+4. **Loss-Free Balancing works**: Sigmoid gating + adaptive bias achieves near-perfect expert utilization without auxiliary losses
+5. **Resumable data loading is critical**: Saves exact data position + token buffers across 18 datasets
+6. **Async checkpointing prevents training stalls**: D2H snapshot + background I/O avoids blocking the training loop
 
-#### 2. **Code Datasets Can Cause Gradient Instability**
-- **Discovery**: Code datasets (with their unique structure, syntax patterns, and long-range dependencies) can cause significant gradient instability
-- **Solution**: Start with language dataset pretraining for stable foundation, then fine-tune on code
-- **Evidence**: Gradient norm reduced from 25+ (code) to ~6 (language) - 4x improvement
+---
 
-#### 3. **Gradient Norm Monitoring is Crucial**
-- **Importance**: Gradient norm is an early indicator of training problems
-- **Thresholds**: 
-  - Healthy: < 5.0
-  - Warning: 5-10
-  - Critical: > 10 (indicates instability)
-- **Action**: If gradient norms consistently exceed 10, investigate dataset, learning rate, or architecture issues
+## Known Issues & Solutions
 
-#### 4. **Dataset Choice Matters More Than Expected**
-- **Impact**: Dataset characteristics can fundamentally affect training stability
-- **Recommendation**: Use language datasets for initial training to establish stable gradients, then adapt to specialized domains
-- **Benefit**: More predictable training dynamics, faster debugging, better convergence
+### Training Instability
+- **Fixed**: Loss logging bug (incorrect gradient accumulation scaling)
+- **Fixed**: Data pipeline context length mismatch
+- **Fixed**: Dtype mismatch in attention output
 
-#### 5. **Iterative Debugging is Essential**
-- **Process**: Each training run revealed specific issues that informed the next run
-- **Timeline**: 240k steps (bug discovery) → 110k steps (partial fix) → 50k steps (full stability)
-- **Value**: Early experimentation with shorter runs helps identify and fix issues before expensive long runs
+### Memory Issues
+- Use ZeRO Stage 2 or 3 for distributed training
+- Reduce batch size if OOM
+- Enable Flash Attention for 40% memory reduction
 
-#### 6. **SwiGLU Activations Need Clamping for Long Training**
-- **Discovery**: During extended training runs, SwiGLU activations can grow unbounded, causing NaN losses
-- **Solution**: Apply clamping (`limit=7.0`) to both the gating and linear branches before the activation
-- **Implementation**: `x.clamp(min=-limit, max=limit)` preserves gradients while preventing overflow
-- **Benefit**: Enables stable training for 1M+ steps without numerical issues
+### Distributed Training Issues
 
-#### 7. **Resumable Data Loading is Critical for Long Runs**
-- **Problem**: Losing training progress due to interruptions (OOM, hardware failures, etc.)
-- **Solution**: Implement `DataLoaderState` class that tracks documents processed and buffer state
-- **Features**: Saves samples_yielded, documents_processed, and leftover tokens in buffer
-- **Benefit**: Can resume from exact data position, no wasted compute on re-processing
+**NCCL Timeout Errors**: Poor GPU P2P topology (NODE/SYS). Use single GPU training instead.
+
+**Multi-GPU Slower Than Single GPU**: Check topology with `nvidia-smi topo -m`. If NODE/SYS, use single GPU.
 
 ---
 
@@ -930,15 +722,15 @@ def swiglu(x, alpha: float = 1.702, limit: float = 7.0):
 
 ### Standard Attention (`model.py`)
 - Traditional scaled dot-product attention
-- Lower memory but slower
-- Better for debugging
-- Used in `train.py` and `distributed_training.py`
+- GQA + Attention Sinks
+- Used for debugging
 
 ### Flash Attention (`model_flash_attn.py`)
-- Flash Attention 2 implementation
-- 40% faster training
-- 50% memory reduction
-- Requires `flash-attn` package
+- Flash Attention 2 implementation (primary)
+- Q/K Normalization
+- KV Cache for inference
+- Batched expert dispatch
+- Used in `train.py` and production
 
 ## Hardware Requirements
 
@@ -947,8 +739,8 @@ def swiglu(x, alpha: float = 1.702, limit: float = 7.0):
 - 32GB RAM
 - 100GB storage
 
-### Recommended (Multi-GPU)
-- 2-4x RTX 4090/5090 with **PIX or NVLink** topology
+### Recommended (Training at Scale)
+- 1x H200 (primary training GPU)
 - 64GB+ RAM
 - 500GB NVMe SSD
 
@@ -966,33 +758,18 @@ def swiglu(x, alpha: float = 1.702, limit: float = 7.0):
    ```bash
    nvidia-smi topo -m
    ```
-  - PIX/PXB/NVLink -> suitable for multi-GPU training
-  - NODE/SYS -> use single GPU instead
+  - PIX/PXB/NVLink → suitable for multi-GPU training
+  - NODE/SYS → use single GPU instead
 
 2. **Test single GPU first:**
    ```bash
-  python -m src.scripts.training.train
+   python -m src.scripts.training.train
    ```
-   Should get ~12 iter/sec on RTX 4090
 
 3. **Verify NCCL:**
    ```bash
    python -c "import torch; print(torch.cuda.nccl.version())"
    ```
-
-### Common Errors
-
-**"Duplicate keys in DeepSpeed config"**
-- Check `ds-config.json` for duplicate parameters
-- Each parameter should appear only once
-
-**"destroy_process_group() was not called"**
-- Fixed in latest version
-- Training script now properly cleans up on exit
-
-**OOM with ZeRO Stage 1**
-- Use ZeRO Stage 2 instead
-- Reduce `train_micro_batch_size_per_gpu` to 4
 
 ---
 
@@ -1010,8 +787,6 @@ If you use this code, please cite:
   url = {https://github.com/AkshithAI/project_828}
 }
 ```
-
----
 
 ---
 
@@ -1037,10 +812,8 @@ For questions or issues, please open an issue on GitHub or contact [@AkshithAI](
 
 **Project 828** | Version 1.0.0
 
-*MoE Transformer Architecture*
+*MoE Transformer Architecture — 398.7M params, 286M active per token*
 
-**Note**: This is a research project. The ~45M model is for testing pipeline stability, not for production code generation. The 800M model is the target configuration for practical applications.
-
-**Important**: For multi-GPU training, always check GPU topology first. With NODE topology, single GPU training is significantly faster (~1200x speedup).
+**Note**: This is a research project. The ~400M model is proving out the training pipeline and architecture. The 800M model is the target configuration for production.
 
 </div>
