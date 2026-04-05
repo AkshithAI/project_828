@@ -84,10 +84,14 @@ class PhaseConfig:
 
 
 # ──────────────────────────────────────────────────────────────
-# Phase 1 (post-growth):  ~60B tokens  —  Code / Math / General Knowledge
+# Phase 1 (post-growth):  ~60B tokens  —  Code / CS Engineering / Knowledge
 # ──────────────────────────────────────────────────────────────
-#   effective_batch = 36 * 8 = 288 seqs
-#   tokens_per_step = 288 * 2048 ≈ 0.59M
+#   CONTEXT: First ~19B tokens used a 50% math-heavy mix which caused
+#   LaTeX contamination and undertrained code/CS skills. The remaining
+#   ~26B tokens course-correct hard toward code + CS/engineering.
+#
+#   effective_batch = 37 * 8 = 296 seqs
+#   tokens_per_step = 296 * 2048 ≈ 0.61M
 #   total_steps     = 101,726  (~60B tokens)
 #   lifetime tokens = 27B (pre-growth) + 60B (post) ≈ 87B
 #
@@ -97,31 +101,36 @@ class PhaseConfig:
 #     decay:   91,045 → 101,726   (10,682 steps, ~10.5% of training)
 #
 #   Dataset mix (weights sum to 100):
-#     starcoderdata-python         14   — primary code corpus (Python)
-#     starcoderdata-javascript      6   — web scripting (JavaScript)
+#     starcoderdata-python         16   — primary code corpus (Python)
+#     starcoderdata-javascript      7   — web scripting (JavaScript)
 #     starcoderdata-java            5   — enterprise/Android (Java)
 #     starcoderdata-typescript      4   — typed web (TypeScript)
-#     starcoderdata-cpp             4   — systems programming (C++)
+#     starcoderdata-cpp             5   — systems programming (C++)
 #     starcoderdata-c               3   — low-level systems (C)
 #     starcoderdata-csharp          3   — .NET ecosystem (C#)
 #     starcoderdata-go              3   — cloud-native (Go)
 #     starcoderdata-rust            2   — safety-focused systems (Rust)
-#     starcoderdata-php             1   — web back-end (PHP)
+#     starcoderdata-php             2   — web back-end (PHP)
 #     fineweb-edu-dedup            15   — deduplicated educational web (220B tokens)
-#     cosmopedia-v2                12   — synthetic textbooks
-#     openmath-instruct-2           7   — math reasoning (problem + solution)
-#     numina-math-cot               4   — step-by-step math reasoning
-#     stack-exchange-preferences    5   — technical Q&A (code↔NL bridge)
-#     proof-pile-algebraic-stack    4   — mathematical code (11B tokens)
-#     magicoder-oss-instruct        5   — code instruction (OSS-grounded)
-#     openhermes-2.5                3   — instruction/chat corpus
+#     finemath-4plus                6   — highest quality math web (9.6B tokens, decontaminated)
+#     finemath-3plus                4   — broader math web content (34B tokens)
+#     peS2o-science                10   — CS/engineering/science papers from Semantic Scholar
+#     stackexchange-programming-cs  6   — strict programming/CS StackExchange
+#     opencodeinstruct              9   — 5M execution-verified Python code instructions
 #
 #   Category breakdown:
-#     Source Code          45%  (10 languages from starcoderdata)
-#     General Knowledge    27%  (fineweb-edu-dedup + cosmopedia)
-#     Code-adjacent        14%  (stack-exchange + algebraic-stack + magicoder)
-#     Math/Reasoning       11%  (openmath + numina)
-#     Instruction           3%  (openhermes)
+#     Source Code          50%  (10 languages from starcoderdata)
+#     CS/Eng/Science       25%  (peS2o + stackexchange + opencodeinstruct)
+#     General Knowledge    15%  (fineweb-edu-dedup)
+#     Math/Reasoning       10%  (finemath-4plus + finemath-3plus, CLEAN — no LaTeX-heavy instruct data)
+#
+#   Changes from previous mix:
+#     REMOVED: cosmopedia-v2 (synthetic, factual errors), numina-math-cot (LaTeX bleeding),
+#              openmath-instruct-2 (LaTeX-heavy instruct), stackexchange-pref-clean (preference format),
+#              proof-pile-algebraic-stack (too niche), magicoder-oss-instruct (75K too small),
+#              openhermes-2.5 (noisy, instruction tuning belongs in SFT phase)
+#     ADDED:   finemath-4plus (clean math), finemath-3plus (broader math),
+#              peS2o-science (real CS/science papers), opencodeinstruct (verified code)
 # ──────────────────────────────────────────────────────────────
 PHASE_1_CONFIG = PhaseConfig(
     phase_name="phase_1_post_growth",
@@ -138,18 +147,18 @@ PHASE_1_CONFIG = PhaseConfig(
     val_interval=2000,
     val_steps=500,
     datasets=[
-        # ── Source Code (45%) — Top 10 Languages ────────────
+        # ── Source Code (50%) — Top 10 Languages ────────────
         DatasetEntry(
             name="starcoderdata-python",
             repo_id="bigcode/starcoderdata",
-            weight=14,
+            weight=16,
             format_fn="starcoder",
             data_dir="python",
         ),
         DatasetEntry(
             name="starcoderdata-javascript",
             repo_id="bigcode/starcoderdata",
-            weight=6,
+            weight=7,
             format_fn="starcoder",
             data_dir="javascript",
         ),
@@ -170,7 +179,7 @@ PHASE_1_CONFIG = PhaseConfig(
         DatasetEntry(
             name="starcoderdata-cpp",
             repo_id="bigcode/starcoderdata",
-            weight=4,
+            weight=5,
             format_fn="starcoder",
             data_dir="cpp",
         ),
@@ -205,11 +214,11 @@ PHASE_1_CONFIG = PhaseConfig(
         DatasetEntry(
             name="starcoderdata-php",
             repo_id="bigcode/starcoderdata",
-            weight=1,
+            weight=2,
             format_fn="starcoder",
             data_dir="php",
         ),
-        # ── General Knowledge (27%) ─────────────────────────
+        # ── General Knowledge (15%) ─────────────────────────
         DatasetEntry(
             name="fineweb-edu-dedup",
             repo_id="HuggingFaceTB/smollm-corpus",
@@ -218,52 +227,37 @@ PHASE_1_CONFIG = PhaseConfig(
             config_name="fineweb-edu-dedup",
         ),
         DatasetEntry(
-            name="cosmopedia-v2",
-            repo_id="HuggingFaceTB/cosmopedia-v2",
-            weight=12,
-            format_fn="default",
-            config_name="cosmopedia-v2",
-        ),
-        # ── Math/Reasoning (11%) ────────────────────────────
-        DatasetEntry(
-            name="openmath-instruct-2",
-            repo_id="nvidia/OpenMathInstruct-2",
-            weight=7,
-            format_fn="openmath",
+            name="finemath-4plus",
+            repo_id="HuggingFaceTB/finemath",
+            weight=6,
+            format_fn="finemath",
+            config_name="finemath-4plus",
         ),
         DatasetEntry(
-            name="numina-math-cot",
-            repo_id="PrimeIntellect/NuminaMath-QwQ-CoT-5M",
+            name="finemath-3plus",
+            repo_id="HuggingFaceTB/finemath",
             weight=4,
-            format_fn="numina",
-        ),
-        # ── Code-Adjacent (14%) ─────────────────────────────
-        DatasetEntry(
-            name="stack-exchange-preferences",
-            repo_id="HuggingFaceH4/stack-exchange-preferences",
-            weight=5,
-            format_fn="stackexchange",
+            format_fn="finemath",
+            config_name="finemath-3plus",
         ),
         DatasetEntry(
-            name="proof-pile-algebraic-stack",
-            repo_id="EleutherAI/proof-pile-2",
-            weight=4,
-            format_fn="default",
-            data_dir="algebraic-stack",
+            name="peS2o-science",
+            repo_id="allenai/peS2o",
+            weight=10,
+            format_fn="pes2o",
+            config_name="v2",
         ),
         DatasetEntry(
-            name="magicoder-oss-instruct",
-            repo_id="ise-uiuc/Magicoder-OSS-Instruct-75K",
-            weight=5,
-            format_fn="magicoder",
-            max_epochs=3,
+            name="stackexchange-programming-cs",
+            repo_id="common-pile/stackexchange",
+            weight=6,
+            format_fn="stackexchange_programming_cs",
         ),
-        # ── Instruction (3%) ────────────────────────────────
         DatasetEntry(
-            name="openhermes-2.5",
-            repo_id="teknium/OpenHermes-2.5",
-            weight=3,
-            format_fn="openhermes",
+            name="opencodeinstruct",
+            repo_id="nvidia/OpenCodeInstruct",
+            weight=9,
+            format_fn="opencodeinstruct",
         ),
     ],
 )

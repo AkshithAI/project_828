@@ -4,7 +4,10 @@ import torch.nn.functional as F
 import math
 from typing import Tuple
 from ..scripts.configs.model_config import ModelConfig
-from flash_attn import flash_attn_func
+try:
+    from flash_attn import flash_attn_func
+except ImportError:
+    flash_attn_func = None  
 
 class RMS_Norm(nn.Module):
     def __init__(self,

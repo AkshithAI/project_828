@@ -2,6 +2,8 @@ import torch
 import math
 import threading
 import queue
+import html
+import re
 from datasets import load_dataset
 from huggingface_hub import list_repo_files, hf_hub_download
 from .tokenizer import tokenizer
@@ -21,23 +23,6 @@ def _fmt_default(row: Dict[str, Any]) -> Optional[str]:
     return text if text else None
 
 
-def _fmt_openmath(row: Dict[str, Any]) -> Optional[str]:
-    """nvidia/OpenMathInstruct-2: problem + solution."""
-    problem = row.get("problem", "")
-    solution = row.get("generated_solution", "")
-    if not problem and not solution:
-        return None
-    return f"{problem}\n\n{solution}"
-
-
-def _fmt_fineweb_edu(row: Dict[str, Any]) -> Optional[str]:
-    """HuggingFaceFW/fineweb-edu — keep educational pages (score >= 3.0)."""
-    score = row.get("score", 0.0)
-    if score is None or score < 3.0:
-        return None            
-    return row.get("text", "") or None
-
-
 def _fmt_starcoder(row: Dict[str, Any]) -> Optional[str]:
     """bigcode/starcoderdata: 'content' column with quality filtering."""
     content = row.get("content", "")
@@ -48,71 +33,219 @@ def _fmt_starcoder(row: Dict[str, Any]) -> Optional[str]:
     return content
 
 
-def _fmt_magicoder(row: Dict[str, Any]) -> Optional[str]:
-    """ise-uiuc/Magicoder-OSS-Instruct-75K: problem + solution."""
-    problem = row.get("problem", "")
-    solution = row.get("solution", "")
-    if not problem and not solution:
-        return None
-    return f"{problem}\n\n{solution}"
+_HTML_BLOCK_TAG_RE = re.compile(r"</?(?:p|div|br|li|ul|ol|pre|blockquote|h[1-6])[^>]*>", re.IGNORECASE)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_MULTISPACE_RE = re.compile(r"[ \t]{2,}")
+_MULTIBREAK_RE = re.compile(r"\n{3,}")
 
 
-def _fmt_numina(row: Dict[str, Any]) -> Optional[str]:
-    """PrimeIntellect/NuminaMath-QwQ-CoT-5M: prompt + response (length-filtered)."""
-    problem = row.get("prompt", "")
-    solution = row.get("response", "")
-    if not problem and not solution:
+def _clean_html_text(text: str) -> str:
+    """Convert basic HTML-like content into plain text while preserving paragraphs."""
+    if not text:
+        return ""
+    text = html.unescape(text)
+    text = _HTML_BLOCK_TAG_RE.sub("\n", text)
+    text = _HTML_TAG_RE.sub(" ", text)
+    text = _MULTISPACE_RE.sub(" ", text)
+    text = _MULTIBREAK_RE.sub("\n\n", text)
+    return text.strip()
+
+
+_TECHNICAL_STACK_SITES = {
+    "stackoverflow.com",
+    "superuser.com",
+    "serverfault.com",
+    "askubuntu.com",
+    "unix.stackexchange.com",
+    "softwareengineering.stackexchange.com",
+    "devops.stackexchange.com",
+    "codereview.stackexchange.com",
+    "dba.stackexchange.com",
+    "datascience.stackexchange.com",
+    "ai.stackexchange.com",
+    "security.stackexchange.com",
+    "networkengineering.stackexchange.com",
+    "reverseengineering.stackexchange.com",
+    "sqa.stackexchange.com",
+    "webmasters.stackexchange.com",
+    "tex.stackexchange.com",
+}
+
+_PROGRAMMING_CS_STACK_SITES = {
+    "ai.stackexchange.com",
+    "askubuntu.com",
+    "codereview.stackexchange.com",
+    "computergraphics.stackexchange.com",
+    "computerscience.stackexchange.com",
+    "cstheory.stackexchange.com",
+    "datascience.stackexchange.com",
+    "dba.stackexchange.com",
+    "devops.stackexchange.com",
+    "electronics.stackexchange.com",
+    "networkengineering.stackexchange.com",
+    "reverseengineering.stackexchange.com",
+    "security.stackexchange.com",
+    "serverfault.com",
+    "softwareengineering.stackexchange.com",
+    "stackoverflow.com",
+    "superuser.com",
+    "unix.stackexchange.com",
+}
+
+_PROGRAMMING_CS_SITE_KEYWORDS = (
+    "askubuntu",
+    "codereview",
+    "computer",
+    "computerscience",
+    "cstheory",
+    "database",
+    "dba",
+    "devops",
+    "linux",
+    "network",
+    "program",
+    "reverseengineering",
+    "security",
+    "server",
+    "softwareengineering",
+    "stack",
+    "unix",
+)
+
+
+def _normalize_stack_site(site: str) -> str:
+    site = (site or "").strip().lower()
+    if site.startswith("https://"):
+        site = site[len("https://"):]
+    elif site.startswith("http://"):
+        site = site[len("http://"):]
+    return site.strip("/")
+
+_TECHNICAL_STACK_KEYWORDS = (
+    "3dprinting",
+    "academia",
+    "ai",
+    "apple",
+    "askubuntu",
+    "bioinformatics",
+    "codereview",
+    "computerscience",
+    "cryptography",
+    "datascience",
+    "devops",
+    "dba",
+    "dsp",
+    "electronics",
+    "engineering",
+    "gis",
+    "linux",
+    "mathematics",
+    "math",
+    "network",
+    "physics",
+    "program",
+    "quant",
+    "reverseengineering",
+    "robotics",
+    "security",
+    "server",
+    "softwareengineering",
+    "sqa",
+    "stackapps",
+    "stackoverflow",
+    "stats",
+    "superuser",
+    "tex",
+    "unix",
+    "webmasters",
+)
+
+def _fmt_stackexchange_programming_cs(row: Dict[str, Any]) -> Optional[str]:
+    """common-pile/stackexchange: strict programming and CS-focused sites only."""
+    text = row.get("text", "")
+    if not text or len(text) < 120:
         return None
-    text = f"{problem}\n\n{solution}"
-    if len(text) > 8000:
+
+    metadata = row.get("metadata", {})
+    site = ""
+    if isinstance(metadata, dict):
+        site = _normalize_stack_site(metadata.get("site") or "")
+
+    if not site:
+        return None
+
+    if site.startswith("meta.") or ".meta." in site:
+        return None
+
+    if site not in _PROGRAMMING_CS_STACK_SITES and not any(
+        keyword in site for keyword in _PROGRAMMING_CS_SITE_KEYWORDS
+    ):
+        return None
+
+    cleaned = _clean_html_text(text)
+    return cleaned if len(cleaned) >= 120 else None
+
+
+def _fmt_finemath(row: Dict[str, Any]) -> Optional[str]:
+    """HuggingFaceTB/finemath: educational math web content.
+    Filtered from CommonCrawl using LLM-based quality classifiers.
+    The 'text' column contains math explanations, step-by-step solutions,
+    and educational content with natural formatting (not heavy LaTeX).
+    """
+    text = row.get("text", "")
+    if not text or len(text) < 100:
         return None
     return text
 
 
-def _fmt_stackexchange(row: Dict[str, Any]) -> Optional[str]:
-    """HuggingFaceH4/stack-exchange-preferences: question + chosen answer."""
-    question = row.get("question", "")
-    chosen = row.get("chosen", "")
-    if not question:
+def _fmt_pes2o(row: Dict[str, Any]) -> Optional[str]:
+    """allenai/peS2o: scientific papers from Semantic Scholar.
+    Contains CS, engineering, physics, math, biology papers.
+    Full-text papers (s2orc source) and title+abstract (s2ag source).
+    Paragraphs are delimited by double newlines.
+    """
+    text = row.get("text", "")
+    if not text:
         return None
-    if not chosen or len(chosen) < 50:
+    if len(text) < 500:
         return None
-    return f"{question}\n\n{chosen}"
+    if len(text) > 200_000:
+        text = text[:200_000]
+    return text
 
 
-def _fmt_openhermes(row: Dict[str, Any]) -> Optional[str]:
-    """teknium/OpenHermes-2.5: flatten ShareGPT-style conversations."""
-    conversations = row.get("conversations", [])
-    if not isinstance(conversations, list) or not conversations:
+def _fmt_opencodeinstruct(row: Dict[str, Any]) -> Optional[str]:
+    """nvidia/OpenCodeInstruct: 5M execution-verified Python code
+    instruction pairs. Each sample has:
+      - input: programming task description
+      - output: generated Python solution
+    Solutions have been verified with unit tests.
+    """
+    task = row.get("input", "")
+    solution = row.get("output", "")
+    if not task and not solution:
         return None
-
-    parts: List[str] = []
-    for turn in conversations:
-        if not isinstance(turn, dict):
-            continue
-        value = turn.get("value", "")
-        if not value:
-            continue
-        speaker = turn.get("from", "")
-        if speaker:
-            parts.append(f"{speaker}: {value}")
-        else:
-            parts.append(value)
-
-    if not parts:
+    exec_status = row.get("tests_execution_status", "")
+    if exec_status and "fail" in str(exec_status).lower():
         return None
-    return "\n\n".join(parts)
+    parts = []
+    if task:
+        parts.append(task.strip())
+    if solution:
+        parts.append(solution.strip())
+    text = "\n\n" .join(parts)
+    if len(text) < 50:
+        return None
+    return text
 
 
 FORMAT_FNS: Dict[str, Callable[[Dict[str, Any]], Optional[str]]] = {
     "default": _fmt_default,
-    "openmath": _fmt_openmath,
-    "fineweb_edu": _fmt_fineweb_edu,
     "starcoder": _fmt_starcoder,
-    "magicoder": _fmt_magicoder,
-    "numina": _fmt_numina,
-    "stackexchange": _fmt_stackexchange,
-    "openhermes": _fmt_openhermes,
+    "stackexchange_programming_cs": _fmt_stackexchange_programming_cs,
+    "finemath": _fmt_finemath,
+    "pes2o": _fmt_pes2o,
+    "opencodeinstruct": _fmt_opencodeinstruct,
 }
 
 
