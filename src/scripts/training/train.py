@@ -345,6 +345,7 @@ if __name__ == '__main__':
         print(f"[Scheduler] Remaining steps: {phase_config.total_steps - start_step}")
 
     # ── Compile model ──────────────────────────────────────
+    torch._dynamo.config.capture_scalar_outputs = True
     model = torch.compile(model, mode="max-autotune-no-cudagraphs")
 
     # ── Dataloaders ────────────────────────────────────────
