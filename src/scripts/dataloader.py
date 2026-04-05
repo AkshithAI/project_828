@@ -31,9 +31,9 @@ def _fmt_openmath(row: Dict[str, Any]) -> Optional[str]:
 
 
 def _fmt_fineweb_edu(row: Dict[str, Any]) -> Optional[str]:
-    """HuggingFaceFW/fineweb-edu — only keep top-quality (score >= 3.5)."""
+    """HuggingFaceFW/fineweb-edu — keep educational pages (score >= 3.0)."""
     score = row.get("score", 0.0)
-    if score is None or score < 3.5:
+    if score is None or score < 3.0:
         return None            
     return row.get("text", "") or None
 

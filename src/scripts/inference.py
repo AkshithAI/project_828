@@ -5,6 +5,8 @@ from .configs.model_config import config
 import torch
 import os
 import torch.nn.functional as F
+import time
+from contextlib import nullcontext
 from tqdm import tqdm
 
 def display_expert_stats(model):
@@ -47,6 +49,25 @@ def display_expert_stats(model):
             
             print(f"  Load balance metrics:")
             print(f"    Mean: {mean_count:.1f} | Std Dev: {std_dev:.1f} | CV: {cv:.1f}%")
+
+
+def _is_cuda_device(device):
+    if isinstance(device, torch.device):
+        return device.type == 'cuda'
+    if isinstance(device, str):
+        return device.startswith('cuda')
+    return False
+
+
+def _sync_device(device):
+    if _is_cuda_device(device):
+        torch.cuda.synchronize()
+
+
+def _autocast_ctx(device):
+    if _is_cuda_device(device):
+        return torch.autocast(device_type='cuda', dtype=torch.bfloat16)
+    return nullcontext()
     
 
 def _build_prefill_mask(padding_lengths, max_prompt_len, device):
@@ -157,7 +178,8 @@ def _apply_sampling(logits, temp, k, top_p, repetition_penalty, generated_ids):
 
 @torch.inference_mode()
 def generate(model, seed_txt, device, max_tokens=500, k=50, temp=0.8,
-            top_p=0.9, repetition_penalty=1.15):
+            top_p=0.9, repetition_penalty=1.15,
+            report_perf=True, show_progress=True):
     """
     Sample Inference on the model
     
@@ -187,12 +209,21 @@ def generate(model, seed_txt, device, max_tokens=500, k=50, temp=0.8,
     tokens = torch.tensor(all_prompt_ids[:-1], device=device, dtype=torch.long).unsqueeze(0)
     predicted_token = torch.tensor(all_prompt_ids[-1], device=device, dtype=torch.long).unsqueeze(0)
     sampled_tokens.extend(all_prompt_ids)
-    model(tokens, start_pos)
+
+    _sync_device(device)
+    prefill_start = time.perf_counter()
+    with _autocast_ctx(device):
+        model(tokens, start_pos)
+    _sync_device(device)
+    prefill_sec = time.perf_counter() - prefill_start
+
     start_pos = len(all_prompt_ids) - 1  
     generated_ids = torch.tensor([all_prompt_ids], device=device, dtype=torch.long)
 
-    for _ in tqdm(range(max_tokens)):
-        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+    _sync_device(device)
+    decode_start = time.perf_counter()
+    for _ in tqdm(range(max_tokens), desc="Decode", disable=not show_progress):
+        with _autocast_ctx(device):
             logits = model(predicted_token.view(1, 1), start_pos)
 
         idx = _apply_sampling(
@@ -207,6 +238,9 @@ def generate(model, seed_txt, device, max_tokens=500, k=50, temp=0.8,
         if idx_item == tokenizer.eos_token_id:
             break
 
+    _sync_device(device)
+    decode_sec = time.perf_counter() - decode_start
+
     # Restore original model state
     if needs_cache_toggle:
         _disable_kv_cache(model)
@@ -214,12 +248,28 @@ def generate(model, seed_txt, device, max_tokens=500, k=50, temp=0.8,
         model.train()
 
     print(f"Number of tokens sampled : {len(sampled_tokens)}")
+    if report_perf:
+        generated_tokens = len(sampled_tokens) - len(all_prompt_ids)
+        total_sec = prefill_sec + decode_sec
+        decode_tps = generated_tokens / max(decode_sec, 1e-9)
+        total_tps = len(sampled_tokens) / max(total_sec, 1e-9)
+        decode_ms_per_tok = (decode_sec * 1000.0) / max(generated_tokens, 1)
+        print("\n[Perf] single-sequence")
+        print(
+            f"  prompt_tokens={len(all_prompt_ids)} generated_tokens={generated_tokens} total_tokens={len(sampled_tokens)}"
+        )
+        print(f"  prefill: {prefill_sec*1000:.2f} ms")
+        print(
+            f"  decode: {decode_sec:.3f} s | {decode_tps:.2f} tok/s | {decode_ms_per_tok:.2f} ms/tok"
+        )
+        print(f"  total : {total_sec:.3f} s | {total_tps:.2f} tok/s")
     return tokenizer.decode(sampled_tokens)
 
 
 @torch.inference_mode()
 def generate_batch(model, prompts, device, max_tokens=500, k=50, temp=0.8,
-                   top_p=0.9, repetition_penalty=1.15):
+                   top_p=0.9, repetition_penalty=1.15,
+                   report_perf=True, show_progress=True):
     """
     Batched inference with KV caching for multiple prompts simultaneously.
 
@@ -266,16 +316,22 @@ def generate_batch(model, prompts, device, max_tokens=500, k=50, temp=0.8,
     if hasattr(model, 'reset_cache'):
         model.reset_cache(batch_size)
 
-    with torch.autocast(device_type=device, dtype=torch.bfloat16):
+    _sync_device(device)
+    prefill_start = time.perf_counter()
+    with _autocast_ctx(device):
         logits = model(
             tokens, start_pos=0,
             position_ids=position_ids, attn_mask=prefill_mask,
         )
+    _sync_device(device)
+    prefill_sec = time.perf_counter() - prefill_start
 
     generated_ids = torch.full_like(tokens, -1)
     for i in range(batch_size):
         generated_ids[i, padding_lengths[i]:] = tokens[i, padding_lengths[i]:]
 
+    _sync_device(device)
+    decode_start = time.perf_counter()
     next_tokens = _apply_sampling(
         logits[:, -1, :], temp, k, top_p, repetition_penalty, generated_ids
     )   # (batch, 1)
@@ -284,7 +340,7 @@ def generate_batch(model, prompts, device, max_tokens=500, k=50, temp=0.8,
     finished = [next_tokens[i].item() == tokenizer.eos_token_id for i in range(batch_size)]
     generated_ids = torch.cat([generated_ids, next_tokens], dim=-1)
 
-    for step in tqdm(range(1, max_tokens), desc="Batch generation"):
+    for step in tqdm(range(1, max_tokens), desc="Batch generation", disable=not show_progress):
         if all(finished):
             break
 
@@ -298,7 +354,7 @@ def generate_batch(model, prompts, device, max_tokens=500, k=50, temp=0.8,
 
         kv_mask = _build_kv_mask(padding_lengths, kv_len, device)
 
-        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+        with _autocast_ctx(device):
             logits = model(
                 next_tokens, start_pos=start_pos,
                 position_ids=step_position_ids, attn_mask=kv_mask,
@@ -316,12 +372,34 @@ def generate_batch(model, prompts, device, max_tokens=500, k=50, temp=0.8,
                 if tok == tokenizer.eos_token_id:
                     finished[i] = True
 
+    _sync_device(device)
+    decode_sec = time.perf_counter() - decode_start
+
     results = []
+    generated_counts = []
     for i in range(batch_size):
         text = tokenizer.decode(all_tokens[i])
         results.append(text)
+        generated_counts.append(len(all_tokens[i]) - prompt_lengths[i])
         print(f"\n[Sequence {i}] ({len(all_tokens[i])} tokens):")
         print(text)
+
+    if report_perf:
+        total_new_tokens = sum(generated_counts)
+        total_tokens = sum(len(seq) for seq in all_tokens)
+        total_sec = prefill_sec + decode_sec
+        decode_tps = total_new_tokens / max(decode_sec, 1e-9)
+        total_tps = total_tokens / max(total_sec, 1e-9)
+        decode_ms_per_tok = (decode_sec * 1000.0) / max(total_new_tokens, 1)
+        print("\n[Perf] batch")
+        print(
+            f"  batch_size={batch_size} prompt_tokens={sum(prompt_lengths)} generated_tokens={total_new_tokens} total_tokens={total_tokens}"
+        )
+        print(f"  prefill: {prefill_sec*1000:.2f} ms")
+        print(
+            f"  decode: {decode_sec:.3f} s | {decode_tps:.2f} tok/s | {decode_ms_per_tok:.2f} ms/tok"
+        )
+        print(f"  total : {total_sec:.3f} s | {total_tps:.2f} tok/s")
 
     return results
 
@@ -335,7 +413,7 @@ if __name__ == '__main__':
         model = GPT_FLASH(config,device,inference=True)
     else:
         model = GPT(config,device)
-    model.load_state_dict(torch.load("./project-828/project_828/checkpoints/model_00000.pt",map_location="cpu"))
+    model.load_state_dict(torch.load("/Users/apple/Documents/project-828/project_828/checkpoints/model_51770.pt",map_location="cpu"))
     # Reset expert counts from training before inference
     for layer in model.layers:
         if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'reset_expert_counts'):
@@ -343,8 +421,8 @@ if __name__ == '__main__':
     
     print("  SINGLE SEQUENCE INFERENCE")
 
-    seed_txt = "def sliding_window_average(values, window_size):\n    \"\"\"Compute moving averages for a list of numbers.\"\"\"\n    if window_size <= 0:\n        raise ValueError('window_size must be positive')\n    if len(values) < window_size:\n        return []\n    window_sum = sum(values[:window_size])\n    averages = [window_sum / window_size]\n    for i in range(window_size, len(values)):\n        window_sum += values[i] - values[i - window_size]\n        averages.append(window_sum / window_size)\n    return"
-    generated_text = generate(model,seed_txt,device,max_tokens=250,temp=0.8,top_p=0.9,k=50)
+    seed_txt = "Heres an essay on global warming:\n\n"#"def sliding_window_average(values, window_size):\n    \"\"\"Compute moving averages for a list of numbers.\"\"\"\n    if window_size <= 0:\n        raise ValueError('window_size must be positive')\n    if len(values) < window_size:\n        return []\n    window_sum = sum(values[:window_size])\n    averages = [window_sum / window_size]\n    for i in range(window_size, len(values)):\n        window_sum += values[i] - values[i - window_size]\n        averages.append(window_sum / window_size)\n    return"
+    generated_text = generate(model,seed_txt,device,max_tokens=250,temp=0.7,top_p=0.9,k=50,repetition_penalty=1.25)
     print(generated_text)
     
     print("\n")

@@ -107,21 +107,21 @@ class PhaseConfig:
 #     starcoderdata-go              3   — cloud-native (Go)
 #     starcoderdata-rust            2   — safety-focused systems (Rust)
 #     starcoderdata-php             1   — web back-end (PHP)
-#     fineweb-edu                  12   — general knowledge (score ≥ 3.5)
-#     cosmopedia-v2                 7   — synthetic textbooks
-#     openmath-instruct-2          10   — math reasoning (problem + solution)
-#     numina-math-cot               4   — step-by-step math (length-filtered)
-#     stack-exchange-preferences    7   — technical Q&A (code↔NL bridge)
-#     proof-pile-algebraic-stack    5   — mathematical code (11B tokens)
+#     fineweb-edu-dedup            15   — deduplicated educational web (220B tokens)
+#     cosmopedia-v2                12   — synthetic textbooks
+#     openmath-instruct-2           7   — math reasoning (problem + solution)
+#     numina-math-cot               4   — step-by-step math reasoning
+#     stack-exchange-preferences    5   — technical Q&A (code↔NL bridge)
+#     proof-pile-algebraic-stack    4   — mathematical code (11B tokens)
 #     magicoder-oss-instruct        5   — code instruction (OSS-grounded)
-#     openhermes-2.5                5   — instruction/chat corpus
+#     openhermes-2.5                3   — instruction/chat corpus
 #
 #   Category breakdown:
 #     Source Code          45%  (10 languages from starcoderdata)
-#     General Knowledge    19%  (fineweb-edu + cosmopedia)
-#     Code-adjacent        17%  (stack-exchange + algebraic-stack + magicoder)
-#     Math/Reasoning       14%  (openmath + numina)
-#     Instruction           5%  (openhermes)
+#     General Knowledge    27%  (fineweb-edu-dedup + cosmopedia)
+#     Code-adjacent        14%  (stack-exchange + algebraic-stack + magicoder)
+#     Math/Reasoning       11%  (openmath + numina)
+#     Instruction           3%  (openhermes)
 # ──────────────────────────────────────────────────────────────
 PHASE_1_CONFIG = PhaseConfig(
     phase_name="phase_1_post_growth",
@@ -209,26 +209,26 @@ PHASE_1_CONFIG = PhaseConfig(
             format_fn="starcoder",
             data_dir="php",
         ),
-        # ── General Knowledge (19%) ─────────────────────────
+        # ── General Knowledge (27%) ─────────────────────────
         DatasetEntry(
-            name="fineweb-edu",
-            repo_id="HuggingFaceFW/fineweb-edu",
-            weight=12,
-            format_fn="fineweb_edu",
-            config_name="sample-100BT",
+            name="fineweb-edu-dedup",
+            repo_id="HuggingFaceTB/smollm-corpus",
+            weight=15,
+            format_fn="default",
+            config_name="fineweb-edu-dedup",
         ),
         DatasetEntry(
             name="cosmopedia-v2",
             repo_id="HuggingFaceTB/cosmopedia-v2",
-            weight=7,
+            weight=12,
             format_fn="default",
             config_name="cosmopedia-v2",
         ),
-        # ── Math/Reasoning (14%) ────────────────────────────
+        # ── Math/Reasoning (11%) ────────────────────────────
         DatasetEntry(
             name="openmath-instruct-2",
             repo_id="nvidia/OpenMathInstruct-2",
-            weight=10,
+            weight=7,
             format_fn="openmath",
         ),
         DatasetEntry(
@@ -237,17 +237,17 @@ PHASE_1_CONFIG = PhaseConfig(
             weight=4,
             format_fn="numina",
         ),
-        # ── Code-Adjacent (17%) ─────────────────────────────
+        # ── Code-Adjacent (14%) ─────────────────────────────
         DatasetEntry(
             name="stack-exchange-preferences",
             repo_id="HuggingFaceH4/stack-exchange-preferences",
-            weight=7,
+            weight=5,
             format_fn="stackexchange",
         ),
         DatasetEntry(
             name="proof-pile-algebraic-stack",
             repo_id="EleutherAI/proof-pile-2",
-            weight=5,
+            weight=4,
             format_fn="default",
             data_dir="algebraic-stack",
         ),
@@ -258,11 +258,11 @@ PHASE_1_CONFIG = PhaseConfig(
             format_fn="magicoder",
             max_epochs=3,
         ),
-        # ── Instruction (5%) ────────────────────────────────
+        # ── Instruction (3%) ────────────────────────────────
         DatasetEntry(
             name="openhermes-2.5",
             repo_id="teknium/OpenHermes-2.5",
-            weight=5,
+            weight=3,
             format_fn="openhermes",
         ),
     ],
