@@ -72,44 +72,84 @@ _TECHNICAL_STACK_SITES = {
 }
 
 _PROGRAMMING_CS_STACK_SITES = {
-    "ai.stackexchange.com",
-    "askubuntu.com",
+    # Core CS & Programming
+    "stackoverflow.com",
+    "softwareengineering.stackexchange.com",
     "codereview.stackexchange.com",
-    "computergraphics.stackexchange.com",
     "computerscience.stackexchange.com",
     "cstheory.stackexchange.com",
-    "datascience.stackexchange.com",
-    "dba.stackexchange.com",
-    "devops.stackexchange.com",
-    "electronics.stackexchange.com",
-    "networkengineering.stackexchange.com",
-    "reverseengineering.stackexchange.com",
-    "security.stackexchange.com",
-    "serverfault.com",
-    "softwareengineering.stackexchange.com",
-    "stackoverflow.com",
+    
+    # Systems & Operations
     "superuser.com",
+    "serverfault.com",
+    "askubuntu.com",
     "unix.stackexchange.com",
+    "devops.stackexchange.com",
+    "dba.stackexchange.com",
+    "networkengineering.stackexchange.com",
+    "security.stackexchange.com",
+    "reverseengineering.stackexchange.com",
+    "sqa.stackexchange.com",
+    
+    # Applied Engineering & ML (Low-LaTeX compared to Math/Stats)
+    "ai.stackexchange.com",
+    "datascience.stackexchange.com",
+    "robotics.stackexchange.com",
+    "electronics.stackexchange.com",
+    "computergraphics.stackexchange.com",
+    "gamedev.stackexchange.com",
+    
+    # Embedded & Microcontrollers (C/C++ heavy)
+    "arduino.stackexchange.com",
+    "raspberrypi.stackexchange.com",
+    
+    # Tooling & Environments
+    "vi.stackexchange.com",
+    "emacs.stackexchange.com",
+    
+    # Web & Platform Specific Coding
+    "webmasters.stackexchange.com",
+    "wordpress.stackexchange.com",
+    "magento.stackexchange.com",
+    "drupal.stackexchange.com",
+    "salesforce.stackexchange.com",
+    "ethereum.stackexchange.com",
+    "bitcoin.stackexchange.com",
 }
 
 _PROGRAMMING_CS_SITE_KEYWORDS = (
     "askubuntu",
+    "arduino",
+    "bitcoin",
     "codereview",
     "computer",
-    "computerscience",
     "cstheory",
     "database",
     "dba",
     "devops",
+    "drupal",
+    "electronics",
+    "emacs",
+    "ethereum",
+    "gamedev",
     "linux",
+    "magento",
     "network",
     "program",
+    "raspberrypi",
     "reverseengineering",
+    "robotics",
+    "salesforce",
     "security",
     "server",
-    "softwareengineering",
-    "stack",
+    "software",
+    "sqa",
+    "stackoverflow",
+    "superuser",
     "unix",
+    "vi",
+    "webmaster",
+    "wordpress",
 )
 
 
@@ -198,22 +238,6 @@ def _fmt_finemath(row: Dict[str, Any]) -> Optional[str]:
     return text
 
 
-def _fmt_pes2o(row: Dict[str, Any]) -> Optional[str]:
-    """allenai/peS2o: scientific papers from Semantic Scholar.
-    Contains CS, engineering, physics, math, biology papers.
-    Full-text papers (s2orc source) and title+abstract (s2ag source).
-    Paragraphs are delimited by double newlines.
-    """
-    text = row.get("text", "")
-    if not text:
-        return None
-    if len(text) < 500:
-        return None
-    if len(text) > 200_000:
-        text = text[:200_000]
-    return text
-
-
 def _fmt_opencodeinstruct(row: Dict[str, Any]) -> Optional[str]:
     """nvidia/OpenCodeInstruct: 5M execution-verified Python code
     instruction pairs. Each sample has:
@@ -244,7 +268,6 @@ FORMAT_FNS: Dict[str, Callable[[Dict[str, Any]], Optional[str]]] = {
     "starcoder": _fmt_starcoder,
     "stackexchange_programming_cs": _fmt_stackexchange_programming_cs,
     "finemath": _fmt_finemath,
-    "pes2o": _fmt_pes2o,
     "opencodeinstruct": _fmt_opencodeinstruct,
 }
 

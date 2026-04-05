@@ -111,26 +111,17 @@ class PhaseConfig:
 #     starcoderdata-go              3   — cloud-native (Go)
 #     starcoderdata-rust            2   — safety-focused systems (Rust)
 #     starcoderdata-php             2   — web back-end (PHP)
-#     fineweb-edu-dedup            15   — deduplicated educational web (220B tokens)
+#     fineweb-edu-dedup            18   — deduplicated educational web (220B tokens, includes CS tutorials/docs)
 #     finemath-4plus                6   — highest quality math web (9.6B tokens, decontaminated)
 #     finemath-3plus                4   — broader math web content (34B tokens)
-#     peS2o-science                10   — CS/engineering/science papers from Semantic Scholar
-#     stackexchange-programming-cs  6   — strict programming/CS StackExchange
-#     opencodeinstruct              9   — 5M execution-verified Python code instructions
+#     stackexchange-programming-cs 10   — strict programming/CS StackExchange Q&A
+#     opencodeinstruct             12   — 5M execution-verified Python code instructions
 #
 #   Category breakdown:
 #     Source Code          50%  (10 languages from starcoderdata)
-#     CS/Eng/Science       25%  (peS2o + stackexchange + opencodeinstruct)
-#     General Knowledge    15%  (fineweb-edu-dedup)
+#     CS/Engineering       22%  (stackexchange + opencodeinstruct, all LaTeX-free)
+#     General Knowledge    18%  (fineweb-edu-dedup)
 #     Math/Reasoning       10%  (finemath-4plus + finemath-3plus, CLEAN — no LaTeX-heavy instruct data)
-#
-#   Changes from previous mix:
-#     REMOVED: cosmopedia-v2 (synthetic, factual errors), numina-math-cot (LaTeX bleeding),
-#              openmath-instruct-2 (LaTeX-heavy instruct), stackexchange-pref-clean (preference format),
-#              proof-pile-algebraic-stack (too niche), magicoder-oss-instruct (75K too small),
-#              openhermes-2.5 (noisy, instruction tuning belongs in SFT phase)
-#     ADDED:   finemath-4plus (clean math), finemath-3plus (broader math),
-#              peS2o-science (real CS/science papers), opencodeinstruct (verified code)
 # ──────────────────────────────────────────────────────────────
 PHASE_1_CONFIG = PhaseConfig(
     phase_name="phase_1_post_growth",
@@ -218,14 +209,15 @@ PHASE_1_CONFIG = PhaseConfig(
             format_fn="starcoder",
             data_dir="php",
         ),
-        # ── General Knowledge (15%) ─────────────────────────
+        # ── General Knowledge (18%) ─────────────────────────
         DatasetEntry(
             name="fineweb-edu-dedup",
             repo_id="HuggingFaceTB/smollm-corpus",
-            weight=15,
+            weight=18,
             format_fn="default",
             config_name="fineweb-edu-dedup",
         ),
+        # ── Math/Reasoning (10%) ────────────────────────────
         DatasetEntry(
             name="finemath-4plus",
             repo_id="HuggingFaceTB/finemath",
@@ -240,23 +232,17 @@ PHASE_1_CONFIG = PhaseConfig(
             format_fn="finemath",
             config_name="finemath-3plus",
         ),
-        DatasetEntry(
-            name="peS2o-science",
-            repo_id="allenai/peS2o",
-            weight=10,
-            format_fn="pes2o",
-            config_name="v2",
-        ),
+        # ── CS/Engineering (22%) ────────────────────────────
         DatasetEntry(
             name="stackexchange-programming-cs",
             repo_id="common-pile/stackexchange",
-            weight=6,
+            weight=10,
             format_fn="stackexchange_programming_cs",
         ),
         DatasetEntry(
             name="opencodeinstruct",
             repo_id="nvidia/OpenCodeInstruct",
-            weight=9,
+            weight=12,
             format_fn="opencodeinstruct",
         ),
     ],
