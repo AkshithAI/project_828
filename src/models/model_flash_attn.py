@@ -253,10 +253,11 @@ class MoE(nn.Module):
         )
 
         # Run each expert on its contiguous slice
-        sorted_out = torch.empty_like(sorted_x)
+        sorted_out = torch.zeros_like(sorted_x)
         for i, expert in enumerate(self.experts):
             start, end = expert_boundaries[i].item(), expert_boundaries[i + 1].item()
-            sorted_out[start:end] = expert(sorted_x[start:end])
+            if start == end:
+                sorted_out[start:end] = expert(sorted_x[start:end])
 
         # Weighted scatter-add back to original token positions
         sorted_out = sorted_out * sorted_weights
