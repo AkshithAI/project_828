@@ -257,7 +257,8 @@ class MoE(nn.Module):
         for i, expert in enumerate(self.experts):
             start, end = expert_boundaries[i].item(), expert_boundaries[i + 1].item()
             if start == end:
-                sorted_out[start:end] = expert(sorted_x[start:end])
+                continue
+            sorted_out[start:end] = expert(sorted_x[start:end])
 
         # Weighted scatter-add back to original token positions
         sorted_out = sorted_out * sorted_weights
