@@ -22,6 +22,7 @@ BINARY_EXTENSIONS = {
 }
 
 SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".venv", "venv", "node_modules"}
+USABILITY_SCRIPTS = ("init.sh", "launch_distributed.sh")
 
 
 @dataclass
@@ -41,7 +42,7 @@ def _is_text_file(path: Path) -> bool:
     return False
 
 
-def _safe_read_text(path: Path, max_bytes: int = 300_000) -> Tuple[str, bool]:
+def _read_text_with_limit(path: Path, max_bytes: int = 300_000) -> Tuple[str, bool]:
     size = path.stat().st_size
     truncated = size > max_bytes
     with path.open("rb") as f:
@@ -73,7 +74,7 @@ class RepositoryEvaluator:
 
     def _scan_file(self, path: Path) -> None:
         rel = str(path.relative_to(self.repo_path))
-        content, truncated = _safe_read_text(path)
+        content, truncated = _read_text_with_limit(path)
         lowered = content.lower()
         if truncated:
             self.unread_files.append(FileEvidence(rel, "large", "partially analyzed (file too large, scanned first chunk only)"))
@@ -133,31 +134,150 @@ class RepositoryEvaluator:
             self._scan_file(p)
 
     def _score_categories(self) -> Dict[str, float]:
+        # Lightweight heuristic weights tuned for evidence-first scoring.
         f = self.findings
         n_files = len(self.text_files)
         n_tests = sum(1 for x in self.file_notes if "test" in x.path and x.path.endswith(".py"))
+        has_moe_path = False
+        has_data_path = False
+        has_packing_file = False
+        has_phase_path = False
+        has_validate_domains = False
+        has_flash_attn = False
+        has_tests_path = False
+        python_file_count = 0
+        md_file_count = 0
+        for item in self.file_notes:
+            path_l = item.path.lower()
+            if "moe" in path_l:
+                has_moe_path = True
+            if "data" in path_l:
+                has_data_path = True
+            if "packing.py" in path_l:
+                has_packing_file = True
+            if "phase" in path_l:
+                has_phase_path = True
+            if "validate_domains.py" in path_l:
+                has_validate_domains = True
+            if "flash_attn" in path_l:
+                has_flash_attn = True
+            if "tests" in path_l:
+                has_tests_path = True
+            if path_l.endswith(".py"):
+                python_file_count += 1
+            if path_l.endswith(".md"):
+                md_file_count += 1
+        many_python_files = python_file_count > 10
+        multiple_md_files = md_file_count > 1
+        has_init_script = (self.repo_path / USABILITY_SCRIPTS[0]).exists()
+        has_launch_script = (self.repo_path / USABILITY_SCRIPTS[1]).exists()
 
         scores = {
             "Project clarity and purpose": 3 + 4 * f.get("has_readme", False) + 1 * f.get("has_docs", False) + (1 if n_files > 10 else 0),
-            "Technical depth": 2 + 2 * f.get("has_model_arch", False) + 2 * f.get("has_distributed", False) + 2 * f.get("uses_deepspeed", False) + 2 * ("moe" in " ".join(x.path.lower() for x in self.file_notes)),
+            "Technical depth": 2 + 2 * f.get("has_model_arch", False) + 2 * f.get("has_distributed", False) + 2 * f.get("uses_deepspeed", False) + (2 if has_moe_path else 0),
             "Code quality and architecture": 2 + 3 * (n_files > 8) + 2 * f.get("has_model_arch", False) + 1 * f.get("has_docs", False) + 2 * (n_tests > 0),
             "AI/ML relevance and sophistication": 1 + 3 * f.get("uses_pytorch", False) + 2 * f.get("uses_transformers", False) + 2 * f.get("has_training", False) + 2 * f.get("has_model_arch", False),
-            "Data handling and preprocessing": 1 + 4 * f.get("has_preprocessing", False) + 2 * ("data" in " ".join(x.path for x in self.file_notes)) + 3 * ("packing.py" in " ".join(x.path for x in self.file_notes)),
+            "Data handling and preprocessing": 1 + 4 * f.get("has_preprocessing", False) + (2 if has_data_path else 0) + (3 if has_packing_file else 0),
             "Model design / training / inference quality": 1 + 3 * f.get("has_model_arch", False) + 3 * f.get("has_training", False) + 2 * f.get("has_inference", False) + 1 * f.get("has_validation", False),
-            "Experimentation quality": 1 + 2 * f.get("uses_wandb", False) + 2 * f.get("has_validation", False) + 2 * ("phase" in " ".join(x.path.lower() for x in self.file_notes)) + 3 * ("validate_domains.py" in " ".join(x.path for x in self.file_notes)),
+            "Experimentation quality": 1 + 2 * f.get("uses_wandb", False) + 2 * f.get("has_validation", False) + (2 if has_phase_path else 0) + (3 if has_validate_domains else 0),
             "Testing, validation, and reproducibility": 1 + 3 * (n_tests > 0) + 2 * f.get("has_requirements", False) + 2 * f.get("has_validation", False) + 2 * f.get("has_ci", False),
-            "Documentation quality": 1 + 4 * f.get("has_readme", False) + 2 * (sum(1 for x in self.file_notes if x.path.endswith(".md")) > 1) + 3 * (self.repo_path / "README.md").exists(),
-            "Engineering practices": 1 + 2 * f.get("has_requirements", False) + 2 * f.get("has_distributed", False) + 2 * f.get("uses_wandb", False) + 3 * ("tests" in " ".join(x.path for x in self.file_notes)),
+            "Documentation quality": 1 + 4 * f.get("has_readme", False) + (2 if multiple_md_files else 0) + 3 * f.get("has_docs", False),
+            "Engineering practices": 1 + 2 * f.get("has_requirements", False) + 2 * f.get("has_distributed", False) + 2 * f.get("uses_wandb", False) + (3 if has_tests_path else 0),
             "Real-world usefulness": 1 + 3 * f.get("has_training", False) + 2 * f.get("has_inference", False) + 2 * f.get("has_distributed", False) + 2 * f.get("has_preprocessing", False),
-            "Originality / creativity": 2 + 3 * ("moe" in " ".join(x.path.lower() for x in self.file_notes)) + 2 * ("flash_attn" in " ".join(x.path.lower() for x in self.file_notes)) + 3 * ("validate_domains" in " ".join(x.path.lower() for x in self.file_notes)),
-            "Deployment or usability readiness": 1 + 2 * f.get("has_inference", False) + 2 * f.get("has_requirements", False) + 2 * ((self.repo_path / "init.sh").exists()) + 3 * ((self.repo_path / "launch_distributed.sh").exists()),
-            "Maintainability and scalability": 1 + 2 * f.get("has_distributed", False) + 2 * (n_files > 15) + 2 * (sum(1 for x in self.file_notes if x.path.endswith(".py")) > 10) + 3 * (n_tests > 0),
+            "Originality / creativity": 2 + (3 if has_moe_path else 0) + (2 if has_flash_attn else 0) + (3 if has_validate_domains else 0),
+            "Deployment or usability readiness": 1 + 2 * f.get("has_inference", False) + 2 * f.get("has_requirements", False) + 2 * has_init_script + 3 * has_launch_script,
+            "Maintainability and scalability": 1 + 2 * f.get("has_distributed", False) + 2 * (n_files > 15) + (2 if many_python_files else 0) + 3 * (n_tests > 0),
             "Overall learning value for an AI student": 2 + 3 * f.get("has_model_arch", False) + 2 * f.get("has_preprocessing", False) + 2 * f.get("has_training", False) + 1 * (n_tests > 0),
             "Hiring signal for AI-related internships, projects, or entry-level roles": 1 + 3 * f.get("has_model_arch", False) + 2 * f.get("has_training", False) + 2 * f.get("has_validation", False) + 2 * (n_tests > 0),
         }
 
         clipped = {k: float(max(0, min(10, v))) for k, v in scores.items()}
         return clipped
+
+    def _build_dynamic_summary(self) -> str:
+        f = self.findings
+        parts = []
+        if f.get("has_model_arch"):
+            parts.append("model architecture code")
+        if f.get("has_training"):
+            parts.append("training pipeline")
+        if f.get("has_preprocessing"):
+            parts.append("data preprocessing")
+        if f.get("has_inference"):
+            parts.append("inference utilities")
+        if f.get("has_distributed"):
+            parts.append("distributed execution support")
+
+        if not parts:
+            return (
+                "This repository contains project files but limited directly verifiable AI/ML implementation evidence "
+                "from the scanned sources."
+            )
+
+        if len(parts) == 1:
+            return f"This repository includes {parts[0]}."
+        return "This repository includes " + ", ".join(parts[:-1]) + f", and {parts[-1]}."
+
+    def _derive_strengths(self) -> List[str]:
+        f = self.findings
+        strengths: List[str] = []
+        if f.get("has_model_arch"):
+            strengths.append("Includes explicit model architecture implementation rather than only wrappers.")
+        if f.get("has_training"):
+            strengths.append("Contains train-time code paths for optimization and learning workflow.")
+        if f.get("has_preprocessing"):
+            strengths.append("Provides data handling/preprocessing components for ML workflows.")
+        if f.get("has_validation"):
+            strengths.append("Shows validation or testing-oriented code paths for quality tracking.")
+        if f.get("has_distributed"):
+            strengths.append("Includes distributed/scaling-related logic, signaling systems awareness.")
+        if f.get("has_docs"):
+            strengths.append("Contains documentation files that help explain usage and structure.")
+        return strengths[:3] if strengths else ["Repository has a coherent structure with identifiable modules."]
+
+    def _derive_weaknesses(self) -> List[str]:
+        f = self.findings
+        weaknesses: List[str] = []
+        if not f.get("has_ci"):
+            weaknesses.append("No CI workflow detected for automatic regression checks on changes.")
+        if not f.get("has_tests"):
+            weaknesses.append("Limited or no automated test files, increasing regression risk.")
+        if not f.get("has_requirements"):
+            weaknesses.append("No dependency manifest detected, reducing reproducibility.")
+        if not f.get("has_inference"):
+            weaknesses.append("No clear inference entry point for practical model usage.")
+        if not f.get("has_preprocessing"):
+            weaknesses.append("Limited visible preprocessing/data pipeline support.")
+        if not f.get("has_docs"):
+            weaknesses.append("Sparse documentation limits clarity for reviewers and users.")
+        if not weaknesses:
+            weaknesses.append("Main risks are environment-specific reproducibility and external data/service dependencies.")
+        return weaknesses[:3]
+
+    def _derive_improvements(self) -> List[str]:
+        f = self.findings
+        improvements: List[str] = []
+        if not f.get("has_ci"):
+            improvements.append("Add CI workflows for linting/tests/smoke checks on each pull request.")
+        if not f.get("has_tests"):
+            improvements.append("Increase automated unit/integration tests for core model and data paths.")
+        if not f.get("has_requirements"):
+            improvements.append("Add and pin dependencies for a reproducible local/CI environment.")
+        if not f.get("has_inference"):
+            improvements.append("Expose a clear inference CLI/API for easier practical usage.")
+        if not f.get("has_validation"):
+            improvements.append("Add richer evaluation/validation metrics and reproducible benchmark scripts.")
+        if not f.get("has_preprocessing"):
+            improvements.append("Provide explicit preprocessing scripts and data-format assumptions.")
+        if not f.get("has_docs"):
+            improvements.append("Expand technical documentation with setup, design rationale, and limitations.")
+        if not improvements:
+            improvements = [
+                "Add deterministic benchmark scripts with fixed seeds and expected outputs.",
+                "Package runtime entry points (CLI or service) for easier deployment.",
+                "Add richer integration tests for end-to-end training/evaluation flows.",
+            ]
+        return improvements[:5]
 
     @staticmethod
     def _hireability_verdict(score_out_of_100: float) -> str:
@@ -176,39 +296,35 @@ class RepositoryEvaluator:
         scores = self._score_categories()
         overall = round(sum(scores.values()) / len(scores) * 10, 1)
         hireability = self._hireability_verdict(overall)
-
-        summary = (
-            "This repository implements a Mixture-of-Experts GPT-style language model training stack "
-            "with data preprocessing, distributed training, inference utilities, and domain validation."
-        )
-
-        strongest = [
-            "Advanced AI stack: MoE architecture, Flash Attention path, and distributed training scripts.",
-            "Substantial data pipeline with preprocessing and token packing scripts.",
-            "Strong evaluation support for training via validation and domain-specific metrics.",
-        ]
-
-        weakest = [
-            "No CI workflow found for automated checks in pull requests.",
-            "Reproducibility depends on environment setup and external datasets/services.",
-            "No dedicated deployment service (API/container) for production inference usage.",
-        ]
-
-        improvements = [
-            "Add CI workflows (lint, unit tests, smoke training/inference checks) to protect code quality.",
-            "Pin dependencies and provide a reproducible environment lockfile/container image.",
-            "Add lightweight end-to-end tests for dataloader -> model -> inference paths.",
-            "Provide benchmark scripts with fixed seeds and expected metrics for reproducibility.",
-            "Package inference as a CLI/API service for real-world usability.",
-        ]
+        summary = self._build_dynamic_summary()
+        strongest = self._derive_strengths()
+        weakest = self._derive_weaknesses()
+        improvements = self._derive_improvements()
 
         maturity = (
-            "advanced"
+            "job-ready"
+            if overall >= 85
+            else "advanced"
             if overall >= 75
             else "intermediate"
             if overall >= 60
             else "beginner"
         )
+        if overall >= 80 and self.findings.get("has_training") and self.findings.get("has_model_arch"):
+            interview_note = (
+                "Strong interview potential: repository shows implementer-level AI code paths; "
+                "candidate should be ready to justify architecture, data, and evaluation decisions."
+            )
+        elif overall >= 65:
+            interview_note = (
+                "Moderate interview potential: technical depth is visible, but reproducibility/testing "
+                "and design-tradeoff explanations may be probed heavily."
+            )
+        else:
+            interview_note = (
+                "Limited interview signal from repository evidence alone; deeper technical discussion may expose gaps "
+                "in experimentation rigor and engineering completeness."
+            )
 
         return {
             "repository_summary": {
@@ -228,7 +344,7 @@ class RepositoryEvaluator:
             },
             "hireability_assessment": {
                 "verdict": hireability,
-                "interview_readiness_note": "Evidence suggests meaningful AI engineering depth, but interview strength depends on ability to explain training/data decisions and reproducibility tradeoffs.",
+                "interview_readiness_note": interview_note,
             },
             "concrete_improvements_ranked_by_impact": [
                 {"rank": i + 1, "improvement": txt} for i, txt in enumerate(improvements)

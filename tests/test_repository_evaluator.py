@@ -7,9 +7,8 @@ from src.scripts.repository_evaluator import RepositoryEvaluator, to_markdown
 
 class RepositoryEvaluatorTests(unittest.TestCase):
     def _create_sample_repo(self) -> Path:
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        root = Path(tmp.name)
+        tmp = self.enterContext(tempfile.TemporaryDirectory())
+        root = Path(tmp)
         (root / "README.md").write_text("# Demo\n", encoding="utf-8")
         (root / "requirements.txt").write_text("torch\n", encoding="utf-8")
         (root / "src").mkdir(parents=True, exist_ok=True)
