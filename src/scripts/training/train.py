@@ -3,6 +3,7 @@ import math
 import warnings
 import os
 import time
+from pathlib import Path
 import wandb
 import torch.nn as nn
 from tqdm import tqdm
@@ -12,7 +13,7 @@ from ...models.model import GPT
 from ..tokenizer import tokenizer
 from ..dataloader import create_phase_dataloaders
 from ...models.model_flash_attn import GPT_FLASH
-from ..helper_funcs import get_base_dir, save_checkpoint, save_checkpoint_async, load_checkpoint
+from ..helper_funcs import get_base_dir, save_checkpoint, save_checkpoint_async, load_checkpoint, upload_compile_cache, download_compile_cache
 from .schedulers import create_phase_scheduler
 from ...models.weight_init import init_gpt_model, count_parameters
 from ..inference import generate
@@ -47,7 +48,7 @@ def validation(model, criterion, val_data, train_step, wandb_run, phase_config):
 def train_phase(
     model, optimizer, scheduler,
     train_data, val_data, wandb_run, phase_config,
-    base_dir, start_step=0,
+    base_dir, start_step=0, compile_cache_dir=None,
 ):
     """
     Train one phase.  Supports exact resumption via the ResumableDataLoader
@@ -114,6 +115,9 @@ def train_phase(
                 scheduler.step()
                 optimizer.zero_grad()
 
+                if optim_step == start_step + 1 and compile_cache_dir is not None:
+                    upload_compile_cache(compile_cache_dir, wandb_run)
+
                 avg_accum_loss = (accum_loss / grad_accumulation_steps).item()  
                 # ── Throughput & hardware metrics ──
                 step_elapsed = time.perf_counter() - step_start_time
@@ -179,26 +183,26 @@ def train_phase(
                     )
 
                     raw = _unwrap(model)
-                    # 1. Python — recursive algorithm (Source Code 45%)
+                    # 1. Python — graph algorithm (Source Code 50%)
                     print(generate(raw,
-                            "def merge_sort(arr):\n    if len(arr) <= 1:\n        return arr\n    mid = len(arr) // 2\n    left =",
+                            "def dijkstra(graph, start):\n    distances = {node: float('inf') for node in graph}\n    distances[start] = 0\n    visited = set()\n    while len(visited) < len(graph):\n        current = min((d, n) for n, d in distances.items() if n not in visited)[1]\n        visited.add(current)\n        for neighbor, weight in graph[current]:",
                             config.device, max_tokens=120, temp=0.3))
-                    # 2. JavaScript — async/await (Source Code 45%)
+                    # 2. C++ — systems programming (Source Code 50%)
                     print(generate(raw,
-                            "async function fetchUserData(userId) {\n  try {\n    const response = await fetch(`/api/users/${userId}`);\n    if (!response.ok)",
+                            "#include <iostream>\n#include <thread>\n#include <mutex>\n\nstd::mutex mtx;\nint shared_counter = 0;\n\nvoid increment(int times) {\n    for (int i = 0; i < times; ++i) {\n        std::lock_guard<std::mutex> lock(mtx);\n        shared_counter++;\n    }\n}\n\nint main() {",
                             config.device, max_tokens=100, temp=0.3))
-                    # 3. Math — step-by-step reasoning (Math/Reasoning 14%)
+                    # 3. Math — clean step-by-step (Math/Reasoning 10% — finemath)
                     print(generate(raw,
-                            "Problem: Solve for x: 2x^2 - 5x - 3 = 0\nStep 1: We use the quadratic formula x = (-b ± √(b²-4ac)) / 2a where a=2, b=-5, c=-3.\nStep 2:",
+                            "To find the area of a triangle with vertices at (1,2), (4,6), and (7,1), we can use the coordinate geometry formula.\n\nArea = (1/2) |x1(y2 - y3) + x2(y3 - y1) + x3(y1 - y2)|\n\nSubstituting the values:",
                             config.device, max_tokens=120, temp=0.2))
-                    # 4. Technical Q&A (Code-Adjacent 17%)
+                    # 4. CS Q&A — StackExchange style (CS/Engineering 22%)
                     print(generate(raw,
-                            "Question: What is the difference between a mutex and a semaphore in concurrent programming?\nAnswer: A mutex (mutual exclusion) is",
+                            "Question: What is the difference between a process and a thread in operating systems?\n\nAnswer: A process is an independent execution unit with its own memory space,",
                             config.device, max_tokens=120, temp=0.4))
-                    # 5. Instruction following (Instruction 5%)
+                    # 5. Code task — OpenCodeInstruct style (CS/Engineering 22%)
                     print(generate(raw,
-                            "Below is a list of three key differences between TCP and UDP protocols:\n1.",
-                            config.device, max_tokens=120, temp=0.4))
+                            "Write a Python function that takes a list of intervals and merges all overlapping intervals.\n\ndef merge_intervals(intervals):\n    if not intervals:\n        return []\n    intervals.sort(key=lambda x: x[0])\n    merged = [intervals[0]]",
+                            config.device, max_tokens=120, temp=0.3))
                     model.train()
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
@@ -265,6 +269,10 @@ if __name__ == '__main__':
     warnings.filterwarnings("ignore")
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    os.environ["TORCHINDUCTOR_FX_GRAPH_CACHE"] = "1"
+    _cache_dir = str(Path.cwd() / ".dynamo_cache")
+    os.makedirs(_cache_dir, exist_ok=True)
+    os.environ["TORCHINDUCTOR_CACHE_DIR"] = _cache_dir
 
     torch.set_float32_matmul_precision('high')       
     torch.backends.cudnn.benchmark = True            
@@ -345,6 +353,8 @@ if __name__ == '__main__':
         print(f"[Scheduler] Remaining steps: {phase_config.total_steps - start_step}")
 
     # ── Compile model ──────────────────────────────────────
+    compile_cache_dir = str(Path.cwd() / ".dynamo_cache")
+    download_compile_cache(compile_cache_dir)
     torch._dynamo.config.capture_scalar_outputs = True
     model = torch.compile(model, mode="max-autotune-no-cudagraphs")
 
@@ -363,6 +373,7 @@ if __name__ == '__main__':
             model, optimizer, scheduler,
             train_data, val_data, wandb_run, phase_config,
             base_dir, start_step=start_step,
+            compile_cache_dir=compile_cache_dir,
         )
     except KeyboardInterrupt:
         pass

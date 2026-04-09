@@ -169,7 +169,7 @@ def _apply_sampling(logits, temp, k, top_p, repetition_penalty, generated_ids):
         cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
         sorted_mask = cumulative_probs - F.softmax(sorted_logits, dim=-1) >= top_p
         sorted_logits[sorted_mask] = float('-inf')
-        scores = sorted_logits.scatter(-1, sorted_indices, sorted_logits)
+        scores = torch.zeros_like(scores).scatter(-1, sorted_indices, sorted_logits)
 
     probs = F.softmax(scores, dim=-1)
     sampled = torch.multinomial(probs, num_samples=1)
@@ -217,8 +217,11 @@ def generate(model, seed_txt, device, max_tokens=500, k=50, temp=0.8,
     _sync_device(device)
     prefill_sec = time.perf_counter() - prefill_start
 
-    start_pos = len(all_prompt_ids) - 1  
-    generated_ids = torch.tensor([all_prompt_ids], device=device, dtype=torch.long)
+    start_pos = len(all_prompt_ids) - 1
+    prompt_len = len(all_prompt_ids)
+    generated_ids = torch.full((1, prompt_len + max_tokens), -1, device=device, dtype=torch.long)
+    generated_ids[0, :prompt_len] = torch.tensor(all_prompt_ids, device=device, dtype=torch.long)
+    gen_idx = prompt_len  
 
     _sync_device(device)
     decode_start = time.perf_counter()
@@ -227,12 +230,14 @@ def generate(model, seed_txt, device, max_tokens=500, k=50, temp=0.8,
             logits = model(predicted_token.view(1, 1), start_pos)
 
         idx = _apply_sampling(
-            logits[:, -1, :], temp, k, top_p, repetition_penalty, generated_ids
+            logits[:, -1, :], temp, k, top_p, repetition_penalty,
+            generated_ids[:, :gen_idx],
         )
 
         idx_item = idx.item()
         sampled_tokens.append(idx_item)
-        generated_ids = torch.cat([generated_ids, idx], dim=-1)
+        generated_ids[0, gen_idx] = idx_item
+        gen_idx += 1
         start_pos += 1
         predicted_token = idx
         if idx_item == tokenizer.eos_token_id:
@@ -326,31 +331,41 @@ def generate_batch(model, prompts, device, max_tokens=500, k=50, temp=0.8,
     _sync_device(device)
     prefill_sec = time.perf_counter() - prefill_start
 
-    generated_ids = torch.full_like(tokens, -1)
+    total_buf_len = max_prompt_len + max_tokens
+    generated_ids = torch.full((batch_size, total_buf_len), -1, device=device, dtype=torch.long)
     for i in range(batch_size):
-        generated_ids[i, padding_lengths[i]:] = tokens[i, padding_lengths[i]:]
+        generated_ids[i, padding_lengths[i]:max_prompt_len] = tokens[i, padding_lengths[i]:]
+    gen_idx = max_prompt_len  
 
     _sync_device(device)
     decode_start = time.perf_counter()
     next_tokens = _apply_sampling(
-        logits[:, -1, :], temp, k, top_p, repetition_penalty, generated_ids
-    )   # (batch, 1)
+        logits[:, -1, :], temp, k, top_p, repetition_penalty,
+        generated_ids[:, :gen_idx],
+    )
 
     all_tokens = [list(encoded[i]) + [next_tokens[i].item()] for i in range(batch_size)]
     finished = [next_tokens[i].item() == tokenizer.eos_token_id for i in range(batch_size)]
-    generated_ids = torch.cat([generated_ids, next_tokens], dim=-1)
+    for i in range(batch_size):
+        generated_ids[i, gen_idx] = next_tokens[i]
+    gen_idx += 1
+
+    frozen_position = [prompt_lengths[i] for i in range(batch_size)]
 
     for step in tqdm(range(1, max_tokens), desc="Batch generation", disable=not show_progress):
         if all(finished):
             break
 
-        start_pos = max_prompt_len + step - 1       
-        kv_len = start_pos + 1                     
+        start_pos = max_prompt_len + step - 1
+        kv_len = start_pos + 1
 
-        step_position_ids = torch.tensor(
-            [[prompt_lengths[i] + step - 1] for i in range(batch_size)],
-            device=device, dtype=torch.long,
-        )
+        step_position_ids = torch.zeros(batch_size, 1, device=device, dtype=torch.long)
+        for i in range(batch_size):
+            if finished[i]:
+                next_tokens[i, 0] = pad_id
+                step_position_ids[i, 0] = frozen_position[i]
+            else:
+                step_position_ids[i, 0] = prompt_lengths[i] + step - 1
 
         kv_mask = _build_kv_mask(padding_lengths, kv_len, device)
 
@@ -361,9 +376,12 @@ def generate_batch(model, prompts, device, max_tokens=500, k=50, temp=0.8,
             )
 
         next_tokens = _apply_sampling(
-            logits[:, -1, :], temp, k, top_p, repetition_penalty, generated_ids
+            logits[:, -1, :], temp, k, top_p, repetition_penalty,
+            generated_ids[:, :gen_idx],
         )
-        generated_ids = torch.cat([generated_ids, next_tokens], dim=-1)
+        for i in range(batch_size):
+            generated_ids[i, gen_idx] = next_tokens[i]
+        gen_idx += 1
 
         for i in range(batch_size):
             if not finished[i]:
@@ -413,7 +431,7 @@ if __name__ == '__main__':
         model = GPT_FLASH(config,device,inference=True)
     else:
         model = GPT(config,device)
-    model.load_state_dict(torch.load("/Users/apple/Documents/project-828/project_828/checkpoints/model_51770.pt",map_location="cpu"))
+    model.load_state_dict(torch.load("./project-828/project_828/checkpoints/model_62000.pt",map_location="cpu"))
     # Reset expert counts from training before inference
     for layer in model.layers:
         if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'reset_expert_counts'):
@@ -421,7 +439,7 @@ if __name__ == '__main__':
     
     print("  SINGLE SEQUENCE INFERENCE")
 
-    seed_txt = "Heres an essay on global warming:\n\n"#"def sliding_window_average(values, window_size):\n    \"\"\"Compute moving averages for a list of numbers.\"\"\"\n    if window_size <= 0:\n        raise ValueError('window_size must be positive')\n    if len(values) < window_size:\n        return []\n    window_sum = sum(values[:window_size])\n    averages = [window_sum / window_size]\n    for i in range(window_size, len(values)):\n        window_sum += values[i] - values[i - window_size]\n        averages.append(window_sum / window_size)\n    return"
+    seed_txt = "def sliding_window_average(values, window_size):\n    \"\"\"Compute moving averages for a list of numbers.\"\"\"\n    if window_size <= 0:\n        raise ValueError('window_size must be positive')\n    if len(values) < window_size:\n        return []\n    window_sum = sum(values[:window_size])\n    averages = [window_sum / window_size]\n    for i in range(window_size, len(values)):\n        window_sum += values[i] - values[i - window_size]\n        averages.append(window_sum / window_size)\n    return"
     generated_text = generate(model,seed_txt,device,max_tokens=250,temp=0.7,top_p=0.9,k=50,repetition_penalty=1.25)
     print(generated_text)
     
@@ -434,29 +452,29 @@ if __name__ == '__main__':
             layer.mlp.reset_expert_counts()
 
     test_prompts = [
-        # 1. Source Code (45%): starcoderdata top-10 languages
-        "def is_valid_parentheses(s: str) -> bool:\n    stack = []\n    pairs = {')': '(', ']': '[', '}': '{'}\n    for ch in s:\n        if ch in '([{':\n            stack.append(ch)\n        elif ch in pairs:\n            if not stack or stack.pop() != pairs[ch]:\n                return False\n    return",
+        # 1. Python — data structures (Source Code 50%, Python 16%)
+        "def lru_cache(capacity):\n    from collections import OrderedDict\n    cache = OrderedDict()\n    def get(key):\n        if key not in cache:\n            return -1\n        cache.move_to_end(key)\n        return cache[key]\n    def put(key, value):",
 
-        # 2. General Knowledge (19%): fineweb-edu + cosmopedia-v2
-        "Chapter 2: Plate Tectonics\n\nEarth's lithosphere is divided into tectonic plates that move slowly over the asthenosphere. At convergent boundaries, one plate may subduct beneath another, which often leads to",
+        # 2. Go — concurrent server (Source Code 50%, Go 3%)
+        "package main\n\nimport (\n    \"fmt\"\n    \"net/http\"\n    \"sync\"\n)\n\ntype SafeCounter struct {\n    mu sync.Mutex\n    v  map[string]int\n}\n\nfunc (c *SafeCounter) Inc(key string) {",
 
-        # 3. Math Reasoning (10%): openmath-instruct-2
-        "Problem: Solve for x in the equation 2x^2 - 5x - 3 = 0.\n\nSolution: We can factor this quadratic as (2x + 1)(x - 3) = 0, so the roots are",
+        # 3. Rust — ownership and borrowing (Source Code 50%, Rust 2%)
+        "fn longest<'a>(x: &'a str, y: &'a str) -> &'a str {\n    if x.len() > y.len() {\n        x\n    } else {\n        y\n    }\n}\n\nfn main() {\n    let string1 = String::from(\"hello world\");\n    let result;",
 
-        # 4. Long-form Math CoT (4%): numina-math-cot
-        "Problem: Evaluate the integral integral from 0 to 1 of (3x^2 + 2x) dx.\n\nReasoning: First, find an antiderivative. The antiderivative of 3x^2 is x^3, and the antiderivative of 2x is x^2. So F(x) = x^3 + x^2. Next, compute F(1) - F(0):",
+        # 4. JavaScript — async patterns (Source Code 50%, JS 7%)
+        "async function fetchWithRetry(url, maxRetries = 3) {\n  for (let attempt = 0; attempt < maxRetries; attempt++) {\n    try {\n      const response = await fetch(url);\n      if (!response.ok) throw new Error(`HTTP ${response.status}`);\n      return await response.json();\n    } catch (err) {",
 
-        # 5. Code-Adjacent Q&A (7%): stack-exchange-preferences
-        "Question: Why does this Python code raise 'dictionary changed size during iteration' when deleting keys in a loop?\n\nAnswer: This happens because the loop is iterating over a live view of the dictionary while mutating it. A safe pattern is to",
+        # 5. General Knowledge — educational (General Knowledge 18%, fineweb-edu-dedup)
+        "In computer networking, the OSI model defines seven layers of communication. The Transport Layer (Layer 4) is responsible for end-to-end communication and flow control. The two main protocols at this layer are TCP and UDP. TCP provides reliable, ordered delivery through",
 
-        # 6. Formal Math Structure (5%): proof-pile-algebraic-stack
-        "Theorem: For all integers n >= 1, the sum 1 + 2 + ... + n equals n(n+1)/2.\nProof (induction): Base case n=1 is immediate. Assume true for n=k, i.e., 1 + ... + k = k(k+1)/2. Then for k+1 we have",
+        # 6. Math — clean reasoning (Math/Reasoning 10%, finemath)
+        "A factory produces items with a 5% defect rate. If a quality inspector randomly selects 20 items, what is the probability that exactly 2 are defective?\n\nUsing the binomial probability formula: P(X=k) = C(n,k) * p^k * (1-p)^(n-k)\nwhere n=20, k=2, p=0.05\n\nFirst, C(20,2) = 20! / (2! * 18!) =",
 
-        # 7. Code Instruction (5%): magicoder-oss-instruct
-        "Instruction: Write a Python function merge_intervals(intervals) that merges overlapping intervals and returns the merged list sorted by start time.\n\nResponse:\n```python",
+        # 7. CS Q&A — StackExchange style (CS/Engineering 22%, stackexchange 10%)
+        "Question: How does garbage collection work in Java compared to manual memory management in C++?\n\nAnswer: In Java, the JVM automatically manages memory through garbage collection. The garbage collector identifies objects that are no longer reachable from any GC root (such as local variables, static fields, or active threads) and",
 
-        # 8. Instruction/Chat (5%): openhermes-2.5
-        "User: I have 2 hours after work and want to start learning Go. Can you give me a practical 7-day beginner plan with one small coding task per day?\nAssistant:"
+        # 8. Code task — OpenCodeInstruct style (CS/Engineering 22%, opencodeinstruct 12%)
+        "Write a function that implements binary search on a sorted array and returns the index of the target element, or -1 if not found.\n\ndef binary_search(arr, target):\n    left, right = 0, len(arr) - 1\n    while left <= right:",
     ]
 
     print(f"Running batched inference on {len(test_prompts)} prompts...\n")

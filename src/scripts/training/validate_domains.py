@@ -120,10 +120,17 @@ def _fmt_openmath(row: Dict[str, Any]) -> Optional[str]:
 
 def _fmt_stackexchange(row: Dict[str, Any]) -> Optional[str]:
     question = row.get("question", "")
-    chosen = row.get("chosen", "")
-    if not question or not chosen or len(chosen) < 50:
+    if not question:
         return None
-    return f"{question}\n\n{chosen}"
+    answers = row.get("answers", [])
+    if not answers:
+        return None
+    # Pick the highest-scored answer by pm_score
+    best = max(answers, key=lambda a: a.get("pm_score", 0) if isinstance(a, dict) else 0)
+    text = best.get("text", "") if isinstance(best, dict) else ""
+    if not text or len(text) < 50:
+        return None
+    return f"{question}\n\n{text}"
 
 
 def _fmt_openhermes(row: Dict[str, Any]) -> Optional[str]:
