@@ -142,3 +142,4 @@ wandb/
 temp.txt
 BUG_REPORT.md
 checkpoints/
+private/*

@@ -54,9 +54,7 @@ from src.models.model_flash_attn import MoE, GPT_FLASH
 from src.scripts.configs.model_config import ModelConfig
 
 
-# ══════════════════════════════════════════════════════════════════════
-# Reference: the ORIGINAL sequential loop-based dispatch (ground truth)
-# ══════════════════════════════════════════════════════════════════════
+# ── SECTION: Reference: the ORIGINAL sequential loop-based dispatch (ground truth) ──
 
 def _moe_forward_original(moe: MoE, x: torch.Tensor) -> torch.Tensor:
     """
@@ -83,9 +81,7 @@ def _moe_forward_original(moe: MoE, x: torch.Tensor) -> torch.Tensor:
     return mlp_out.reshape(inp_shape)
 
 
-# ══════════════════════════════════════════════════════════════════════
-# Config factories
-# ══════════════════════════════════════════════════════════════════════
+# ── SECTION: Config factories ──────────────────────────────────────────────
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 HAS_CUDA = torch.cuda.is_available()
@@ -144,9 +140,7 @@ def _build_pair(cfg, device=None):
     return moe_batched, moe_original
 
 
-# ══════════════════════════════════════════════════════════════════════
-#  SECTION 1: Output equivalence  (batched == original loop)
-# ══════════════════════════════════════════════════════════════════════
+# ── SECTION 1: Output equivalence  (batched == original loop) ──────────────────────
 
 class TestOutputEquivalence:
     """
@@ -277,9 +271,7 @@ class TestOutputEquivalence:
             msg=f"Mismatch: num_experts={num_experts}, topk={topk}")
 
 
-# ══════════════════════════════════════════════════════════════════════
-#  SECTION 2: Gradient equivalence (backward pass correctness)
-# ══════════════════════════════════════════════════════════════════════
+# ── SECTION 2: Gradient equivalence (backward pass correctness) ────────
 
 class TestGradientEquivalence:
     """
@@ -392,9 +384,7 @@ class TestGradientEquivalence:
             )
 
 
-# ══════════════════════════════════════════════════════════════════════
-#  SECTION 3: torch.compile compatibility
-# ══════════════════════════════════════════════════════════════════════
+# ── SECTION 3: torch.compile compatibility ─────────────────────────
 
 class TestTorchCompile:
     """
@@ -492,9 +482,7 @@ class TestTorchCompile:
             assert math.isfinite(l), f"Step {i}: loss = {l} (not finite)"
 
 
-# ══════════════════════════════════════════════════════════════════════
-#  SECTION 4: Edge cases (sort/scatter failure modes)
-# ══════════════════════════════════════════════════════════════════════
+# ── SECTION 4: Edge cases (sort/scatter failure modes) ────────────────────────
 
 class TestEdgeCases:
 
@@ -602,9 +590,7 @@ class TestEdgeCases:
         torch.testing.assert_close(out_b, out_o, atol=1e-2, rtol=5e-2)
 
 
-# ══════════════════════════════════════════════════════════════════════
-#  SECTION 5: Multi-step training simulation
-# ══════════════════════════════════════════════════════════════════════
+# ── SECTION 5: Multi-step training simulation ─────────────────────────
 
 class TestTrainingSimulation:
     """
@@ -729,9 +715,7 @@ class TestTrainingSimulation:
         )
 
 
-# ══════════════════════════════════════════════════════════════════════
-#  SECTION 6: Full model integration
-# ══════════════════════════════════════════════════════════════════════
+# ── SECTION 6: Full model integration ─────────────────────────
 
 class TestFullModelIntegration:
     """
@@ -800,9 +784,7 @@ class TestFullModelIntegration:
         assert math.isfinite(loss.item()), f"Compiled model loss: {loss.item()}"
 
 
-# ══════════════════════════════════════════════════════════════════════
-#  SECTION 7: Expert counting & checkpoint compatibility
-# ══════════════════════════════════════════════════════════════════════
+# ── SECTION 7: Expert counting & checkpoint compatibility ─────────
 
 class TestBookkeeping:
 
@@ -866,9 +848,7 @@ class TestBookkeeping:
             assert 0 <= metrics[f"expert_{i}"] <= 100
 
 
-# ══════════════════════════════════════════════════════════════════════
-#  SECTION 8: Numerical stability under adversarial inputs
-# ══════════════════════════════════════════════════════════════════════
+# ── SECTION 8: Numerical stability under adversarial inputs ───────────
 
 class TestNumericalStability:
 
