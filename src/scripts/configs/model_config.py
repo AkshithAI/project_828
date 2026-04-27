@@ -246,6 +246,168 @@ PHASE_1_CONFIG = PhaseConfig(
 )
 
 # ──────────────────────────────────────────────────────────────
+# Phase 1 Annealing:  Steps 91K → 101K (WSD Decay Window)
+#
+#   OPTION A — Balanced annealing for coding + conversational ability.
+#
+#   Research basis:
+#     • DeepSeek Coder V2: 60% code / 30% NL / 10% math
+#     • Qwen 2.5 Coder:   ~80% code / ~10% general text replay / ~10% math
+#     • SmolLM2 (360M):   Cosmopedia v2 + FineWeb-Edu + Python-Edu
+#     • Llama 3:          Upsamples high-quality domains during annealing
+#     • Key finding: ≥10% general text "replay buffer" prevents
+#       catastrophic forgetting of NL ability during code-heavy annealing.
+#
+#   Changes from stable-phase mix:
+#     - DROPPED opencodeinstruct (12% → 0%) — SFT data format bleed
+#     - DROPPED finemath-3plus   (4%  → 0%) — low quality, format memorisation
+#     - REDUCED stackexchange    (10% → 7%) — cleaned, but still noisy
+#     - BOOSTED source code      (50% → 55%) — lock in coding strength
+#     - BOOSTED fineweb-edu      (18% → 20%) — INCREASE, not decrease
+#     - NEW cosmopedia-v2        (0%  → 7%) — synthetic textbook-quality
+#       content from SmolLM corpus (Mixtral-8x7B-generated). Teaches
+#       structured explanations and pedagogical reasoning.
+#     - NEW wikipedia-en         (0%  → 3%) — dense factual knowledge
+#       anchor used by every major lab. Well-structured expository text.
+#
+#   Category breakdown (weights sum to 100):
+#     Source Code              55%  (10 languages from starcoderdata)
+#     General Knowledge        20%  (fineweb-edu-dedup — educational web)
+#     High-Quality Knowledge   10%  (7% Cosmopedia v2 + 3% Wikipedia EN)
+#     Math/Reasoning            8%  (finemath-4plus only — highest quality)
+#     CS/Engineering            7%  (cleaned StackExchange programming/CS)
+#
+#   To use:  swap dataloader config at step 91,045 when the WSD
+#            scheduler transitions from stable → decay.
+# ──────────────────────────────────────────────────────────────
+PHASE_1_ANNEALING_CONFIG = PhaseConfig(
+    phase_name="phase_1_annealing",
+    phase_num=1,                       # same phase number — WSD continues
+    peak_lr=3e-4,                      # WSD scheduler handles actual LR
+    min_lr=3e-5,
+    warmup_steps=0,                    # no warmup — continuing mid-schedule
+    total_steps=101_726,               # same total — scheduler is step-based
+    scheduler_type="wsd",
+    wsd_stable_frac=0.895,
+    micro_batch_size=37,
+    grad_accum_steps=8,
+    grad_clip=1.0,
+    val_interval=2000,
+    val_steps=500,
+    datasets=[
+        # ── Source Code (55%) — Coding Strength ─────────────
+        DatasetEntry(
+            name="starcoderdata-python",
+            repo_id="bigcode/starcoderdata",
+            weight=14,
+            format_fn="starcoder",
+            data_dir="python",
+        ),
+        DatasetEntry(
+            name="starcoderdata-javascript",
+            repo_id="bigcode/starcoderdata",
+            weight=8,
+            format_fn="starcoder",
+            data_dir="javascript",
+        ),
+        DatasetEntry(
+            name="starcoderdata-java",
+            repo_id="bigcode/starcoderdata",
+            weight=6,
+            format_fn="starcoder",
+            data_dir="java",
+        ),
+        DatasetEntry(
+            name="starcoderdata-typescript",
+            repo_id="bigcode/starcoderdata",
+            weight=4,
+            format_fn="starcoder",
+            data_dir="typescript",
+        ),
+        DatasetEntry(
+            name="starcoderdata-cpp",
+            repo_id="bigcode/starcoderdata",
+            weight=6,
+            format_fn="starcoder",
+            data_dir="cpp",
+        ),
+        DatasetEntry(
+            name="starcoderdata-c",
+            repo_id="bigcode/starcoderdata",
+            weight=4,
+            format_fn="starcoder",
+            data_dir="c",
+        ),
+        DatasetEntry(
+            name="starcoderdata-csharp",
+            repo_id="bigcode/starcoderdata",
+            weight=3,
+            format_fn="starcoder",
+            data_dir="c-sharp",
+        ),
+        DatasetEntry(
+            name="starcoderdata-go",
+            repo_id="bigcode/starcoderdata",
+            weight=4,
+            format_fn="starcoder",
+            data_dir="go",
+        ),
+        DatasetEntry(
+            name="starcoderdata-rust",
+            repo_id="bigcode/starcoderdata",
+            weight=3,
+            format_fn="starcoder",
+            data_dir="rust",
+        ),
+        DatasetEntry(
+            name="starcoderdata-php",
+            repo_id="bigcode/starcoderdata",
+            weight=3,
+            format_fn="starcoder",
+            data_dir="php",
+        ),
+        # ── General Knowledge (20%) — Linguistic Anchor ─────
+        DatasetEntry(
+            name="fineweb-edu-dedup",
+            repo_id="HuggingFaceTB/smollm-corpus",
+            weight=20,
+            format_fn="default",
+            config_name="fineweb-edu-dedup",
+        ),
+        # ── High-Quality Knowledge (10%) — NEW ──────────────
+        DatasetEntry(
+            name="cosmopedia-v2",
+            repo_id="HuggingFaceTB/smollm-corpus",
+            weight=7,
+            format_fn="cosmopedia",
+            config_name="cosmopedia-v2",
+        ),
+        DatasetEntry(
+            name="wikipedia-en",
+            repo_id="wikimedia/wikipedia",
+            weight=3,
+            format_fn="wikipedia",
+            config_name="20231101.en",
+        ),
+        # ── Math/Reasoning (8%) — Only Highest Quality ──────
+        DatasetEntry(
+            name="finemath-4plus",
+            repo_id="HuggingFaceTB/finemath",
+            weight=8,
+            format_fn="finemath",
+            config_name="finemath-4plus",
+        ),
+        # ── CS/Engineering (7%) — Cleaned StackExchange ─────
+        DatasetEntry(
+            name="stackexchange-programming-cs",
+            repo_id="common-pile/stackexchange",
+            weight=7,
+            format_fn="stackexchange_programming_cs",
+        ),
+    ],
+)
+
+# ──────────────────────────────────────────────────────────────
 # Phase 2:  18B tokens  —  Code / Instruction / Replay
 # (Placeholder — user will configure after Phase 1 completes)
 # ──────────────────────────────────────────────────────────────

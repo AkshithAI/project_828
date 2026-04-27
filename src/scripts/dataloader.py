@@ -13,9 +13,8 @@ from typing import Optional, Dict, Any, List, Callable, Tuple
 from dataclasses import dataclass, field, asdict
 
 
-# ═══════════════════════════════════════════════════════════════
+
 #  Format functions  — one per dataset layout
-# ═══════════════════════════════════════════════════════════════
 
 def _fmt_default(row: Dict[str, Any]) -> Optional[str]:
     """Most datasets: use the 'text' column."""
@@ -38,6 +37,30 @@ _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _MULTISPACE_RE = re.compile(r"[ \t]{2,}")
 _MULTIBREAK_RE = re.compile(r"\n{3,}")
 
+# ── StackExchange forum-chrome patterns (sidebar, navigation, metadata) ──
+_SE_FORUM_CHROME_RE = re.compile(
+    r'(?:'
+    # Sidebar metadata lines: "Replies\n18\nViews\n2K"
+    r'(?:^(?:Replies|Views|Votes|Tags|Shares?|Favorites?)\s*$)'
+    r'|(?:^\d+[kKmM]?\s*$)'                       # bare number lines (view/vote counts)
+    # Category headers: "• Introductory Physics Homework Help"
+    r'|(?:^[•\-\*]\s*(?:Introductory|General|Advanced|Beginner)\s+\w+.*(?:Help|Questions?)\s*$)'
+    # Navigation / action links
+    r'|(?:^(?:Improve this (?:question|answer)|Follow|Edited|Share|Flag|Close|Delete)\b.*)'
+    r'|(?:^(?:Related|Linked|Hot Network|Featured on Meta)\s+Questions?\s*$)'
+    r'|(?:^(?:Not the answer|Browse other questions|Ask your own question).*)'
+    # User cards: "answered Jan 5, 2023 at 14:30" / "asked 2 years ago"
+    r'|(?:^(?:answered|asked|edited|modified|viewed)\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|\d).*)'
+    # Badge/reputation lines: "123 gold badges"
+    r'|(?:^\d+\s*(?:gold|silver|bronze)\s+badges?\s*$)'
+    # "Your Answer" section
+    r'|(?:^(?:Your Answer|Post Your Answer|Sign up or log in).*)'
+    r')',
+    re.IGNORECASE | re.MULTILINE
+)
+# LaTeX density: count LaTeX commands like \frac, \int, \sum, \begin{equation}
+_LATEX_COMMAND_RE = re.compile(r'\\(?:frac|int|sum|prod|lim|sqrt|begin|end|left|right|text|mathrm|mathbb|mathcal|alpha|beta|gamma|delta|theta|lambda|sigma|omega|partial|nabla|infty|cdot|times|div|leq|geq|neq|approx|equiv|subset|supset|forall|exists|rightarrow|leftarrow|Rightarrow|Leftarrow)\b')
+
 
 def _clean_html_text(text: str) -> str:
     """Convert basic HTML-like content into plain text while preserving paragraphs."""
@@ -49,6 +72,31 @@ def _clean_html_text(text: str) -> str:
     text = _MULTISPACE_RE.sub(" ", text)
     text = _MULTIBREAK_RE.sub("\n\n", text)
     return text.strip()
+
+
+def _clean_stackexchange_text(text: str) -> str:
+    """Extended cleaning for StackExchange: remove forum chrome on top of HTML cleaning.
+
+    Strips sidebar metadata (Replies/Views/Votes counts), navigation sections
+    (Related Questions, Hot Network Questions), user cards, badge lines, and
+    other structural forum elements that leak into model outputs.
+    """
+    text = _clean_html_text(text)
+    # Remove all forum-chrome lines
+    text = _SE_FORUM_CHROME_RE.sub('', text)
+    # Remove orphan bullet/number lines left behind
+    text = re.sub(r'^[•\-\*]\s*$', '', text, flags=re.MULTILINE)
+    # Collapse resulting whitespace
+    text = _MULTIBREAK_RE.sub('\n\n', text)
+    return text.strip()
+
+
+def _latex_density(text: str) -> float:
+    """Return the fraction of LaTeX commands per 1000 characters."""
+    if not text:
+        return 0.0
+    count = len(_LATEX_COMMAND_RE.findall(text))
+    return count / (len(text) / 1000.0)
 
 
 _TECHNICAL_STACK_SITES = {
@@ -68,7 +116,6 @@ _TECHNICAL_STACK_SITES = {
     "reverseengineering.stackexchange.com",
     "sqa.stackexchange.com",
     "webmasters.stackexchange.com",
-    "tex.stackexchange.com",
 }
 
 _PROGRAMMING_CS_STACK_SITES = {
@@ -201,7 +248,15 @@ _TECHNICAL_STACK_KEYWORDS = (
 )
 
 def _fmt_stackexchange_programming_cs(row: Dict[str, Any]) -> Optional[str]:
-    """common-pile/stackexchange: strict programming and CS-focused sites only."""
+    """common-pile/stackexchange: strict programming and CS-focused sites only.
+
+    Hardened cleaning pipeline:
+      1. Site whitelist — only programming/CS Stack Exchange sites
+      2. Meta-site exclusion
+      3. Full forum-chrome stripping (sidebar, nav, user cards, badges)
+      4. LaTeX-heavy post rejection (>5 commands/1000 chars)
+      5. Minimum length after cleaning (200 chars)
+    """
     text = row.get("text", "")
     if not text or len(text) < 120:
         return None
@@ -214,52 +269,144 @@ def _fmt_stackexchange_programming_cs(row: Dict[str, Any]) -> Optional[str]:
     if not site:
         return None
 
+    # Reject meta sites
     if site.startswith("meta.") or ".meta." in site:
         return None
 
+    # Reject non-programming/CS sites
     if site not in _PROGRAMMING_CS_STACK_SITES and not any(
         keyword in site for keyword in _PROGRAMMING_CS_SITE_KEYWORDS
     ):
         return None
 
-    cleaned = _clean_html_text(text)
-    return cleaned if len(cleaned) >= 120 else None
+    # Reject LaTeX-heavy sites that slipped through the whitelist
+    if any(kw in site for kw in ("tex.", "math.", "physics.", "stats.")):
+        return None
+
+    # Full cleaning: HTML + forum chrome
+    cleaned = _clean_stackexchange_text(text)
+
+    # Reject posts that are too short after cleaning
+    if len(cleaned) < 200:
+        return None
+
+    # Reject LaTeX-heavy posts (>5 commands per 1000 chars)
+    if _latex_density(cleaned) > 5.0:
+        return None
+
+    return cleaned
 
 
 def _fmt_finemath(row: Dict[str, Any]) -> Optional[str]:
     """HuggingFaceTB/finemath: educational math web content.
     Filtered from CommonCrawl using LLM-based quality classifiers.
-    The 'text' column contains math explanations, step-by-step solutions,
-    and educational content with natural formatting (not heavy LaTeX).
+
+    Hardened filters:
+      1. Minimum length 200 chars (was 100)
+      2. Reject extremely LaTeX-heavy docs (>15 commands/1000 chars)
+         — these are typically raw arXiv dumps, not educational content
+      3. Reject docs with broken HTML/encoding artifacts
     """
     text = row.get("text", "")
-    if not text or len(text) < 100:
+    if not text or len(text) < 200:
+        return None
+
+    # Reject broken encoding artifacts
+    if any(marker in text for marker in ('\x00', '\ufffd', '\\x')):
+        return None
+
+    # Reject extremely LaTeX-heavy content (raw academic papers, not educational)
+    if _latex_density(text) > 15.0:
+        return None
+
+    return text
+
+
+# ── OpenCodeInstruct format-bleed prevention ─────────────────────────────
+_OCI_SAMPLE_BLOCK_RE = re.compile(
+    r'(?:\*\*)?Sample\s+(?:Input|Output|Explanation)(?:\*\*)?\s*:?.*',
+    re.IGNORECASE | re.DOTALL
+)
+_OCI_HEADER_RE = re.compile(
+    r'^(?:##?#?\s*)?(?:Example|Input|Output|Constraints?|Note|Explanation)\s*:?\s*$',
+    re.IGNORECASE | re.MULTILINE
+)
+
+
+def _fmt_opencodeinstruct(row: Dict[str, Any]) -> Optional[str]:
+    """nvidia/OpenCodeInstruct: extract ONLY the verified solution code.
+
+    The raw dataset has instruction-response pairs designed for SFT.
+    For pretraining, we strip the instruction template and any
+    'Sample Input/Output' blocks to prevent format contamination.
+    Only the executable Python solution is kept.
+    """
+    solution = row.get("output", "")
+    if not solution:
+        return None
+
+    # Reject failed executions
+    exec_status = row.get("tests_execution_status", "")
+    if exec_status and "fail" in str(exec_status).lower():
+        return None
+
+    # Strip everything after "Sample Input" / "Sample Output" blocks
+    solution = _OCI_SAMPLE_BLOCK_RE.split(solution)[0]
+
+    # Strip trailing markdown headers ("## Example", "## Constraints", etc.)
+    solution = _OCI_HEADER_RE.sub('', solution)
+
+    # Strip trailing markdown code fences if the solution is wrapped
+    solution = solution.strip()
+    if solution.startswith('```python'):
+        solution = solution[len('```python'):]
+    elif solution.startswith('```'):
+        solution = solution[3:]
+    if solution.endswith('```'):
+        solution = solution[:-3]
+
+    solution = solution.strip()
+
+    if len(solution) < 50:
+        return None
+
+    return solution
+
+
+# ── Cosmopedia v2: synthetic textbook-quality content ────────────────────
+
+def _fmt_cosmopedia(row: Dict[str, Any]) -> Optional[str]:
+    """HuggingFaceTB/smollm-corpus (cosmopedia-v2): synthetic educational content.
+
+    Quality filters:
+      1. Minimum 200 chars — skip trivial stubs
+      2. Maximum 50,000 chars — skip runaway generations
+      3. Reject empty/whitespace-only content
+    """
+    text = row.get("text", "")
+    if not text or len(text.strip()) < 200:
+        return None
+    if len(text) > 50_000:
         return None
     return text
 
 
-def _fmt_opencodeinstruct(row: Dict[str, Any]) -> Optional[str]:
-    """nvidia/OpenCodeInstruct: 5M execution-verified Python code
-    instruction pairs. Each sample has:
-      - input: programming task description
-      - output: generated Python solution
-    Solutions have been verified with unit tests.
+# ── Wikipedia EN: dense factual knowledge anchor ─────────────────────────
+
+def _fmt_wikipedia(row: Dict[str, Any]) -> Optional[str]:
+    """wikimedia/wikipedia (20231101.en): cleaned English Wikipedia articles.
+
+    Quality filters:
+      1. Minimum 500 chars — skip disambiguation pages and stubs
+      2. Prepend article title as a natural heading for context
     """
-    task = row.get("input", "")
-    solution = row.get("output", "")
-    if not task and not solution:
+    text = row.get("text", "")
+    title = row.get("title", "")
+    if not text or len(text.strip()) < 500:
         return None
-    exec_status = row.get("tests_execution_status", "")
-    if exec_status and "fail" in str(exec_status).lower():
-        return None
-    parts = []
-    if task:
-        parts.append(task.strip())
-    if solution:
-        parts.append(solution.strip())
-    text = "\n\n" .join(parts)
-    if len(text) < 50:
-        return None
+    # Prepend title as a natural heading for the article
+    if title:
+        return f"{title}\n\n{text}"
     return text
 
 
@@ -269,12 +416,13 @@ FORMAT_FNS: Dict[str, Callable[[Dict[str, Any]], Optional[str]]] = {
     "stackexchange_programming_cs": _fmt_stackexchange_programming_cs,
     "finemath": _fmt_finemath,
     "opencodeinstruct": _fmt_opencodeinstruct,
+    "cosmopedia": _fmt_cosmopedia,
+    "wikipedia": _fmt_wikipedia,
 }
 
 
-# ═══════════════════════════════════════════════════════════════
-#  State containers
-# ═══════════════════════════════════════════════════════════════
+# ── State containers ─────────────────────────
+
 
 @dataclass
 class DataLoaderState:
@@ -375,9 +523,7 @@ class MixerState:
         )
 
 
-# ═══════════════════════════════════════════════════════════════
-#  Shard-aware streaming for fast resume
-# ═══════════════════════════════════════════════════════════════
+#  ── Shard-aware streaming for fast resume ───────────────────────── 
 
 class ShardedStream:
     """
@@ -909,9 +1055,7 @@ class PrefetchedDataLoader:
             _stop.set()  
 
 
-# ═══════════════════════════════════════════════════════════════
-#  Weighted multi-dataset mixer with exact resumption
-# ═══════════════════════════════════════════════════════════════
+# ── Weighted multi-dataset mixer with exact resumption ───────────────────────── 
 
 class WeightedMixerDataset(IterableDataset):
     """
@@ -1135,9 +1279,7 @@ class WeightedMixerDataset(IterableDataset):
 
 
 
-# ═══════════════════════════════════════════════════════════════
-#  Factory: build mixer from a PhaseConfig  (+ optional resume)
-# ═══════════════════════════════════════════════════════════════
+# ── Factory: build mixer from a PhaseConfig  (+ optional resume) ───────────────────────── 
 
 def load_phase_datasets(
     phase_config: PhaseConfig,

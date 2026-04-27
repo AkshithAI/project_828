@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Check system versions to determine the correct Flash Attention prebuilt wheel.
 
