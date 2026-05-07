@@ -249,24 +249,132 @@ PHASE_1_CONFIG = PhaseConfig(
 
 
 # ──────────────────────────────────────────────────────────────
-# Phase 2:  18B tokens  —  Code / Instruction / Replay
-# (Placeholder — user will configure after Phase 1 completes)
+# Phase 2:  30B tokens  —  Code Replay / Educational Code / CS Knowledge
+# ──────────────────────────────────────────────────────────────
+#   CONTEXT: Phase 1 (87B lifetime tokens) produced a strong Python
+#   autocomplete engine but with critical gaps:
+#     - Code understanding is broken (can write code but can't reason about it)
+#     - CS knowledge is shallow/wrong (PUT vs PATCH, BST explanations)
+#     - Non-Python languages degrade (C++ Stack::pop returns front())
+#     - Textbook-mode contamination from Cosmopedia leaking into code context
+#
+#   Phase 2 strategy:
+#     - Drop C, C#, PHP, Java (model has these from Phase 1, not core focus)
+#     - Redistribute weight to CS Knowledge (StackExchange 10%→18%)
+#     - Add educational code dataset (Tiny-Codes, 13 languages) to teach WHY
+#     - Replace Cosmopedia with DCLM-Edu (real web content, not synthetic)
+#     - Drop math datasets (per user decision)
+#
+#   effective_batch = 64 * 8 = 512 seqs
+#   tokens_per_step = 512 * 2048 ≈ 1.05M
+#   total_steps     = 28_600  (~30B tokens)
+#   lifetime tokens = 87B (Phase 1) + 30B (Phase 2) ≈ 117B
+#
+#   Cosine schedule:
+#     warmup:  0 → 999           (1,000 steps)
+#     decay:   1,000 → 28,600    (27,600 steps, smooth cosine decay)
+#
+#   Dataset mix (weights sum to 100):
+#     Code Replay          35%  Python/JS/TS/C++/Go/Rust (core languages only)
+#     Educational Code     15%  Tiny-Codes (multi-lang educational snippets)
+#     CS Knowledge         18%  Cleaned StackExchange programming/CS Q&A
+#     General Knowledge    32%  DCLM-Edu + Wikipedia + FineWeb-Edu
 # ──────────────────────────────────────────────────────────────
 PHASE_2_CONFIG = PhaseConfig(
-    phase_name="phase_2_code",
+    phase_name="phase_2_continued",
     phase_num=2,
-    peak_lr=1e-4,
-    min_lr=1e-5,
-    warmup_steps=500,
-    total_steps=8_600,
+    peak_lr=6e-5,
+    min_lr=6e-6,
+    warmup_steps=1000,
+    total_steps=28_600,
     scheduler_type="cosine",
-    wsd_stable_frac=0.0,           
-    micro_batch_size=32,
+    wsd_stable_frac=0.0,
+    micro_batch_size=64,
     grad_accum_steps=8,
     grad_clip=1.0,
-    val_interval=10000,
-    val_steps=3000,
-    datasets=[],                    # to be filled after Phase 1
+    val_interval=5000,
+    val_steps=500,
+    datasets=[
+        # ── Code Replay (35%) — Prevent catastrophic forgetting ──
+        DatasetEntry(
+            name="starcoderdata-python",
+            repo_id="bigcode/starcoderdata",
+            weight=14,
+            format_fn="starcoder",
+            data_dir="python",
+        ),
+        DatasetEntry(
+            name="starcoderdata-javascript",
+            repo_id="bigcode/starcoderdata",
+            weight=7,
+            format_fn="starcoder",
+            data_dir="javascript",
+        ),
+        DatasetEntry(
+            name="starcoderdata-typescript",
+            repo_id="bigcode/starcoderdata",
+            weight=4,
+            format_fn="starcoder",
+            data_dir="typescript",
+        ),
+        DatasetEntry(
+            name="starcoderdata-cpp",
+            repo_id="bigcode/starcoderdata",
+            weight=5,
+            format_fn="starcoder",
+            data_dir="cpp",
+        ),
+        DatasetEntry(
+            name="starcoderdata-go",
+            repo_id="bigcode/starcoderdata",
+            weight=5,
+            format_fn="starcoder",
+            data_dir="go",
+        ),
+        DatasetEntry(
+            name="starcoderdata-rust",
+            repo_id="bigcode/starcoderdata",
+            weight=5,
+            format_fn="starcoder",
+            data_dir="rust",
+        ),
+        # ── Educational Code (15%) — Teach code reasoning ────────
+        DatasetEntry(
+            name="tiny-codes",
+            repo_id="nampdn-ai/tiny-codes",
+            weight=15,
+            format_fn="tiny_codes",
+            max_epochs=5,
+        ),
+        # ── CS Knowledge (18%) — Fix shallow/wrong CS facts ──────
+        DatasetEntry(
+            name="stackexchange-programming-cs",
+            repo_id="common-pile/stackexchange",
+            weight=18,
+            format_fn="stackexchange_programming_cs",
+        ),
+        # ── General Knowledge (32%) — Grounded factual content ───
+        DatasetEntry(
+            name="dclm-edu",
+            repo_id="HuggingFaceTB/dclm-edu",
+            weight=12,
+            format_fn="dclm_edu",
+        ),
+        DatasetEntry(
+            name="wikipedia-en",
+            repo_id="wikimedia/wikipedia",
+            weight=5,
+            format_fn="wikipedia",
+            config_name="20231101.en",
+        ),
+        DatasetEntry(
+            name="fineweb-edu-dedup",
+            repo_id="HuggingFaceTB/smollm-corpus",
+            weight=10,
+            format_fn="default",
+            config_name="fineweb-edu-dedup",
+        ),
+    ],
 )
 
 

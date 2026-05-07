@@ -252,8 +252,9 @@ def generate(model, seed_txt, device, max_tokens=500, k=50, temp=0.8,
     if was_training:
         model.train()
 
-    print(f"Number of tokens sampled : {len(sampled_tokens)}")
     if report_perf:
+        print(f"Number of tokens sampled : {len(sampled_tokens)}")
+
         generated_tokens = len(sampled_tokens) - len(all_prompt_ids)
         total_sec = prefill_sec + decode_sec
         decode_tps = generated_tokens / max(decode_sec, 1e-9)
