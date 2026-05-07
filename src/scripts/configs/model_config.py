@@ -265,9 +265,9 @@ PHASE_1_CONFIG = PhaseConfig(
 #     - Replace Cosmopedia with DCLM-Edu (real web content, not synthetic)
 #     - Drop math datasets (per user decision)
 #
-#   effective_batch = 64 * 8 = 512 seqs
-#   tokens_per_step = 512 * 2048 ≈ 1.05M
-#   total_steps     = 28_600  (~30B tokens)
+#   effective_batch = 37 * 14 = 518 seqs
+#   tokens_per_step = 518 * 2048 ≈ 1.06M
+#   total_steps     = 28_300  (~30B tokens)
 #   lifetime tokens = 87B (Phase 1) + 30B (Phase 2) ≈ 117B
 #
 #   Cosine schedule:
@@ -286,11 +286,11 @@ PHASE_2_CONFIG = PhaseConfig(
     peak_lr=6e-5,
     min_lr=6e-6,
     warmup_steps=1000,
-    total_steps=28_600,
+    total_steps=28_300,
     scheduler_type="cosine",
     wsd_stable_frac=0.0,
-    micro_batch_size=64,
-    grad_accum_steps=8,
+    micro_batch_size=37,
+    grad_accum_steps=14,
     grad_clip=1.0,
     val_interval=5000,
     val_steps=500,

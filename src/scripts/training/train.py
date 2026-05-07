@@ -186,26 +186,26 @@ def train_phase(
                     )
 
                     raw = _unwrap(model)
-                    # 1. Python — graph algorithm (Source Code 50%)
+                    # 1. Python — code completion (Code Replay 35%)
                     print(generate(raw,
                             "def dijkstra(graph, start):\n    distances = {node: float('inf') for node in graph}\n    distances[start] = 0\n    visited = set()\n    while len(visited) < len(graph):\n        current = min((d, n) for n, d in distances.items() if n not in visited)[1]\n        visited.add(current)\n        for neighbor, weight in graph[current]:",
                             config.device, max_tokens=120, temp=0.3))
-                    # 2. C++ — systems programming (Source Code 50%)
+                    # 2. Code Understanding — explain what code does (Educational Code 15%)
                     print(generate(raw,
-                            "#include <iostream>\n#include <thread>\n#include <mutex>\n\nstd::mutex mtx;\nint shared_counter = 0;\n\nvoid increment(int times) {\n    for (int i = 0; i < times; ++i) {\n        std::lock_guard<std::mutex> lock(mtx);\n        shared_counter++;\n    }\n}\n\nint main() {",
-                            config.device, max_tokens=100, temp=0.3))
-                    # 3. Math — clean step-by-step (Math/Reasoning 10% — finemath)
-                    print(generate(raw,
-                            "To find the area of a triangle with vertices at (1,2), (4,6), and (7,1), we can use the coordinate geometry formula.\n\nArea = (1/2) |x1(y2 - y3) + x2(y3 - y1) + x3(y1 - y2)|\n\nSubstituting the values:",
-                            config.device, max_tokens=120, temp=0.2))
-                    # 4. CS Q&A — StackExchange style (CS/Engineering 22%)
-                    print(generate(raw,
-                            "Question: What is the difference between a process and a thread in operating systems?\n\nAnswer: A process is an independent execution unit with its own memory space,",
-                            config.device, max_tokens=120, temp=0.4))
-                    # 5. Code task — OpenCodeInstruct style (CS/Engineering 22%)
-                    print(generate(raw,
-                            "Write a Python function that takes a list of intervals and merges all overlapping intervals.\n\ndef merge_intervals(intervals):\n    if not intervals:\n        return []\n    intervals.sort(key=lambda x: x[0])\n    merged = [intervals[0]]",
+                            "# What does this function compute?\ndef mystery(n):\n    if n <= 1:\n        return n\n    a, b = 0, 1\n    for _ in range(2, n + 1):\n        a, b = b, a + b\n    return b\n\n# Answer: This function computes the",
                             config.device, max_tokens=120, temp=0.3))
+                    # 3. CS Knowledge — REST API concepts (CS Knowledge 18%)
+                    print(generate(raw,
+                            "Question: What is the difference between PUT and PATCH in RESTful APIs?\n\nAnswer:",
+                            config.device, max_tokens=150, temp=0.4))
+                    # 4. Rust — systems programming (Code Replay 35%)
+                    print(generate(raw,
+                            "use std::collections::HashMap;\n\nfn word_count(text: &str) -> HashMap<&str, usize> {\n    let mut counts = HashMap::new();\n    for word in text.split_whitespace() {",
+                            config.device, max_tokens=100, temp=0.3))
+                    # 5. TypeScript — typed web (Code Replay 35%)
+                    print(generate(raw,
+                            "interface User {\n  id: number;\n  name: string;\n  email: string;\n}\n\nasync function fetchUsers(apiUrl: string): Promise<User[]> {\n  const response = await fetch(apiUrl);\n  if (!response.ok) {",
+                            config.device, max_tokens=100, temp=0.3))
                     model.train()
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
@@ -292,7 +292,7 @@ if __name__ == '__main__':
     count_parameters(model)
 
     # ── Phase selection ────────────────────────────────────
-    phase_config = PHASE_1_CONFIG
+    phase_config = PHASE_2_CONFIG
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -340,13 +340,23 @@ if __name__ == '__main__':
         base_dir, model, optimizer, scheduler, device=config.device
     )
 
-    if saved_phase == 2 and phase_config.phase_num != 2:
-        print("[Train] Checkpoint is from Phase 2 — switching to PHASE_2_CONFIG")
-        phase_config = PHASE_2_CONFIG
-        for pg in optimizer.param_groups:
-            pg["lr"] = phase_config.peak_lr
+    if saved_phase != phase_config.phase_num:
+        print(f"[Train] Phase transition detected: checkpoint is phase {saved_phase}, "
+              f"config is phase {phase_config.phase_num}")
+        # Reset optimizer (clear stale Adam momentum from previous phase)
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=phase_config.peak_lr,
+            betas=(0.9, 0.95),
+            weight_decay=0.1,
+            eps=1e-8,
+        )
+        # Reset step counter — Phase 2 starts from step 0
+        start_step = 0
+        dataloader_state = None
+        print(f"[Train] Fresh optimizer + scheduler for Phase {phase_config.phase_num}")
 
-    if start_step > 0:
+    if start_step > 0 and saved_phase == phase_config.phase_num:
         for group in optimizer.param_groups:
             group.setdefault('initial_lr', phase_config.peak_lr)
         scheduler = create_phase_scheduler(optimizer, phase_config, last_epoch=start_step - 1)

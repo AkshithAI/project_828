@@ -54,44 +54,37 @@ class ValidationDomain:
     split: str = "train"
 
 
-# The 5 macro domain categories matching our data mix
+# The 4 macro domain categories matching our Phase 2 data mix
 VALIDATION_DOMAINS: List[ValidationDomain] = [
     ValidationDomain(
         name="Source Code",
         key="source_code",
         repo_id="bigcode/starcoderdata",
-        weight_pct=45,
+        weight_pct=35,
         format_fn="starcoder",
         data_dir="python",
+    ),
+    ValidationDomain(
+        name="Educational Code",
+        key="educational_code",
+        repo_id="nampdn-ai/tiny-codes",
+        weight_pct=15,
+        format_fn="tiny_codes",
+    ),
+    ValidationDomain(
+        name="CS Knowledge",
+        key="cs_knowledge",
+        repo_id="common-pile/stackexchange",
+        weight_pct=18,
+        format_fn="stackexchange_programming_cs",
     ),
     ValidationDomain(
         name="General Knowledge",
         key="general_knowledge",
         repo_id="HuggingFaceFW/fineweb-edu",
-        weight_pct=19,
+        weight_pct=32,
         format_fn="fineweb_edu",
         config_name="sample-100BT",
-    ),
-    ValidationDomain(
-        name="Math/Reasoning",
-        key="math_reasoning",
-        repo_id="nvidia/OpenMathInstruct-2",
-        weight_pct=14,
-        format_fn="openmath",
-    ),
-    ValidationDomain(
-        name="Code-Adjacent",
-        key="code_adjacent",
-        repo_id="HuggingFaceH4/stack-exchange-preferences",
-        weight_pct=17,
-        format_fn="stackexchange",
-    ),
-    ValidationDomain(
-        name="Instruction",
-        key="instruction",
-        repo_id="teknium/OpenHermes-2.5",
-        weight_pct=5,
-        format_fn="openhermes",
     ),
 ]
 
@@ -110,51 +103,27 @@ def _fmt_fineweb_edu(row: Dict[str, Any]) -> Optional[str]:
     return row.get("text", "") or None
 
 
-def _fmt_openmath(row: Dict[str, Any]) -> Optional[str]:
-    problem = row.get("problem", "")
-    solution = row.get("generated_solution", "")
-    if not problem and not solution:
+def _fmt_tiny_codes(row: Dict[str, Any]) -> Optional[str]:
+    """nampdn-ai/tiny-codes: extract code response for validation."""
+    code = row.get("response", "")
+    if not code or len(code.strip()) < 100:
         return None
-    return f"{problem}\n\n{solution}"
+    return code.strip()
 
 
-def _fmt_stackexchange(row: Dict[str, Any]) -> Optional[str]:
-    question = row.get("question", "")
-    if not question:
+def _fmt_stackexchange_programming_cs(row: Dict[str, Any]) -> Optional[str]:
+    """common-pile/stackexchange: validate on text field."""
+    text = row.get("text", "")
+    if not text or len(text) < 200:
         return None
-    answers = row.get("answers", [])
-    if not answers:
-        return None
-    # Pick the highest-scored answer by pm_score
-    best = max(answers, key=lambda a: a.get("pm_score", 0) if isinstance(a, dict) else 0)
-    text = best.get("text", "") if isinstance(best, dict) else ""
-    if not text or len(text) < 50:
-        return None
-    return f"{question}\n\n{text}"
-
-
-def _fmt_openhermes(row: Dict[str, Any]) -> Optional[str]:
-    conversations = row.get("conversations", [])
-    if not isinstance(conversations, list) or not conversations:
-        return None
-    parts = []
-    for turn in conversations:
-        if not isinstance(turn, dict):
-            continue
-        value = turn.get("value", "")
-        if not value:
-            continue
-        speaker = turn.get("from", "")
-        parts.append(f"{speaker}: {value}" if speaker else value)
-    return "\n\n".join(parts) if parts else None
+    return text
 
 
 FORMAT_FNS: Dict[str, Callable] = {
     "starcoder": _fmt_starcoder,
     "fineweb_edu": _fmt_fineweb_edu,
-    "openmath": _fmt_openmath,
-    "stackexchange": _fmt_stackexchange,
-    "openhermes": _fmt_openhermes,
+    "tiny_codes": _fmt_tiny_codes,
+    "stackexchange_programming_cs": _fmt_stackexchange_programming_cs,
 }
 
 
