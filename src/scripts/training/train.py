@@ -15,7 +15,7 @@ from ..dataloader import create_phase_dataloaders
 from ...models.model_flash_attn import GPT_FLASH
 from ..helper_funcs import (
     get_base_dir, save_checkpoint, save_checkpoint_async,
-    load_checkpoint, upload_compile_cache, download_compile_cache
+    load_checkpoint,
 )
 from .schedulers import create_phase_scheduler
 from ...models.weight_init import init_gpt_model, count_parameters
@@ -51,7 +51,7 @@ def validation(model, criterion, val_data, train_step, wandb_run, phase_config):
 def train_phase(
     model, optimizer, scheduler,
     train_data, val_data, wandb_run, phase_config,
-    base_dir, start_step=0, compile_cache_dir=None,
+    base_dir, start_step=0,
 ):
     """
     Train one phase.  Supports exact resumption via the ResumableDataLoader
@@ -118,8 +118,6 @@ def train_phase(
                 scheduler.step()
                 optimizer.zero_grad()
 
-                if optim_step == start_step + 1 and compile_cache_dir is not None:
-                    upload_compile_cache(compile_cache_dir, wandb_run)
 
                 avg_accum_loss = (accum_loss / grad_accumulation_steps).item()  
                 # ── Throughput & hardware metrics ──
@@ -235,7 +233,7 @@ def train_phase(
                 step_start_time = time.perf_counter()
                 if optim_step >= phase_config.total_steps:
                     print(f"Reached total_steps ({phase_config.total_steps}). Phase complete.")
-                    break
+                    raise KeyboardInterrupt
 
         # Wait for any in-flight async save before exiting
         if _save_thread is not None:
@@ -366,8 +364,6 @@ if __name__ == '__main__':
         print(f"[Scheduler] Remaining steps: {phase_config.total_steps - start_step}")
 
     # ── Compile model ──────────────────────────────────────
-    compile_cache_dir = str(Path.cwd() / ".dynamo_cache")
-    download_compile_cache(compile_cache_dir)
     torch._dynamo.config.capture_scalar_outputs = True
     model = torch.compile(model, mode="max-autotune-no-cudagraphs")
 
@@ -386,7 +382,6 @@ if __name__ == '__main__':
             model, optimizer, scheduler,
             train_data, val_data, wandb_run, phase_config,
             base_dir, start_step=start_step,
-            compile_cache_dir=compile_cache_dir,
         )
     except KeyboardInterrupt:
         pass

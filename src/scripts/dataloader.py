@@ -322,55 +322,6 @@ def _fmt_finemath(row: Dict[str, Any]) -> Optional[str]:
     return text
 
 
-# ── OpenCodeInstruct format-bleed prevention ─────────────────────────────
-_OCI_SAMPLE_BLOCK_RE = re.compile(
-    r'(?:\*\*)?Sample\s+(?:Input|Output|Explanation)(?:\*\*)?\s*:?.*',
-    re.IGNORECASE | re.DOTALL
-)
-_OCI_HEADER_RE = re.compile(
-    r'^(?:##?#?\s*)?(?:Example|Input|Output|Constraints?|Note|Explanation)\s*:?\s*$',
-    re.IGNORECASE | re.MULTILINE
-)
-
-
-def _fmt_opencodeinstruct(row: Dict[str, Any]) -> Optional[str]:
-    """nvidia/OpenCodeInstruct: extract ONLY the verified solution code.
-
-    The raw dataset has instruction-response pairs designed for SFT.
-    For pretraining, we strip the instruction template and any
-    'Sample Input/Output' blocks to prevent format contamination.
-    Only the executable Python solution is kept.
-    """
-    solution = row.get("output", "")
-    if not solution:
-        return None
-
-    # Reject failed executions
-    exec_status = row.get("tests_execution_status", "")
-    if exec_status and "fail" in str(exec_status).lower():
-        return None
-
-    # Strip everything after "Sample Input" / "Sample Output" blocks
-    solution = _OCI_SAMPLE_BLOCK_RE.split(solution)[0]
-
-    # Strip trailing markdown headers ("## Example", "## Constraints", etc.)
-    solution = _OCI_HEADER_RE.sub('', solution)
-
-    # Strip trailing markdown code fences if the solution is wrapped
-    solution = solution.strip()
-    if solution.startswith('```python'):
-        solution = solution[len('```python'):]
-    elif solution.startswith('```'):
-        solution = solution[3:]
-    if solution.endswith('```'):
-        solution = solution[:-3]
-
-    solution = solution.strip()
-
-    if len(solution) < 50:
-        return None
-
-    return solution
 
 
 # ── Cosmopedia v2: synthetic textbook-quality content ────────────────────
@@ -410,103 +361,6 @@ def _fmt_wikipedia(row: Dict[str, Any]) -> Optional[str]:
     return text
 
 
-# ── Python-Edu: highest-quality educational Python from Stack v2 ─────────
-
-# Patterns that indicate config/boilerplate files, not educational code
-_BOILERPLATE_RE = re.compile(
-    r'^(?:'
-    r'# -\*- coding:|#!/usr/bin/env|# AUTO-GENERATED|# DO NOT EDIT'
-    r'|from setuptools import|from distutils|import setuptools'
-    r'|# flake8:|# noqa:|# type: ignore'
-    r'|# pylint:|# pragma:'
-    r').*$',
-    re.MULTILINE
-)
-
-
-def _fmt_python_edu(row: Dict[str, Any]) -> Optional[str]:
-    """HuggingFaceTB/smollm-corpus (python-edu): educational Python files.
-
-    These are Python files from The Stack v2 scored >=4 by HuggingFace's
-    python-edu-scorer model. High educational value = code that teaches
-    patterns, not just runs.
-
-    Quality filters:
-      1. int_score >= 4 (already filtered in dataset, but double-check)
-      2. Minimum 200 chars — skip trivial snippets
-      3. Maximum 100,000 chars — skip generated/vendored files
-      4. Reject boilerplate (setup.py, config files, auto-generated)
-      5. Require at least one function or class definition
-    """
-    text = row.get("text", "")
-    if not text:
-        return None
-
-    score = row.get("int_score", row.get("score", 0))
-    if isinstance(score, float):
-        score = int(score)
-    if score < 4:
-        return None
-
-    text = text.strip()
-    if len(text) < 200 or len(text) > 100_000:
-        return None
-
-    # Reject config/boilerplate files
-    first_500 = text[:500]
-    if len(_BOILERPLATE_RE.findall(first_500)) >= 2:
-        return None
-
-    # Require at least one function or class (actual educational code)
-    if not re.search(r'(?:^def |^class |^async def )', text, re.MULTILINE):
-        return None
-
-    return text
-
-
-# ── Stack-Edu: multi-language educational code ───────────────────────────
-
-def _fmt_stack_edu(row: Dict[str, Any]) -> Optional[str]:
-    """loubnabnl/stack-edu: educational code across multiple languages.
-
-    Filtered from StarCoder2Data using an educational quality scorer.
-    Addresses non-Python language weakness by providing high-quality
-    educational examples in JS, TS, Go, Rust, C++, etc.
-
-    Quality filters:
-      1. educational_score >= 4
-      2. Minimum 200 chars, maximum 100,000 chars
-      3. Reject likely config/data files (JSON, YAML, XML, CSV dumps)
-      4. Require meaningful code content (not just comments or imports)
-    """
-    content = row.get("content", row.get("text", ""))
-    if not content:
-        return None
-
-    score = row.get("educational_score",
-                    row.get("score",
-                    row.get("int_score", 0)))
-    if isinstance(score, float):
-        score = int(score)
-    if score < 4:
-        return None
-
-    content = content.strip()
-    if len(content) < 200 or len(content) > 100_000:
-        return None
-
-    # Reject data files that sneak through (JSON arrays, XML docs, CSV)
-    first_100 = content[:100].strip()
-    if first_100.startswith(('[', '{', '<?xml', '<!DOCTYPE', 'id,')):
-        return None
-
-    # Reject files that are mostly comments/whitespace
-    code_lines = [l for l in content.split('\n')
-                  if l.strip() and not l.strip().startswith(('#', '//', '/*', '*', '--'))]
-    if len(code_lines) < 5:
-        return None
-
-    return content
 
 
 # ── DCLM-Edu: model-filtered web content for factual knowledge ───────────
@@ -605,11 +459,8 @@ FORMAT_FNS: Dict[str, Callable[[Dict[str, Any]], Optional[str]]] = {
     "starcoder": _fmt_starcoder,
     "stackexchange_programming_cs": _fmt_stackexchange_programming_cs,
     "finemath": _fmt_finemath,
-    "opencodeinstruct": _fmt_opencodeinstruct,
     "cosmopedia": _fmt_cosmopedia,
     "wikipedia": _fmt_wikipedia,
-    "python_edu": _fmt_python_edu,
-    "stack_edu": _fmt_stack_edu,
     "tiny_codes": _fmt_tiny_codes,
     "dclm_edu": _fmt_dclm_edu,
 }
