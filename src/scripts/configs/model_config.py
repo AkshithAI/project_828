@@ -292,7 +292,7 @@ PHASE_2_CONFIG = PhaseConfig(
     micro_batch_size=37,
     grad_accum_steps=14,
     grad_clip=1.0,
-    val_interval=5000,
+    val_interval=2000,
     val_steps=500,
     datasets=[
         # ── Code Replay (35%) — Prevent catastrophic forgetting ──
