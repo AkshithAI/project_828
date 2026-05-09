@@ -45,7 +45,7 @@ def validation(model, criterion, val_data, train_step, wandb_run, phase_config):
   wandb_run.log({
       "val/loss": avg_val_loss,
       "val/ppl": math.exp(min(avg_val_loss, 10)),
-  }, step=8*train_step, commit=False)
+  }, step=phase_config.grad_accum_steps * train_step, commit=False)
   return avg_val_loss
 
 def train_phase(
@@ -155,7 +155,7 @@ def train_phase(
                             })
                             moe.reset_expert_counts()
 
-                wandb_run.log(metrics, step=8*optim_step)
+                wandb_run.log(metrics, step=grad_accumulation_steps * optim_step)
                 accum_loss = 0.0
                 micro_count = 0
 
@@ -258,6 +258,28 @@ def train_phase(
         )
         print(f"[Interrupt] Checkpoint saved successfully.")
         raise  
+    except Exception as exc:
+        print(f"\n[CRASH] {type(exc).__name__}: {exc}")
+        print(f"[CRASH] Attempting emergency checkpoint save at optimizer step {optim_step}...")
+        try:
+            # Wait for any in-flight async save first
+            if _save_thread is not None:
+                _save_thread.join(timeout=30)
+            dataloader_state = train_data.get_state()
+            save_checkpoint(
+                base_dir, optim_step,
+                model_data=_unwrap(model).state_dict(),
+                optimizer_data=optimizer.state_dict(),
+                scheduler_data=scheduler.state_dict(),
+                wandb_run=wandb_run,
+                dataloader_state=dataloader_state,
+                meta_data=meta_data,
+                phase=phase_num,
+            )
+            print(f"[CRASH] Emergency checkpoint saved successfully at step {optim_step}.")
+        except Exception as save_exc:
+            print(f"[CRASH] Emergency save FAILED: {save_exc}")
+        raise
 
 
 

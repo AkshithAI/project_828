@@ -760,7 +760,7 @@ def resolve_dataset_files(
 
     matched: List[str] = []
 
-    _DATA_EXTS = (".parquet", ".json", ".jsonl", ".jsonl.zst", ".json.zst")
+    _DATA_EXTS = (".parquet", ".json", ".jsonl", ".jsonl.zst", ".json.zst", ".jsonl.gz")
 
     if ds_entry.data_dir is not None:
         split = ds_entry.split or "train"
@@ -801,6 +801,28 @@ def resolve_dataset_files(
                 f for f in all_files
                 if f.startswith(f"{split}-")
                 and f.endswith(_DATA_EXTS)
+            ]
+        # 4. Any data file in data/ directory (e.g. dclm-edu: data/000_00000.parquet)
+        if not matched:
+            matched = [
+                f for f in all_files
+                if f.startswith("data/")
+                and f.endswith(_DATA_EXTS)
+            ]
+        # 5. Any data file at root (e.g. tiny-codes: part_1_200000.parquet)
+        if not matched:
+            matched = [
+                f for f in all_files
+                if f.endswith(_DATA_EXTS)
+                and "/" not in f
+                and not f.startswith(".")
+            ]
+        # 6. Any data file in subdirectories (e.g. stackexchange: site/documents/*.jsonl.gz)
+        if not matched:
+            matched = [
+                f for f in all_files
+                if f.endswith(_DATA_EXTS)
+                and not f.endswith((".md", ".gitattributes"))
             ]
 
     if not matched:
