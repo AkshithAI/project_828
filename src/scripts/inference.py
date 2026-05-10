@@ -432,7 +432,7 @@ if __name__ == '__main__':
         model = GPT_FLASH(config,device,inference=True)
     else:
         model = GPT(config,device)
-    model.load_state_dict(torch.load("./project-828/project_828/checkpoints/model_00000.pt",map_location="cpu"))
+    model.load_state_dict(torch.load("/Users/apple/Documents/project-828/project_828/checkpoints/model_08000.pt",map_location="cpu"))
     # Reset expert counts from training before inference
     for layer in model.layers:
         if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'reset_expert_counts'):

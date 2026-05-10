@@ -1,5 +1,6 @@
 import torch
 import math
+import random as _random_module
 import threading
 import queue
 import html
@@ -1185,6 +1186,12 @@ class WeightedMixerDataset(IterableDataset):
         self._draw_schedule: List[int] = []     
         for idx, w in enumerate(weights):
             self._draw_schedule.extend([idx] * (w // g))
+        # Deterministic shuffle: interleave datasets within each cycle to
+        # prevent contiguous-block distribution shifts that cause periodic
+        # loss oscillation.  Fixed seed ensures identical schedule across
+        # all invocations — safe for draw_cycle_position-based resumption.
+        _schedule_rng = _random_module.Random(42)
+        _schedule_rng.shuffle(self._draw_schedule)
         self._cycle_len = len(self._draw_schedule)
 
     # ── helpers ───────────────────────────────────────────────
