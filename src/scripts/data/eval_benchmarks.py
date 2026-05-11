@@ -38,6 +38,88 @@ from src.models.model_flash_attn import GPT_FLASH
 
 
 # ═══════════════════════════════════════════════════════════════════
+#  Lightweight generation with early stopping (for CoT benchmarks)
+# ═══════════════════════════════════════════════════════════════════
+
+def _generate_with_early_stop(
+    model, prompt: str, device: str,
+    max_tokens: int = 384,
+    stop_strings: list = None,
+    check_every: int = 8,
+) -> str:
+    """
+    Greedy generation with early stopping on stop_strings.
+
+    Unlike the main generate() function, this:
+      - Uses greedy decoding (argmax, no sampling)
+      - Checks for stop_strings every `check_every` tokens
+      - Returns only the generated text (not the prompt)
+
+    This is ~10-50x faster than generate(max_tokens=1024) for CoT
+    evaluation where answers typically appear within 50-200 tokens.
+    """
+    from src.scripts.inference import (
+        _enable_kv_cache, _disable_kv_cache, _sync_device, _autocast_ctx,
+    )
+
+    if stop_strings is None:
+        stop_strings = []
+
+    was_training = model.training
+    model.eval()
+
+    needs_cache_toggle = not getattr(model, 'inference', False)
+    if needs_cache_toggle:
+        _enable_kv_cache(model)
+    if hasattr(model, 'reset_cache'):
+        model.reset_cache()
+
+    all_prompt_ids = tokenizer.encode(prompt)
+    tokens = torch.tensor(all_prompt_ids[:-1], device=device, dtype=torch.long).unsqueeze(0)
+    predicted_token = torch.tensor(all_prompt_ids[-1], device=device, dtype=torch.long).unsqueeze(0)
+
+    with _autocast_ctx(device):
+        model(tokens, 0)
+
+    start_pos = len(all_prompt_ids) - 1
+    generated_ids = []
+
+    for step in range(max_tokens):
+        with _autocast_ctx(device):
+            logits = model(predicted_token.view(1, 1), start_pos)
+
+        # Greedy (argmax)
+        idx = logits[:, -1, :].argmax(dim=-1)
+        idx_item = idx.item()
+        generated_ids.append(idx_item)
+        start_pos += 1
+        predicted_token = idx
+
+        if idx_item == tokenizer.eos_token_id:
+            break
+
+        # Check stop strings periodically (decoding is expensive, don't do it every token)
+        if stop_strings and (step + 1) % check_every == 0:
+            partial_text = tokenizer.decode(generated_ids)
+            for ss in stop_strings:
+                if ss in partial_text:
+                    # Truncate at the stop string
+                    generated_ids = tokenizer.encode(partial_text[:partial_text.index(ss)])
+                    break
+            else:
+                continue
+            break  # stop string was found
+
+    # Restore model state
+    if needs_cache_toggle:
+        _disable_kv_cache(model)
+    if was_training:
+        model.train()
+
+    return tokenizer.decode(generated_ids)
+
+
+# ═══════════════════════════════════════════════════════════════════
 #  Utilities
 # ═══════════════════════════════════════════════════════════════════
 
@@ -520,13 +602,13 @@ def run_mmlu_pro_cs(
     model: GPT_FLASH,
     device: str = "cuda",
     n_shots: int = 5,
-    max_tokens: int = 1024,
+    max_tokens: int = 384,
 ) -> Dict[str, Any]:
     """
     Run MMLU-Pro CS using the official TIGER-AI-Lab CoT evaluation protocol.
 
     - 5-shot Chain-of-Thought prompting from the validation set
-    - Greedy generation (temp ≈ 0)
+    - Greedy generation with early stopping on "Question:" (official stop token)
     - Answer extraction via the official 3-level regex cascade
     - Output format matches official submission schema
 
@@ -561,6 +643,7 @@ def run_mmlu_pro_cs(
         prompt_ids = tokenizer.encode(prompt)
 
         # Shrink few-shot count until prompt fits in context
+        # Leave room for generation: prompt + max_tokens <= context_len
         max_prompt_len = config.max_context_len - max_tokens
         while len(prompt_ids) >= max_prompt_len and k > 0:
             k -= 1
@@ -575,25 +658,13 @@ def run_mmlu_pro_cs(
             wrong += 1
             continue
 
-        # Reset KV cache for each question
-        if hasattr(model, 'reset_cache'):
-            model.reset_cache()
-        for layer in model.layers:
-            if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'reset_expert_counts'):
-                layer.mlp.reset_expert_counts()
-
-        # Generate (greedy, temp≈0)
+        # Generate with early stopping (stops at "Question:" like official vLLM config)
         try:
-            output = generate(
+            generated_text = _generate_with_early_stop(
                 model, prompt, device,
-                max_tokens=max_tokens, temp=0.01,
-                k=1, top_p=1.0, repetition_penalty=1.0,
-                report_perf=False, show_progress=False,
+                max_tokens=max_tokens,
+                stop_strings=["Question:"],
             )
-            generated_text = output[len(prompt):]
-            # Official stop condition: truncate at "Question:"
-            if "Question:" in generated_text:
-                generated_text = generated_text[:generated_text.index("Question:")]
         except Exception as e:
             generated_text = f"[ERROR: {e}]"
 
