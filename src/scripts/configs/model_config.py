@@ -72,6 +72,7 @@ class PhaseConfig:
     # --- Validation ---
     val_interval: int = 2500              
     val_steps: int = 5000                 
+    eval_suite_interval: int = 0          
 
     # --- Datasets ---
     datasets: List[DatasetEntry] = field(default_factory=list)
@@ -134,6 +135,7 @@ PHASE_1_CONFIG = PhaseConfig(
     grad_clip=1.0,
     val_interval=2000,
     val_steps=500,
+    eval_suite_interval=0,
     datasets=[
         # ── Source Code (55%) — Coding Strength ─────────────
         DatasetEntry(
@@ -294,6 +296,7 @@ PHASE_2_CONFIG = PhaseConfig(
     grad_clip=1.0,
     val_interval=2000,
     val_steps=500,
+    eval_suite_interval=5000,
     datasets=[
         # ── Code Replay (35%) — Prevent catastrophic forgetting ──
         DatasetEntry(

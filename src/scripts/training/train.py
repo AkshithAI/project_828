@@ -51,7 +51,7 @@ def validation(model, criterion, val_data, train_step, wandb_run, phase_config):
 def train_phase(
     model, optimizer, scheduler,
     train_data, val_data, wandb_run, phase_config,
-    base_dir, start_step=0,
+    base_dir, start_step=0, eval_suite_interval=0,
 ):
     """
     Train one phase.  Supports exact resumption via the ResumableDataLoader
@@ -65,6 +65,7 @@ def train_phase(
         phase_config: ``PhaseConfig`` for this phase.
         base_dir:     Checkpoint directory path.
         start_step:   Optimizer step to resume from (0 = fresh).
+        eval_suite_interval: Run eval suite every N optimizer steps (0 = disabled).
     """
     optim_step = start_step
     meta_data = None
@@ -230,6 +231,22 @@ def train_phase(
                         prefetch_loader=train_data,
                     )
 
+                # ── Eval Suite (comprehensive benchmarks) ──
+                if eval_suite_interval > 0 and optim_step % eval_suite_interval == 0:
+                    try:
+                        from ..data.eval_suite import run_training_eval
+                        raw = _unwrap(model)
+                        run_training_eval(
+                            raw, config.device,
+                            wandb_run=wandb_run,
+                            train_step=optim_step,
+                            grad_accum_steps=grad_accumulation_steps,
+                        )
+                        model.train()
+                    except Exception as eval_exc:
+                        print(f"[EvalSuite] Error during eval: {eval_exc}")
+                        model.train()
+
                 step_start_time = time.perf_counter()
                 if optim_step >= phase_config.total_steps:
                     print(f"Reached total_steps ({phase_config.total_steps}). Phase complete.")
@@ -313,6 +330,11 @@ if __name__ == '__main__':
 
     # ── Phase selection ────────────────────────────────────
     phase_config = PHASE_2_CONFIG
+
+    # ── Eval Suite interval ───────────────────────────────
+    eval_suite_interval = phase_config.eval_suite_interval
+    if eval_suite_interval > 0:
+        print(f"[Train] Eval suite will run every {eval_suite_interval} steps")
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -404,6 +426,7 @@ if __name__ == '__main__':
             model, optimizer, scheduler,
             train_data, val_data, wandb_run, phase_config,
             base_dir, start_step=start_step,
+            eval_suite_interval=eval_suite_interval,
         )
     except KeyboardInterrupt:
         pass
