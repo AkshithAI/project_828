@@ -9,7 +9,6 @@ import torch.nn as nn
 from tqdm import tqdm
 from torch.amp import autocast
 from ..configs.model_config import config, PHASE_1_CONFIG, PHASE_2_CONFIG
-from ...models.model import GPT
 from ..tokenizer import tokenizer
 from ..dataloader import create_phase_dataloaders
 from ...models.model_flash_attn import GPT_FLASH
@@ -321,8 +320,7 @@ if __name__ == '__main__':
     base_dir = get_base_dir("checkpoints")
 
     # ── Model ──────────────────────────────────────────────
-    use_flash_attn = True
-    model = GPT_FLASH(config, "cuda") if use_flash_attn else GPT(config, "cuda")
+    model = GPT_FLASH(config, "cuda")
 
     # Initialize model weights
     init_gpt_model(model, config)

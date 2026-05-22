@@ -9,7 +9,6 @@ import math
 from torch.amp import autocast
 import torch.distributed as dist
 import torch.nn as nn
-from ...models.model import GPT
 from ...models.model_flash_attn import GPT_FLASH
 from ...models.weight_init import init_gpt_model, count_parameters
 from ..helper_funcs import get_base_dir
@@ -314,8 +313,7 @@ if __name__ == '__main__':
     base_dir = get_base_dir("checkpoints")
 
     # ── Model ──────────────────────────────────────────────
-    use_flash_attn = True
-    model = GPT_FLASH(config, "cuda") if use_flash_attn else GPT(config, "cuda")
+    model = GPT_FLASH(config, "cuda")
 
     # Initialize model weights
     init_gpt_model(model, config)

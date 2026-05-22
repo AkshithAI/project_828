@@ -1,4 +1,3 @@
-from ..models.model import GPT
 from ..models.model_flash_attn import GPT_FLASH
 from .tokenizer import tokenizer
 from .configs.model_config import config
@@ -427,11 +426,7 @@ if __name__ == '__main__':
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Device used : {device}")
-    use_flash_attn = True
-    if use_flash_attn:
-        model = GPT_FLASH(config,device,inference=True)
-    else:
-        model = GPT(config,device)
+    model = GPT_FLASH(config,device,inference=True)
     model.load_state_dict(torch.load("/Users/apple/Documents/project-828/project_828/checkpoints/model_08000.pt",map_location="cpu"))
     # Reset expert counts from training before inference
     for layer in model.layers:
