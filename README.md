@@ -51,11 +51,11 @@ A Mixture-of-Experts (MoE) transformer implementation featuring a custom GPT-sty
 - **RoPE with YaRN Scaling** - Rotary Position Embeddings with NTK-aware interpolation for context extension
 - **SwiGLU Activation** - Gated activation function with clamping (`limit=7.0`) for numerical stability
 - **DeepSpeed Integration** - ZeRO optimization stages 1-3 for distributed training
-- **Flash Attention 2 Support** - Optional 40% speedup with memory efficiency
+- **Flash Attention 2 Support** - Fully native integration with Flash Attention 2 for optimized memory efficiency
 - **Mixed Precision Training** - BFloat16 for optimal performance
-- **Comprehensive Logging** - Weights & Biases integration with per-layer expert utilization and per-domain validation metrics
+- **Comprehensive Logging** - Weights & Biases integration with per-layer expert utilization, per-domain validation metrics, and live eval reports
 - **Robust Training Pipeline** - Phase-aware training with async checkpointing, data prefetching, and recovery workflows
-- **Domain-Specific Validation** - Per-domain loss/perplexity tracking across 5 macro categories matching the training mix
+- **Lab-Grade Evaluation Suite** - Comprehensive, datamix-aligned validation (MBPP, CRUXEval, Multilingual Completion, CS QA, Domain Perplexity)
 - **NeMo Curator Integration** - Robust data preprocessing pipeline with filtering, cleaning, and deduplication
 - **Best-Fit Bin Packing** - Segment-tree accelerated document packing with CLI, overflow splitting, and HF Hub upload
 
@@ -180,7 +180,14 @@ Instruction:          5%  (openhermes)
 
 ### Phase 2 — Code/Instruction (~18B tokens)
 
-Placeholder — datasets TBD after Phase 1 completes.
+Phase 2 focuses heavily on code generation, reasoning, and factual computer science knowledge with the following target datamix:
+
+| Phase 2 Category | Weight | Target Capability | Aligning Evaluation Benchmark |
+| :--- | :---: | :--- | :--- |
+| **Code Replay** | **35%** | Multi-language generation correctness (Python, JS, TS, C++, Go, Rust) | MBPP & MultiPL-E |
+| **Educational Code** | **15%** | Execution reasoning (predicting input/output of functions) | CRUXEval-O & CRUXEval-I |
+| **CS Knowledge** | **18%** | Multi-domain CS factuality (DSA, networks, databases, systems) | CS-QA Curated Benchmark |
+| **General Knowledge** | **32%** | High-quality prose and educational/factual texts | Held-out Domain Perplexity |
 
 ### Tokenizer
 
@@ -329,17 +336,16 @@ deepspeed --num_gpus=2 src/scripts/training/distributed_training.py \
 project_828/
 ├── src/
 │   ├── models/
-│   │   ├── model.py                # Main GPT model with standard attention
-│   │   ├── model_flash_attn.py     # GPT model with Flash Attention + Q/K Norms
+│   │   ├── model_flash_attn.py     # Unified MoE GPT model with Flash Attention, Q/K Norm, and KV Cache
 │   │   └── weight_init.py          # Model weight initialization
 │   └── scripts/
 │       ├── tokenizer.py            # StarCoder2 tokenizer setup
 │       ├── dataloader.py           # Resumable data loading with state checkpointing
 │       ├── dist_dataloader.py      # Legacy distributed data loading
 │       ├── helper_funcs.py         # Utility functions (sync + async checkpointing, paths)
-│       ├── inference.py            # Inference with KV cache + expert stats
+│       ├── inference.py            # Autoregressive generation with KV cache + routing stats
 │       ├── configs/
-│       │   ├── model_config.py     # Model, Phase, and Dataset configuration
+│       │   ├── model_config.py     # Model, Phase, and Dataset configuration (e.g. eval_suite_interval)
 │       │   └── ds-config.json      # DeepSpeed configuration
 │       ├── training/
 │       │   ├── train.py            # Single GPU phase-based training loop
@@ -350,10 +356,14 @@ project_828/
 │           ├── packing.py          # Best-fit bin packing pipeline
 │           ├── preprocess.py       # NeMo Curator data preprocessing
 │           ├── preprocess.json     # Preprocessing configuration
+│           ├── eval_suite.py       # Datamix-aligned comprehensive evaluation suite
+│           ├── eval_benchmarks.py  # Validation metrics and checkpoint evaluation runner
 │           └── README.md           # Data curation & packing documentation
 ├── tests/
-│   ├── eval_model_30b.py           # 30B-token checkpoint evaluation suite
-│   ├── eval_results_30b.json       # Evaluation results
+│   ├── eval_suite_prompts.py       # Curated multi-language code and CS QA prompts
+│   ├── eval_runner.py              # Evaluator run harness
+│   ├── test_eval_suite.py          # CLI entry point for evaluation runs & checkpoint comparisons
+│   ├── test_phase2_knowledge.py    # Unit tests for CS QA and knowledge validation
 │   └── test_moe_batched_dispatch.py # MoE dispatch correctness tests
 ├── checkpoints/
 ├── requirements.txt
@@ -364,10 +374,36 @@ project_828/
 
 ### Flash Attention Support
 
+The repository utilizes the high-performance Flash Attention implementation (`GPT_FLASH` from `model_flash_attn.py`) unconditionally as its native architecture. This delivers a 40%+ speedup and substantial GPU memory savings during training and inference.
+
 ```python
-# In train.py
-use_flash_attn = True  # Set to True to enable
-model = GPT_FLASH(config, "cuda") if use_flash_attn else GPT(config, "cuda")
+# Unconditional Native Instantiation
+model = GPT_FLASH(config, "cuda")
+```
+
+### Lab-Grade Evaluation Suite
+
+We have built a comprehensive evaluation engine (`eval_suite.py`) to systematically measure and log the model's performance on 5 diverse benchmarks tailored to the training mix:
+
+1. **MBPP Benchmark**: Autoregressive code generation evaluated against test suites in a Python sandbox.
+2. **CRUXEval**: Multi-turn code reasoning and input/output prediction.
+3. **Multilingual Code Completion**: Syntactic and structural code validation across Python, JS, TS, C++, Go, and Rust.
+4. **CS Knowledge QA**: Log-likelihood scoring of domain-specific computer science questions.
+5. **Domain Perplexity**: Cross-entropy perplexity tracking on held-out datamix shards.
+
+The evaluation runner runs automatically at custom checkpoint intervals (`eval_suite_interval` in config) or via CLI for manual evaluation:
+
+```bash
+# Standalone evaluation of a checkpoint on GPU
+python -m tests.test_eval_suite \
+    --checkpoint checkpoints/model_101002.pt \
+    --device cuda \
+    --bench mbpp cruxeval multiple code_completion cs_qa domain_ppl
+
+# Quick CPU-based dry-run/smoke test
+python -m tests.test_eval_suite \
+    --checkpoint checkpoints/model_06767.pt \
+    --device cpu --quick
 ```
 
 ### Key-Value (KV) Cache for Inference
@@ -718,19 +754,15 @@ def swiglu(x, alpha: float = 1.702, limit: float = 7.0):
 
 ---
 
-## Model Variants
+## Model Unified Architecture (`model_flash_attn.py`)
 
-### Standard Attention (`model.py`)
-- Traditional scaled dot-product attention
-- GQA + Attention Sinks
-- Used for debugging
+The repository has transitioned to a single, unified, high-efficiency architecture:
 
-### Flash Attention (`model_flash_attn.py`)
-- Flash Attention 2 implementation (primary)
-- Q/K Normalization
-- KV Cache for inference
-- Batched expert dispatch
-- Used in `train.py` and production
+- **Flash Attention 2**: Native hardware-accelerated attention support.
+- **Q/K Normalization**: Attention stability via pre-attention Query/Key RMSNorm scaling.
+- **KV Cache for Inference**: Fast autoregressive text generation.
+- **Batched Expert Dispatch**: High-performance contiguous memory sort-and-slice MoE dispatch.
+- **Auxiliary-Loss-Free Load Balancing**: Load balancing via dynamic router bias adjustment.
 
 ## Hardware Requirements
 
