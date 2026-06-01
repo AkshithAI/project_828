@@ -304,5 +304,69 @@ def save_checkpoint_async(ckpt_dir, step, model_data, optimizer_data, scheduler_
     return thread
 
 
+def get_gpu_peak_flops(device=None):
+    """
+    Get the peak FLOPS (BF16/FP16 dense) for the current GPU device.
+    Supports common datacenter and consumer GPUs.
+    If no GPU is found or the GPU is unrecognized, returns a sensible default (H200: 989.4e12).
+    """
+    default_flops = 989.4e12  # H200 bf16 peak FLOPS
+    if not torch.cuda.is_available():
+        return default_flops
+        
+    try:
+        if device is None:
+            device = torch.cuda.current_device()
+        device_name = torch.cuda.get_device_name(device).upper()
+        
+        # Mapping common GPU models to their dense FP16/BF16 peak tensor FLOPS
+        gpu_flops_map = {
+            "H200": 989.4e12,
+            "H100": 989.4e12,  # SXM is 989.4e12, PCIe is 756e12
+            "A100": 312e12,
+            "A10G": 125e12,
+            "A30": 165e12,
+            "L40": 362e12,
+            "L4": 121e12,
+            "RTX 4090": 330e12,
+            "RTX 3090": 71e12,
+            "RTX 4080": 197e12,
+            "RTX 3080": 68e12,
+            "V100": 125e12,
+            "T4": 65e12,
+        }
+        
+        # Check for matches
+        for model, flops in gpu_flops_map.items():
+            if model in device_name:
+                # Handle specific H100 PCIe vs SXM distinction if possible
+                if model == "H100" and "PCIE" in device_name:
+                    return 756e12
+                return flops
+                
+        # If not explicitly mapped, check for general architectures or compute capability
+        prop = torch.cuda.get_device_properties(device)
+        major = prop.major
+        minor = prop.minor
+        
+        # Fallback based on compute capability (rough estimations of peak BF16/FP16 FLOPS)
+        if major == 9:  # Hopper
+            return 989.4e12
+        elif major == 8:
+            if minor == 9:  # Ada Lovelace (e.g. L40, RTX 4080/4090 class)
+                return 330e12
+            elif minor == 6:  # Ampere consumer (RTX 30-series)
+                return 71e12
+            elif minor == 0:  # Ampere datacenter (A100)
+                return 312e12
+        elif major == 7:  # Volta/Turing
+            return 125e12
+            
+    except Exception as e:
+        print(f"[get_gpu_peak_flops] Error determining GPU peak flops: {e}")
+        
+    return default_flops
+
+
 if __name__ == '__main__':
     get_base_dir("checkpoints")

@@ -14,7 +14,7 @@ from ..dataloader import create_phase_dataloaders
 from ...models.model_flash_attn import GPT_FLASH
 from ..helper_funcs import (
     get_base_dir, save_checkpoint, save_checkpoint_async,
-    load_checkpoint,
+    load_checkpoint, get_gpu_peak_flops,
 )
 from .schedulers import create_phase_scheduler
 from ...models.weight_init import init_gpt_model, count_parameters
@@ -81,7 +81,7 @@ def train_phase(
     # Estimate model FLOPs per forward pass 
     n_params = sum(p.numel() for p in _unwrap(model).parameters())
     flops_per_token = 6 * n_params  
-    gpu_peak_flops = 989.4e12  # H200 bf16 peak FLOPS
+    gpu_peak_flops = get_gpu_peak_flops(config.device)
 
     # ── Async checkpoint thread handle ──
     _save_thread = None

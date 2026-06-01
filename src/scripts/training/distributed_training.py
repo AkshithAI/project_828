@@ -11,7 +11,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from ...models.model_flash_attn import GPT_FLASH
 from ...models.weight_init import init_gpt_model, count_parameters
-from ..helper_funcs import get_base_dir
+from ..helper_funcs import get_base_dir, get_gpu_peak_flops
 from ..tokenizer import tokenizer
 from ..inference import generate
 from ..dist_dataloader import create_phase_dataloaders
@@ -99,7 +99,7 @@ def train_phase(
     base_model = model_engine.module
     n_params = sum(p.numel() for p in base_model.parameters())
     flops_per_token = 6 * n_params  # 6N per token (fwd + bwd)
-    gpu_peak_flops = 989.4e12  # H200 bf16 peak FLOPS
+    gpu_peak_flops = get_gpu_peak_flops(local_rank)
 
     # ── Loop state ──
     accum_loss = 0.0
