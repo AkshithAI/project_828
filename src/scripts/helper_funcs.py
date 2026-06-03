@@ -1,9 +1,196 @@
 import os
 import copy
+import time
+import logging
 import threading
 import torch
 import wandb
 from pathlib import Path
+
+
+# ── Training Logger ──────────────────────────────────────────────────────────
+
+def _setup_training_logger(name: str = "training", log_dir: str = None) -> logging.Logger:
+    """Create a structured logger for training events.
+    
+    Logs to both console (INFO) and a file (DEBUG) if log_dir is provided.
+    Uses a structured format with timestamps, component tags, and event types.
+    """
+    logger = logging.getLogger(name)
+    if logger.handlers:  # Avoid duplicate handlers on re-import
+        return logger
+    
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    
+    fmt = logging.Formatter(
+        "%(asctime)s | %(levelname)-5s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    
+    # Console handler (INFO+)
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(fmt)
+    logger.addHandler(ch)
+    
+    # File handler (DEBUG+) if log_dir specified
+    if log_dir is not None:
+        os.makedirs(log_dir, exist_ok=True)
+        fh = logging.FileHandler(
+            os.path.join(log_dir, "training.log"), mode="a", encoding="utf-8",
+        )
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(fmt)
+        logger.addHandler(fh)
+    
+    return logger
+
+
+class TrainingLogger:
+    """Structured logger for training lifecycle events.
+    
+    Tracks:
+      - Checkpoint loading (which file, which step, which phase)
+      - Checkpoint saving (disk write timing, file sizes)
+      - Artifact uploads (start, completion, verification, failures)
+      - Prefetch lifecycle (pause/resume during saves)
+      - Phase transitions
+    
+    Usage:
+        tlog = TrainingLogger(log_dir="checkpoints")
+        tlog.log_checkpoint_loaded(step=50000, phase=1, path="/checkpoints/model_50000.pt")
+        tlog.log_save_started(step=51000, is_async=True)
+        tlog.log_files_written(step=51000, paths=[...], elapsed=2.3)
+        tlog.log_artifact_uploaded(step=51000, artifact_name="model-checkpoint-051000")
+    """
+    
+    def __init__(self, log_dir: str = None, name: str = "training"):
+        self.logger = _setup_training_logger(name, log_dir)
+        self._artifact_status = {}  # step -> {status, timestamp, error}
+        self._lock = threading.Lock()
+    
+    # ── Checkpoint Loading ──
+    
+    def log_checkpoint_loaded(self, step: int, phase: int, path: str):
+        self.logger.info(
+            f"[LOAD] Loaded checkpoint | step={step} phase={phase} | {path}"
+        )
+    
+    def log_no_checkpoint(self):
+        self.logger.info("[LOAD] No checkpoint found — starting from scratch")
+    
+    def log_phase_transition(self, from_phase: int, to_phase: int, step: int):
+        self.logger.warning(
+            f"[PHASE] Phase transition detected | "
+            f"checkpoint_phase={from_phase} → config_phase={to_phase} | "
+            f"Resetting optimizer + step counter"
+        )
+    
+    # ── Checkpoint Saving ──
+    
+    def log_save_started(self, step: int, is_async: bool):
+        mode = "ASYNC" if is_async else "SYNC"
+        self.logger.info(f"[SAVE] {mode} save started | step={step}")
+        with self._lock:
+            self._artifact_status[step] = {
+                "status": "saving", "start_time": time.time(), "error": None,
+            }
+    
+    def log_cpu_snapshot(self, step: int, elapsed: float):
+        self.logger.info(
+            f"[SAVE] CPU snapshot complete | step={step} | took {elapsed:.2f}s"
+        )
+    
+    def log_files_written(self, step: int, paths: list, elapsed: float):
+        sizes = []
+        for p in paths:
+            if os.path.exists(p):
+                sz = os.path.getsize(p) / (1024 * 1024)
+                sizes.append(f"{os.path.basename(p)}={sz:.1f}MB")
+        self.logger.info(
+            f"[SAVE] Files written | step={step} | {', '.join(sizes)} | took {elapsed:.2f}s"
+        )
+    
+    def log_sync_fallback(self, step: int, avail_gb: float):
+        self.logger.warning(
+            f"[SAVE] Low memory fallback to SYNC | step={step} | "
+            f"available={avail_gb:.1f}GB (need 5GB)"
+        )
+    
+    # ── Artifact Upload ──
+    
+    def log_artifact_upload_started(self, step: int, artifact_name: str):
+        self.logger.info(
+            f"[ARTIFACT] Upload started | step={step} | name={artifact_name}"
+        )
+    
+    def log_artifact_upload_complete(self, step: int, artifact_name: str, elapsed: float):
+        self.logger.info(
+            f"[ARTIFACT] Upload verified | step={step} | "
+            f"name={artifact_name} | took {elapsed:.1f}s"
+        )
+        with self._lock:
+            self._artifact_status[step] = {
+                "status": "uploaded", "end_time": time.time(), "error": None,
+            }
+    
+    def log_artifact_upload_failed(self, step: int, artifact_name: str, error: str):
+        self.logger.error(
+            f"[ARTIFACT] Upload FAILED | step={step} | "
+            f"name={artifact_name} | error={error}"
+        )
+        with self._lock:
+            self._artifact_status[step] = {
+                "status": "failed", "end_time": time.time(), "error": error,
+            }
+    
+    def log_save_complete(self, step: int, is_async: bool, total_elapsed: float):
+        mode = "ASYNC" if is_async else "SYNC"
+        self.logger.info(
+            f"[SAVE] {mode} save complete | step={step} | total {total_elapsed:.1f}s"
+        )
+    
+    def log_save_error(self, step: int, error: Exception):
+        self.logger.error(
+            f"[SAVE] Save FAILED | step={step} | {type(error).__name__}: {error}",
+            exc_info=True,
+        )
+    
+    # ── Prefetch ──
+    
+    def log_prefetch_paused(self, step: int):
+        self.logger.debug(f"[PREFETCH] Paused for checkpoint | step={step}")
+    
+    def log_prefetch_resumed(self, step: int):
+        self.logger.debug(f"[PREFETCH] Resumed after snapshot | step={step}")
+    
+    # ── Status Query ──
+    
+    def get_artifact_status(self, step: int) -> dict:
+        with self._lock:
+            return self._artifact_status.get(step, {"status": "unknown"})
+
+    def flush(self):
+        """Flush all logger handlers to ensure logs are written to disk.
+        
+        Call this on interrupt, crash, or checkpoint completion to guarantee
+        the training.log file is up-to-date.
+        """
+        for handler in self.logger.handlers:
+            handler.flush()
+
+
+# Module-level logger instance (initialized lazily)
+_tlog: TrainingLogger = None
+
+
+def get_training_logger(log_dir: str = None) -> TrainingLogger:
+    """Get or create the singleton TrainingLogger."""
+    global _tlog
+    if _tlog is None:
+        _tlog = TrainingLogger(log_dir=log_dir)
+    return _tlog
 
 def get_base_dir(sub_folder : str):
     """
@@ -155,6 +342,9 @@ def save_checkpoint(ckpt_dir, step, model_data, optimizer_data, scheduler_data, 
     Returns:
         None
     """
+    tlog = get_training_logger()
+    t0 = time.perf_counter()
+
     os.makedirs(ckpt_dir, exist_ok=True)
     model_path = os.path.join(ckpt_dir, f"model_{step:05d}.pt")
     optimizer_path = os.path.join(ckpt_dir, f"optim_{step:05d}.pt")
@@ -166,23 +356,43 @@ def save_checkpoint(ckpt_dir, step, model_data, optimizer_data, scheduler_data, 
     torch.save(scheduler_data, scheduler_path)
     
     # Save dataloader state (inject phase number for resume detection)
+    saved_paths = [model_path, optimizer_path, scheduler_path]
     if dataloader_state is not None:
         dataloader_state["phase"] = phase
         torch.save(dataloader_state, dataloader_path)
+        saved_paths.append(dataloader_path)
         ds_states = dataloader_state.get("dataset_states", {})
         total_docs = sum(s.get("documents_processed", 0) for s in ds_states.values())
-        print(f"[Checkpoint] Saved mixer state (phase {phase}): "
-              f"{dataloader_state.get('samples_yielded', 0)} samples, "
-              f"{total_docs} docs across {len(ds_states)} datasets")
+        tlog.logger.info(
+            f"[SAVE] Mixer state (phase {phase}): "
+            f"{dataloader_state.get('samples_yielded', 0)} samples, "
+            f"{total_docs} docs across {len(ds_states)} datasets"
+        )
 
-    art_name = f"model-checkpoint-test-{step:06d}" 
-    artifact = wandb.Artifact(art_name, type="model")    
+    disk_elapsed = time.perf_counter() - t0
+    tlog.log_files_written(step, saved_paths, disk_elapsed)
+
+    # ── Upload to wandb ──
+    art_name = f"model-checkpoint-{step:06d}" 
+    artifact = wandb.Artifact(art_name, type="model")
     artifact.add_file(model_path)
     artifact.add_file(optimizer_path)
     artifact.add_file(scheduler_path)
     if dataloader_state is not None and os.path.exists(dataloader_path):
         artifact.add_file(dataloader_path)
-    wandb_run.log_artifact(artifact)
+
+    tlog.log_artifact_upload_started(step, art_name)
+    upload_t0 = time.perf_counter()
+    try:
+        wandb_run.log_artifact(artifact)
+        # CRITICAL FIX: Wait for the upload to actually complete.
+        # Without this, wandb starts an async HTTP upload that can be
+        # silently killed if the process exits before it finishes.
+        artifact.wait()
+        upload_elapsed = time.perf_counter() - upload_t0
+        tlog.log_artifact_upload_complete(step, art_name, upload_elapsed)
+    except Exception as e:
+        tlog.log_artifact_upload_failed(step, art_name, str(e))
 
 
 # ── Async Checkpoint Saving ──────────────────────────────────────────────────
@@ -245,6 +455,12 @@ def save_checkpoint_async(ckpt_dir, step, model_data, optimizer_data, scheduler_
     5. Returns the thread handle so the caller can ``.join()`` before the
        next save to prevent overlapping writes.
     
+    IMPORTANT: The save thread is NOT a daemon thread (daemon=False).
+    This ensures that if the main thread exits (crash, interrupt), the
+    save thread will complete its disk write + wandb upload before the
+    process terminates. Combined with artifact.wait() in save_checkpoint,
+    this guarantees checkpoint integrity.
+    
     Args:
         Same as ``save_checkpoint``, plus:
         prefetch_loader: Optional ``PrefetchedDataLoader`` — its prefetch
@@ -255,22 +471,24 @@ def save_checkpoint_async(ckpt_dir, step, model_data, optimizer_data, scheduler_
         threading.Thread | None: The background save thread, or ``None``
         if a synchronous fallback was used (nothing to join).
     """
-    import time
+    tlog = get_training_logger()
 
     # ── Safety: check available CPU memory ────────────────────────────────
     avail_gb = _available_cpu_memory_gb()
     if avail_gb is not None and avail_gb < _MIN_ASYNC_SAVE_MEMORY_GB:
-        print(f"[Checkpoint] WARNING: Low CPU memory ({avail_gb:.1f} GB available, "
-              f"{_MIN_ASYNC_SAVE_MEMORY_GB:.0f} GB required). "
-              f"Falling back to synchronous save at step {step}.")
+        tlog.log_sync_fallback(step, avail_gb)
+        tlog.log_save_started(step, is_async=False)
         save_checkpoint(
             ckpt_dir, step, model_data, optimizer_data, scheduler_data,
             wandb_run, dataloader_state, meta_data, phase,
         )
+        tlog.log_save_complete(step, is_async=False,
+                              total_elapsed=0.0)  # timing already in save_checkpoint
         return None  # no background thread
 
     # ── Step 1: Pause prefetch to avoid CPU / memory contention ───────────
     if prefetch_loader is not None:
+        tlog.log_prefetch_paused(step)
         prefetch_loader.pause_prefetch()
 
     try:
@@ -282,24 +500,32 @@ def save_checkpoint_async(ckpt_dir, step, model_data, optimizer_data, scheduler_
         dl_cpu = copy.deepcopy(dataloader_state) if dataloader_state is not None else None
 
         elapsed = time.perf_counter() - t0
-        print(f"[Checkpoint] CPU snapshot took {elapsed:.2f}s (step {step})")
+        tlog.log_cpu_snapshot(step, elapsed)
     finally:
         # ── Always resume prefetch, even if the snapshot fails ────────────
         if prefetch_loader is not None:
             prefetch_loader.resume_prefetch()
+            tlog.log_prefetch_resumed(step)
 
     # ── Step 2: Save in background thread (I/O-bound, low CPU contention) ─
+    tlog.log_save_started(step, is_async=True)
+    save_t0 = time.perf_counter()
+
     def _save():
         try:
             save_checkpoint(
                 ckpt_dir, step, model_cpu, optim_cpu, sched_cpu,
                 wandb_run, dl_cpu, meta_data, phase,
             )
-            print(f"[Checkpoint] Async save completed (step {step})")
+            total = time.perf_counter() - save_t0
+            tlog.log_save_complete(step, is_async=True, total_elapsed=total)
         except Exception as e:
-            print(f"[Checkpoint] ERROR in async save (step {step}): {e}")
+            tlog.log_save_error(step, e)
 
-    thread = threading.Thread(target=_save, daemon=True)
+    # CRITICAL FIX: daemon=False ensures the save thread completes even
+    # if the main thread exits. This prevents silent checkpoint loss.
+    thread = threading.Thread(target=_save, daemon=False,
+                              name=f"checkpoint-save-{step}")
     thread.start()
     return thread
 

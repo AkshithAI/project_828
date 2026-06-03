@@ -250,51 +250,38 @@ PHASE_1_CONFIG = PhaseConfig(
 )
 
 
-# ──────────────────────────────────────────────────────────────
-# Phase 2:  30B tokens  —  Code Replay / Educational Code / CS Knowledge
-# ──────────────────────────────────────────────────────────────
-#   CONTEXT: Phase 1 (87B lifetime tokens) produced a strong Python
-#   autocomplete engine but with critical gaps:
-#     - Code understanding is broken (can write code but can't reason about it)
-#     - CS knowledge is shallow/wrong (PUT vs PATCH, BST explanations)
-#     - Non-Python languages degrade (C++ Stack::pop returns front())
-#     - Textbook-mode contamination from Cosmopedia leaking into code context
+# ──────────────────────────────────────────────────────────
+# Phase 2 — Continued pre-training (code-heavy mix)
 #
-#   Phase 2 strategy:
-#     - Drop C, C#, PHP, Java (model has these from Phase 1, not core focus)
-#     - Redistribute weight to CS Knowledge (StackExchange 10%→18%)
-#     - Add educational code dataset (Tiny-Codes, 13 languages) to teach WHY
-#     - Replace Cosmopedia with DCLM-Edu (real web content, not synthetic)
-#     - Drop math datasets (per user decision)
+#   Purpose: Strengthen code + add CS knowledge depth.
+#   Resumes from Phase 1 checkpoint (model_101002.pt).
 #
-#   Hardware transition: H200 → H100 80GB at step 6,767
-#     Steps 0–9,272:      micro_batch=24, tokens = 9,272 × 24 × 22 × 2048 ≈ 10.03B
-#     Steps 9,273–28,000: micro_batch=25, tokens = 17,728 × 25 × 22 × 2048 ≈ 19.97B
-#
-#   effective_batch = 25 * 22 = 550 seqs  (post-switch)
+#   Hardware: H100 80GB
+#   effective_batch = 25 * 22 = 550 seqs
 #   tokens_per_step = 550 * 2048 ≈ 1.13M
 #   total_steps     = 28_000  (~30B tokens)
 #   lifetime tokens = 87B (Phase 1) + 30B (Phase 2) ≈ 117B
 #
-#   Cosine schedule:
-#     warmup:  0 → 999           (1,000 steps)
-#     decay:   1,000 → 28,000    (26,005 steps, smooth cosine decay)
+#   WSD schedule (MiniCPM-style):
+#     warmup:  0 → 1,999           (2,000 steps)
+#     stable:  2,000 → 23,279      (21,280 steps at peak LR)
+#     decay:   23,280 → 28,000     (4,720 steps cosine → min_lr)
 #
 #   Dataset mix (weights sum to 100):
-#     Code Replay          35%  Python/JS/TS/C++/Go/Rust (core languages only)
-#     Educational Code     15%  Tiny-Codes (multi-lang educational snippets)
-#     CS Knowledge         18%  Cleaned StackExchange programming/CS Q&A
-#     General Knowledge    32%  DCLM-Edu + Wikipedia + FineWeb-Edu
-# ──────────────────────────────────────────────────────────────
+#     Source Code          56%  Python/JS/Java/TS/C++/Go/Rust
+#     Educational Code      9%  Tiny-Codes (max_epochs=2)
+#     CS Knowledge         17%  StackExchange (12) + DCLM-Edu (5)
+#     General Knowledge    18%  FineWeb-Edu (15) + Wikipedia (3)
+# ──────────────────────────────────────────────────────────
 PHASE_2_CONFIG = PhaseConfig(
     phase_name="phase_2_continued",
     phase_num=2,
-    peak_lr=6e-5,
-    min_lr=6e-6,
-    warmup_steps=1000,
+    peak_lr=4e-5,
+    min_lr=4e-6,
+    warmup_steps=2000,
     total_steps=28_000,
-    scheduler_type="cosine",
-    wsd_stable_frac=0.0,
+    scheduler_type="wsd",
+    wsd_stable_frac=0.76,
     micro_batch_size=25,
     grad_accum_steps=22,
     grad_clip=1.0,
@@ -302,32 +289,39 @@ PHASE_2_CONFIG = PhaseConfig(
     val_steps=500,
     eval_suite_interval=5000,
     datasets=[
-        # ── Code Replay (35%) — Prevent catastrophic forgetting ──
+        # ── Source Code (56%) ─────────────────────────────────
         DatasetEntry(
             name="starcoderdata-python",
             repo_id="bigcode/starcoderdata",
-            weight=14,
+            weight=20,
             format_fn="starcoder",
             data_dir="python",
         ),
         DatasetEntry(
             name="starcoderdata-javascript",
             repo_id="bigcode/starcoderdata",
-            weight=7,
+            weight=8,
             format_fn="starcoder",
             data_dir="javascript",
         ),
         DatasetEntry(
+            name="starcoderdata-java",
+            repo_id="bigcode/starcoderdata",
+            weight=7,
+            format_fn="starcoder",
+            data_dir="java",
+        ),
+        DatasetEntry(
             name="starcoderdata-typescript",
             repo_id="bigcode/starcoderdata",
-            weight=4,
+            weight=5,
             format_fn="starcoder",
             data_dir="typescript",
         ),
         DatasetEntry(
             name="starcoderdata-cpp",
             repo_id="bigcode/starcoderdata",
-            weight=5,
+            weight=6,
             format_fn="starcoder",
             data_dir="cpp",
         ),
@@ -345,41 +339,41 @@ PHASE_2_CONFIG = PhaseConfig(
             format_fn="starcoder",
             data_dir="rust",
         ),
-        # ── Educational Code (15%) — Teach code reasoning ────────
+        # ── Educational Code (9%) — Teach code reasoning ─────
         DatasetEntry(
             name="tiny-codes",
             repo_id="nampdn-ai/tiny-codes",
-            weight=15,
+            weight=9,
             format_fn="tiny_codes",
-            max_epochs=5,
+            max_epochs=2,
         ),
-        # ── CS Knowledge (18%) — Fix shallow/wrong CS facts ──────
+        # ── CS Knowledge (17%) ────────────────────────────────
         DatasetEntry(
             name="stackexchange-programming-cs",
             repo_id="common-pile/stackexchange",
-            weight=18,
+            weight=12,
             format_fn="stackexchange_programming_cs",
         ),
-        # ── General Knowledge (32%) — Grounded factual content ───
         DatasetEntry(
             name="dclm-edu",
             repo_id="HuggingFaceTB/dclm-edu",
-            weight=12,
+            weight=5,
             format_fn="dclm_edu",
+        ),
+        # ── General Knowledge (18%) ───────────────────────────
+        DatasetEntry(
+            name="fineweb-edu-dedup",
+            repo_id="HuggingFaceTB/smollm-corpus",
+            weight=15,
+            format_fn="default",
+            config_name="fineweb-edu-dedup",
         ),
         DatasetEntry(
             name="wikipedia-en",
             repo_id="wikimedia/wikipedia",
-            weight=5,
+            weight=3,
             format_fn="wikipedia",
             config_name="20231101.en",
-        ),
-        DatasetEntry(
-            name="fineweb-edu-dedup",
-            repo_id="HuggingFaceTB/smollm-corpus",
-            weight=10,
-            format_fn="default",
-            config_name="fineweb-edu-dedup",
         ),
     ],
 )

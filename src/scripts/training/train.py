@@ -14,7 +14,7 @@ from ..dataloader import create_phase_dataloaders
 from ...models.model_flash_attn import GPT_FLASH
 from ..helper_funcs import (
     get_base_dir, save_checkpoint, save_checkpoint_async,
-    load_checkpoint, get_gpu_peak_flops,
+    load_checkpoint, get_gpu_peak_flops, get_training_logger,
 )
 from .schedulers import create_phase_scheduler
 from ...models.weight_init import init_gpt_model, count_parameters
@@ -22,34 +22,9 @@ from ..inference import generate
 from .validate_domains import validate_domains
 
 
-@torch.inference_mode()
-def validation(model, criterion, val_data, train_step, wandb_run, phase_config):
-  model.eval()
-  total_val_loss = 0
-  steps = 0
-  for batch in val_data:
-    with autocast(device_type="cuda", dtype=torch.bfloat16):
-        batch = batch.to(config.device, non_blocking=True).long()
-        labels = batch[:, :-1].contiguous()
-        targets = batch[:, 1:].contiguous()
-        logits = model(labels)
-        val_loss = criterion(logits.view(-1, logits.shape[-1]), targets.view(-1))
-    steps += 1
-    if (steps + 1) % 1000 == 0:
-        print(f"Val Step: {steps+1}, Loss: {val_loss.item():.4f}")
-    total_val_loss += val_loss.item()
-    if steps == phase_config.val_steps:
-      break
-  avg_val_loss = total_val_loss / max(1, steps)
-  wandb_run.log({
-      "val/loss": avg_val_loss,
-      "val/ppl": math.exp(min(avg_val_loss, 10)),
-  }, step=phase_config.grad_accum_steps * train_step, commit=False)
-  return avg_val_loss
-
 def train_phase(
     model, optimizer, scheduler,
-    train_data, val_data, wandb_run, phase_config,
+    train_data, wandb_run, phase_config,
     base_dir, start_step=0, eval_suite_interval=0,
 ):
     """
@@ -59,7 +34,6 @@ def train_phase(
     Args:
         model, optimizer, scheduler: the usual.
         train_data:   ``ResumableDataLoader`` wrapping a ``WeightedMixerDataset``.
-        val_data:     Plain ``DataLoader`` for validation.
         wandb_run:    Active W&B run.
         phase_config: ``PhaseConfig`` for this phase.
         base_dir:     Checkpoint directory path.
@@ -88,7 +62,7 @@ def train_phase(
 
     try:
         model.train()
-        best_val_loss = float('inf')
+        best_domain_loss = float('inf')
         optimizer.zero_grad()
         accum_loss = 0.0
         micro_count = 0
@@ -167,11 +141,6 @@ def train_phase(
                     )
 
                 if optim_step % val_interval == 0:
-                    val_loss = validation(
-                        model, criterion, val_data, train_step=optim_step,
-                        wandb_run=wandb_run, phase_config=phase_config,
-                    )
-
                     # ── Domain-specific validation ──
                     validate_domains(
                         model=model,
@@ -184,33 +153,30 @@ def train_phase(
                     )
 
                     raw = _unwrap(model)
-                    # 1. Python — code completion (Code Replay 35%)
+                    # 1. Python — code completion
                     print(generate(raw,
                             "def dijkstra(graph, start):\n    distances = {node: float('inf') for node in graph}\n    distances[start] = 0\n    visited = set()\n    while len(visited) < len(graph):\n        current = min((d, n) for n, d in distances.items() if n not in visited)[1]\n        visited.add(current)\n        for neighbor, weight in graph[current]:",
                             config.device, max_tokens=120, temp=0.3))
-                    # 2. Code Understanding — explain what code does (Educational Code 15%)
+                    # 2. Code Understanding — explain what code does
                     print(generate(raw,
                             "# What does this function compute?\ndef mystery(n):\n    if n <= 1:\n        return n\n    a, b = 0, 1\n    for _ in range(2, n + 1):\n        a, b = b, a + b\n    return b\n\n# Answer: This function computes the",
                             config.device, max_tokens=120, temp=0.3))
-                    # 3. CS Knowledge — REST API concepts (CS Knowledge 18%)
+                    # 3. CS Knowledge — REST API concepts
                     print(generate(raw,
                             "Question: What is the difference between PUT and PATCH in RESTful APIs?\n\nAnswer:",
                             config.device, max_tokens=150, temp=0.4))
-                    # 4. Rust — systems programming (Code Replay 35%)
+                    # 4. Rust — systems programming
                     print(generate(raw,
                             "use std::collections::HashMap;\n\nfn word_count(text: &str) -> HashMap<&str, usize> {\n    let mut counts = HashMap::new();\n    for word in text.split_whitespace() {",
                             config.device, max_tokens=100, temp=0.3))
-                    # 5. TypeScript — typed web (Code Replay 35%)
+                    # 5. TypeScript — typed web
                     print(generate(raw,
                             "interface User {\n  id: number;\n  name: string;\n  email: string;\n}\n\nasync function fetchUsers(apiUrl: string): Promise<User[]> {\n  const response = await fetch(apiUrl);\n  if (!response.ok) {",
                             config.device, max_tokens=100, temp=0.3))
                     model.train()
-                    if val_loss < best_val_loss:
-                        best_val_loss = val_loss
                     meta_data = {
                         "step": optim_step,
                         "train_loss": avg_accum_loss,
-                        "val_loss": val_loss,
                     }
                     dataloader_state = train_data.get_state()
 
@@ -254,6 +220,9 @@ def train_phase(
         # Wait for any in-flight async save before exiting
         if _save_thread is not None:
             _save_thread.join()
+        tlog = get_training_logger()
+        tlog.logger.info(f"[TRAIN] Phase {phase_num} complete at step {optim_step}")
+        tlog.flush()
         print(f"Phase {phase_num} training complete at optimizer step {optim_step}.")
     except KeyboardInterrupt:
         print(f"\n[Interrupt] Saving checkpoint at optimizer step {optim_step}...")
@@ -273,6 +242,9 @@ def train_phase(
             phase=phase_num,
         )
         print(f"[Interrupt] Checkpoint saved successfully.")
+        tlog = get_training_logger()
+        tlog.logger.info(f"[INTERRUPT] Checkpoint saved at step {optim_step}")
+        tlog.flush()
         raise  
     except Exception as exc:
         print(f"\n[CRASH] {type(exc).__name__}: {exc}")
@@ -295,6 +267,9 @@ def train_phase(
             print(f"[CRASH] Emergency checkpoint saved successfully at step {optim_step}.")
         except Exception as save_exc:
             print(f"[CRASH] Emergency save FAILED: {save_exc}")
+        tlog = get_training_logger()
+        tlog.logger.error(f"[CRASH] {type(exc).__name__}: {exc}")
+        tlog.flush()
         raise
 
 
@@ -318,6 +293,10 @@ if __name__ == '__main__':
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
 
     base_dir = get_base_dir("checkpoints")
+
+    # ── Initialize training logger (writes to checkpoints/training.log) ──
+    tlog = get_training_logger(log_dir=str(base_dir))
+    tlog.logger.info(f"[INIT] Training started | phase={PHASE_2_CONFIG.phase_name}")
 
     # ── Model ──────────────────────────────────────────────
     model = GPT_FLASH(config, "cuda")
@@ -347,6 +326,7 @@ if __name__ == '__main__':
     wandb_run = wandb.init(
         entity="akshithmarepally-akai",
         project="828_pretraining_h200",
+        group=phase_config.phase_name,
         config={
             "architecture": "GPT_FLASH_MoE",
             "phase": phase_config.phase_name,
@@ -381,6 +361,7 @@ if __name__ == '__main__':
     )
 
     if saved_phase != phase_config.phase_num:
+        tlog.log_phase_transition(saved_phase, phase_config.phase_num, start_step)
         print(f"[Train] Phase transition detected: checkpoint is phase {saved_phase}, "
               f"config is phase {phase_config.phase_num}")
         # Reset optimizer (clear stale Adam momentum from previous phase)
@@ -391,6 +372,8 @@ if __name__ == '__main__':
             weight_decay=0.1,
             eps=1e-8,
         )
+
+        scheduler = create_phase_scheduler(optimizer, phase_config)
         # Reset step counter — Phase 2 starts from step 0
         start_step = 0
         dataloader_state = None
@@ -422,11 +405,14 @@ if __name__ == '__main__':
     try:
         train_phase(
             model, optimizer, scheduler,
-            train_data, val_data, wandb_run, phase_config,
+            train_data, wandb_run, phase_config,
             base_dir, start_step=start_step,
             eval_suite_interval=eval_suite_interval,
         )
     except KeyboardInterrupt:
         pass
     finally:
+        tlog = get_training_logger()
+        tlog.logger.info("[SHUTDOWN] Training session ended")
+        tlog.flush()
         wandb_run.finish()
