@@ -151,28 +151,70 @@ def train_phase(
                         batch_size=16,
                         max_batches_per_domain=100,
                     )
-
+                if optim_step % 1000 == 0:
                     raw = _unwrap(model)
-                    # 1. Python — code completion
+                    print(f"\n--- GENERATION TESTS AT STEP {optim_step} ---")
+                    # 1. Python (Source Code 20%)
+                    print("--- 1. Python (20%) ---")
                     print(generate(raw,
                             "def dijkstra(graph, start):\n    distances = {node: float('inf') for node in graph}\n    distances[start] = 0\n    visited = set()\n    while len(visited) < len(graph):\n        current = min((d, n) for n, d in distances.items() if n not in visited)[1]\n        visited.add(current)\n        for neighbor, weight in graph[current]:",
                             config.device, max_tokens=120, temp=0.3))
-                    # 2. Code Understanding — explain what code does
+                    # 2. Javascript (Source Code 8%)
+                    print("--- 2. Javascript (8%) ---")
                     print(generate(raw,
-                            "# What does this function compute?\ndef mystery(n):\n    if n <= 1:\n        return n\n    a, b = 0, 1\n    for _ in range(2, n + 1):\n        a, b = b, a + b\n    return b\n\n# Answer: This function computes the",
-                            config.device, max_tokens=120, temp=0.3))
-                    # 3. CS Knowledge — REST API concepts
-                    print(generate(raw,
-                            "Question: What is the difference between PUT and PATCH in RESTful APIs?\n\nAnswer:",
-                            config.device, max_tokens=150, temp=0.4))
-                    # 4. Rust — systems programming
-                    print(generate(raw,
-                            "use std::collections::HashMap;\n\nfn word_count(text: &str) -> HashMap<&str, usize> {\n    let mut counts = HashMap::new();\n    for word in text.split_whitespace() {",
+                            "function debounce(func, wait) {\n    let timeout;\n    return function(...args) {\n        const context = this;\n        clearTimeout(timeout);\n        timeout = setTimeout(() => {",
                             config.device, max_tokens=100, temp=0.3))
-                    # 5. TypeScript — typed web
+                    # 3. Java (Source Code 7%, NEW in Phase 2)
+                    print("--- 3. Java (7%) ---")
+                    print(generate(raw,
+                            "import java.util.*;\n\npublic class LRUCache<K, V> {\n    private final int capacity;\n    private final Map<K, V> cache;\n\n    public LRUCache(int capacity) {\n        this.capacity = capacity;\n        this.cache = new LinkedHashMap<>(capacity, 0.75f, true) {\n            @Override\n            protected boolean removeEldestEntry(Map.Entry<K, V> eldest) {",
+                            config.device, max_tokens=120, temp=0.3))
+                    # 4. TypeScript (Source Code 5%)
+                    print("--- 4. TypeScript (5%) ---")
                     print(generate(raw,
                             "interface User {\n  id: number;\n  name: string;\n  email: string;\n}\n\nasync function fetchUsers(apiUrl: string): Promise<User[]> {\n  const response = await fetch(apiUrl);\n  if (!response.ok) {",
                             config.device, max_tokens=100, temp=0.3))
+                    # 5. C++ (Source Code 6%)
+                    print("--- 5. C++ (6%) ---")
+                    print(generate(raw,
+                            "#include <vector>\n#include <algorithm>\n\ntemplate<typename T>\nclass MinHeap {\n    std::vector<T> data;\n    void sift_up(int idx) {\n        while (idx > 0) {\n            int parent = (idx - 1) / 2;\n            if (data[idx] < data[parent]) {",
+                            config.device, max_tokens=100, temp=0.3))
+                    # 6. Go (Source Code 5%)
+                    print("--- 6. Go (5%) ---")
+                    print(generate(raw,
+                            "package main\n\nimport (\n\t\"fmt\"\n\t\"net/http\"\n)\n\nfunc helloHandler(w http.ResponseWriter, r *http.Request) {\n\tfmt.Fprintf(w, \"Hello, World!\")\n}\n\nfunc main() {\n\thttp.HandleFunc(\"/\", helloHandler)\n\terr := http.ListenAndServe(\":8080\", nil)\n\tif err != nil {",
+                            config.device, max_tokens=100, temp=0.3))
+                    # 7. Rust (Source Code 5%)
+                    print("--- 7. Rust (5%) ---")
+                    print(generate(raw,
+                            "use std::sync::{Arc, Mutex};\nuse std::thread;\n\nfn main() {\n    let counter = Arc::new(Mutex::new(0));\n    let mut handles = vec![];\n    for _ in 0..10 {\n        let counter = Arc::clone(&counter);\n        let handle = thread::spawn(move || {\n            let mut num = counter.lock().unwrap();",
+                            config.device, max_tokens=120, temp=0.3))
+                    # 8. Tiny-Codes (Educational Code 9%)
+                    print("--- 8. Tiny-Codes (9%) ---")
+                    print(generate(raw,
+                            "# What does this function compute?\ndef mystery(n):\n    if n <= 1:\n        return n\n    a, b = 0, 1\n    for _ in range(2, n + 1):\n        a, b = b, a + b\n    return b\n\n# Answer: This function computes the",
+                            config.device, max_tokens=120, temp=0.3))
+                    # 9. StackExchange (CS Knowledge 12%)
+                    print("--- 9. StackExchange (12%) ---")
+                    print(generate(raw,
+                            "Question: What is the difference between a stack and a queue, and when would you use each?\n\nAnswer:",
+                            config.device, max_tokens=150, temp=0.4))
+                    # 10. DCLM-Edu (CS/Edu Web 5%)
+                    print("--- 10. DCLM-Edu (5%) ---")
+                    print(generate(raw,
+                            "Tutorial: Understanding Big O Notation and Binary Search\n\nBinary search is an efficient algorithm for finding an item from a sorted list of items. It works by repeatedly dividing in half the portion of the list that could contain the item, until you've narrowed down the possible locations to just one. The time complexity of binary search is",
+                            config.device, max_tokens=120, temp=0.3))
+                    # 11. FineWeb-Edu (General Knowledge / Edu Web 15%)
+                    print("--- 11. FineWeb-Edu (15%) ---")
+                    print(generate(raw,
+                            "Explain the process of photosynthesis in plants and why it is important for the ecosystem.\n\nPhotosynthesis is a chemical process that occurs in plants, algae, and some bacteria. It converts light energy into chemical energy. The general equation is:",
+                            config.device, max_tokens=150, temp=0.3))
+                    # 12. Wikipedia (General Knowledge 3%)
+                    print("--- 12. Wikipedia (3%) ---")
+                    print(generate(raw,
+                            "Alan Turing (23 June 1912 – 7 June 1954) was an English mathematician, computer scientist, logician, cryptanalyst, philosopher, and theoretical biologist. Turing was highly influential in the development of theoretical computer science, providing a formalisation of the concepts of algorithm and computation with the Turing machine. During the Second World War, Turing worked for",
+                            config.device, max_tokens=150, temp=0.3))
+                    print("-----------------------------------------\n")
                     model.train()
                     meta_data = {
                         "step": optim_step,
