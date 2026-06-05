@@ -2,12 +2,17 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import math
-from typing import Tuple
+from typing import Tuple, Dict
 from ..scripts.configs.model_config import ModelConfig
 try:
     from flash_attn import flash_attn_func
 except ImportError:
-    flash_attn_func = None  
+    flash_attn_func = None
+try:
+    from torch.nn.attention.flex_attention import flex_attention, create_block_mask
+    _FLEX_AVAILABLE = True
+except ImportError:
+    _FLEX_AVAILABLE = False
 
 class RMS_Norm(nn.Module):
     def __init__(self,
@@ -405,6 +410,13 @@ class RotaryEmbedding(nn.Module):
         return q,k
     
 
+def _make_softcap_score_mod(cap: float):
+    """Create a FlexAttention score_mod that applies Gemma-2 style logit soft-capping."""
+    def score_mod(score, b, h, q_idx, kv_idx):
+        return cap * torch.tanh(score / cap)
+    return score_mod
+
+
 class Attention(nn.Module):
     def __init__(self,
                 config : ModelConfig,
@@ -413,6 +425,7 @@ class Attention(nn.Module):
     ) -> None:
         """
             Multi-Head Attention with Grouped Query Attention and Flash Attention.
+            Supports Gemma-2 style logit soft-capping for attention stability.
     
             Args:
                 config: ModelConfig object containing model hyperparameters
@@ -425,6 +438,7 @@ class Attention(nn.Module):
         self.head_dim = config.head_dim
         self.inference = inference
         self.max_cache_len = config.max_context_len
+        self.attn_logit_cap = config.attn_logit_cap
        
         self.wq = nn.Linear(
             config.hidden_dim, config.num_attn_heads * config.head_dim, device = device, dtype = config.dtype
@@ -501,19 +515,55 @@ class Attention(nn.Module):
             K = self.cache_k[:,:end_pos,:,:]
             V = self.cache_v[:,:end_pos,:,:]
 
-            Q = Q.transpose(1,2)
+            # ── Inference: FlexAttention with soft-capping ──
+            Q = Q.transpose(1,2)  # (B, H, S, D)
             K = K.transpose(1,2)
             V = V.transpose(1,2)
 
-            attn_out = F.scaled_dot_product_attention(
-                Q,K,V,
-                attn_mask=attn_mask,
-                is_causal=(seq_len > 1 and attn_mask is None),
-                enable_gqa=(self.n_heads != self.n_kv_heads)
-            )
+            if _FLEX_AVAILABLE and self.attn_logit_cap > 0 and x.is_cuda:
+                # FlexAttention fuses soft-capping into the attention kernel
+                score_mod = _make_softcap_score_mod(self.attn_logit_cap)
+                # Expand KV heads for GQA (FlexAttention needs matching head counts)
+                groups = self.n_heads // self.n_kv_heads
+                K = K[:, :, None, :, :].expand(-1, -1, groups, -1, -1)
+                K = K.reshape(batch_size, self.n_heads, -1, self.head_dim)
+                V = V[:, :, None, :, :].expand(-1, -1, groups, -1, -1)
+                V = V.reshape(batch_size, self.n_heads, -1, self.head_dim)
+                attn_out = flex_attention(
+                    Q, K, V,
+                    score_mod=score_mod,
+                )
+            else:
+                # Fallback: manual attention with soft-capping (CPU or no FlexAttention)
+                cap = self.attn_logit_cap
+                groups = self.n_heads // self.n_kv_heads
+                K_exp = K[:, :, None, :, :].expand(-1, -1, groups, -1, -1)
+                K_exp = K_exp.reshape(batch_size, self.n_heads, -1, self.head_dim)
+                V_exp = V[:, :, None, :, :].expand(-1, -1, groups, -1, -1)
+                V_exp = V_exp.reshape(batch_size, self.n_heads, -1, self.head_dim)
+
+                scale = 1.0 / math.sqrt(self.head_dim)
+                attn_logits = (Q @ K_exp.transpose(-2, -1)) * scale
+                if cap > 0:
+                    attn_logits = cap * torch.tanh(attn_logits / cap)
+                # Causal mask
+                if seq_len > 1 and attn_mask is None:
+                    causal = torch.triu(
+                        torch.ones(seq_len, attn_logits.shape[-1], dtype=torch.bool, device=x.device),
+                        diagonal=end_pos - seq_len + 1,
+                    )
+                    attn_logits.masked_fill_(causal.unsqueeze(0).unsqueeze(0), float('-inf'))
+                elif attn_mask is not None:
+                    attn_logits = attn_logits + attn_mask
+                attn_out = F.softmax(attn_logits, dim=-1) @ V_exp
+
             attn_out = attn_out.transpose(1,2)
         else:
-            attn_out = flash_attn_func(Q,K,V,causal = True)
+            # ── Training: FlashAttention with native softcap ──
+            attn_out = flash_attn_func(
+                Q, K, V, causal=True,
+                softcap=self.attn_logit_cap if self.attn_logit_cap > 0 else 0.0,
+            )
         attn_out = attn_out.reshape(batch_size,seq_len,-1)
         attn_out = self.wo(attn_out)
 
@@ -594,3 +644,91 @@ class GPT_FLASH(nn.Module):
         x = self.norm(x)
         x = self.unembedding(x)  
         return x
+
+    # ── QK-Norm Scale Annealing ──────────────────────────────────
+    def step_qk_scale_anneal(
+        self,
+        current_step: int,
+        anneal_start_step: int,
+        anneal_steps: int = 1000,
+        target_max_scale: float = 1.0,
+    ) -> float:
+        """
+        Gradually clamp QK-norm scale parameters from their current values
+        toward `target_max_scale` over `anneal_steps` optimizer steps.
+
+        Call this once per optimizer step during training.
+        Returns the current clamp value being applied.
+        """
+        if current_step < anneal_start_step:
+            return float('inf')  # no clamping yet
+
+        progress = min(1.0, (current_step - anneal_start_step) / max(anneal_steps, 1))
+
+        # Compute the tightest current scale across all QK norms
+        all_max = []
+        for layer in self.layers:
+            all_max.append(layer.attention.q_norm.scale.data.max().item())
+            all_max.append(layer.attention.k_norm.scale.data.max().item())
+        current_max = max(all_max) if all_max else 1.0
+
+        # Linearly interpolate clamp: start_max → target_max_scale
+        clamp_val = current_max + progress * (target_max_scale - current_max)
+        clamp_val = max(clamp_val, target_max_scale)  # never below target
+
+        # Apply clamp to all QK-norm scale parameters
+        with torch.no_grad():
+            for layer in self.layers:
+                layer.attention.q_norm.scale.data.clamp_(max=clamp_val)
+                layer.attention.k_norm.scale.data.clamp_(max=clamp_val)
+
+        return clamp_val
+
+    # ── Attention Diagnostics for W&B ────────────────────────────
+    @torch.no_grad()
+    def get_attention_diagnostics(self) -> Dict[str, float]:
+        """
+        Compute per-layer attention health metrics for W&B logging.
+        Lightweight: only inspects QK-norm scale parameters (no forward pass).
+
+        Returns dict with keys like:
+            attn/layer_0/q_scale_max, attn/layer_0/k_scale_max,
+            attn/layer_0/q_norm_est, attn/layer_0/k_norm_est,
+            attn/q_scale_max_global, attn/k_scale_max_global
+        """
+        metrics = {}
+        q_maxes, k_maxes = [], []
+
+        for i, layer in enumerate(self.layers):
+            q_scale = layer.attention.q_norm.scale.data
+            k_scale = layer.attention.k_norm.scale.data
+
+            q_max = q_scale.max().item()
+            k_max = k_scale.max().item()
+            q_mean = q_scale.mean().item()
+            k_mean = k_scale.mean().item()
+            q_maxes.append(q_max)
+            k_maxes.append(k_max)
+
+            # Estimated vector norm: scale_rms × √head_dim
+            head_dim = q_scale.shape[0]
+            q_rms = (q_scale.float() ** 2).mean().sqrt().item()
+            k_rms = (k_scale.float() ** 2).mean().sqrt().item()
+            q_norm_est = q_rms * math.sqrt(head_dim)
+            k_norm_est = k_rms * math.sqrt(head_dim)
+
+            # Estimated max attention logit: q_norm × k_norm / √head_dim
+            max_logit_est = q_norm_est * k_norm_est / math.sqrt(head_dim)
+
+            metrics[f"attn/layer_{i}/q_scale_max"] = q_max
+            metrics[f"attn/layer_{i}/k_scale_max"] = k_max
+            metrics[f"attn/layer_{i}/q_scale_mean"] = q_mean
+            metrics[f"attn/layer_{i}/k_scale_mean"] = k_mean
+            metrics[f"attn/layer_{i}/q_norm_est"] = q_norm_est
+            metrics[f"attn/layer_{i}/k_norm_est"] = k_norm_est
+            metrics[f"attn/layer_{i}/max_logit_est"] = max_logit_est
+
+        metrics["attn/q_scale_max_global"] = max(q_maxes)
+        metrics["attn/k_scale_max_global"] = max(k_maxes)
+
+        return metrics

@@ -92,6 +92,15 @@ def train_phase(
                 scheduler.step()
                 optimizer.zero_grad()
 
+                # ── QK-norm scale annealing (Option C: gradual clamp) ──
+                raw_model = _unwrap(model)
+                qk_clamp = raw_model.step_qk_scale_anneal(
+                    current_step=optim_step,
+                    anneal_start_step=start_step + 1,  # begin immediately on resume
+                    anneal_steps=config.qk_scale_anneal_steps,
+                    target_max_scale=config.qk_scale_max,
+                )
+
 
                 avg_accum_loss = (accum_loss / grad_accumulation_steps).item()  
                 # ── Throughput & hardware metrics ──
@@ -128,6 +137,12 @@ def train_phase(
                                 for k, v in moe_metrics.items()
                             })
                             moe.reset_expert_counts()
+
+                # ── Attention health monitoring ──
+                metrics["attn/qk_scale_clamp"] = qk_clamp
+                if optim_step % val_interval == 0:
+                    attn_diag = raw.get_attention_diagnostics()
+                    metrics.update(attn_diag)
 
                 wandb_run.log(metrics, step=grad_accumulation_steps * optim_step)
                 accum_loss = 0.0

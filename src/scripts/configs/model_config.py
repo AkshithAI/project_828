@@ -24,6 +24,10 @@ class ModelConfig:
         ntk_alpha : float = 1.0
         ntk_beta : float = 32.0
         scaling_factor : float = 1.0
+        # ── Attention stability (soft-capping + QK-norm scale annealing) ──
+        attn_logit_cap : float = 50.0       # tanh soft-cap for attention logits (Gemma-2 style)
+        qk_scale_max : float = 1.0          # target max for QK-norm learnable scale clamp
+        qk_scale_anneal_steps : int = 1000  # steps to linearly anneal scale clamp from current → target
         # Training
         dropout : float = 0.0
         learning_rate : float = 3e-4
