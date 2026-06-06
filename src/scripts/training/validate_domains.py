@@ -380,6 +380,19 @@ def validate_domains(
         simple_avg_loss = sum(r.avg_loss for r in results) / len(results)
         metrics["val_domain/simple_avg_loss"] = simple_avg_loss
 
+        # ── Domain PPL divergence (spread metrics) ──
+        ppls = [r.ppl for r in results]
+        losses = [r.avg_loss for r in results]
+        metrics["val_domain/ppl_divergence"] = max(ppls) - min(ppls)
+        metrics["val_domain/loss_divergence"] = max(losses) - min(losses)
+        metrics["val_domain/ppl_max"] = max(ppls)
+        metrics["val_domain/ppl_min"] = min(ppls)
+        # Per-domain relative deviation from mean PPL (identifies outlier domains)
+        mean_ppl = sum(ppls) / len(ppls)
+        for r in results:
+            rel_dev = (r.ppl - mean_ppl) / max(mean_ppl, 1e-6)
+            metrics[f"val_domain/{r.key}/ppl_relative_dev"] = rel_dev
+
     # ── Log to W&B ──
     if wandb_run is not None and metrics:
         wandb_run.log(metrics, step=8 * train_step, commit=False)

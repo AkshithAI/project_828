@@ -20,6 +20,11 @@ from .schedulers import create_phase_scheduler
 from ...models.weight_init import init_gpt_model, count_parameters
 from ..inference import generate
 from .validate_domains import validate_domains
+from .telemetry import (
+    compute_routing_telemetry,
+    compute_weight_update_ratios,
+    compute_hidden_state_telemetry,
+)
 
 
 def train_phase(
@@ -66,6 +71,7 @@ def train_phase(
         optimizer.zero_grad()
         accum_loss = 0.0
         micro_count = 0
+        last_inputs = None  # Saved for hidden state telemetry at val_interval
         step_start_time = time.perf_counter()
 
         for i, batch in enumerate(tqdm(train_data, desc=f"Phase {phase_num} Training")):
@@ -82,6 +88,7 @@ def train_phase(
             (loss / grad_accumulation_steps).backward()
             accum_loss = accum_loss + loss.detach()  
             micro_count += 1
+            last_inputs = inputs.detach()  # Keep reference for telemetry
 
             if micro_count == grad_accumulation_steps:
                 optim_step += 1
@@ -140,6 +147,18 @@ def train_phase(
 
                 # ── Attention health monitoring ──
                 metrics["attn/qk_scale_clamp"] = qk_clamp
+
+                # ── Telemetry: routing entropy + weight update ratios (every step) ──
+                current_lr = scheduler.get_last_lr()[0]
+                include_hidden = (optim_step % val_interval == 0)
+                telemetry_metrics = raw_model.get_telemetry_diagnostics(
+                    input_ids=last_inputs if include_hidden else None,
+                    optimizer=optimizer,
+                    lr=current_lr,
+                    include_hidden_states=include_hidden,
+                )
+                metrics.update(telemetry_metrics)
+
                 if optim_step % val_interval == 0:
                     attn_diag = raw.get_attention_diagnostics()
                     metrics.update(attn_diag)

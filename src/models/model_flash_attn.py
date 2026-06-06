@@ -6,6 +6,9 @@ from typing import Tuple, Dict
 from ..scripts.configs.model_config import ModelConfig
 try:
     from flash_attn import flash_attn_func
+    if flash_attn_func is not None:
+        from ..scripts.training.telemetry import _safe_flash_attn_func
+        flash_attn_func = _safe_flash_attn_func
 except ImportError:
     flash_attn_func = None
 try:
@@ -133,6 +136,9 @@ class Gate(nn.Module):
         self.router = nn.Linear(config.hidden_dim, config.num_experts, bias = False, device = device, dtype = config.dtype)
         self.register_buffer("bias", torch.zeros(config.num_experts, dtype=torch.float32, device=device))
 
+        # Telemetry: cached sigmoid routing probs from the last forward pass
+        self.last_routing_probs: torch.Tensor | None = None
+
         # Per-layer scaling: deeper layers get more aggressive bias correction
         # Scale ranges from 1.0 (layer 0) to 1.5 (deepest layer)
         num_layers = config.num_hidden_layers
@@ -151,6 +157,8 @@ class Gate(nn.Module):
         scores = self.router(x)
         scores = torch.sigmoid(scores)
         original_scores = scores
+        # Cache routing probs for telemetry (no grad, no graph)
+        self.last_routing_probs = original_scores.detach()
         biased_scores = scores + self.bias.detach().to(scores.dtype)
         indices = torch.topk(biased_scores, self.topk, dim=-1)[1]
         current_load = torch.bincount(indices.flatten(), minlength=self.num_experts)
@@ -730,5 +738,47 @@ class GPT_FLASH(nn.Module):
 
         metrics["attn/q_scale_max_global"] = max(q_maxes)
         metrics["attn/k_scale_max_global"] = max(k_maxes)
+
+        return metrics
+
+    # ── Comprehensive Telemetry ──────────────────────────────
+    @torch.no_grad()
+    def get_telemetry_diagnostics(
+        self,
+        input_ids: torch.Tensor | None = None,
+        optimizer: torch.optim.Optimizer | None = None,
+        lr: float = 0.0,
+        include_hidden_states: bool = False,
+    ) -> Dict[str, float]:
+        """
+        Collect all telemetry metrics in a single call.
+
+        Args:
+            input_ids:  Last training batch (needed for hidden state telemetry).
+            optimizer:  The optimizer (needed for weight update ratio telemetry).
+            lr:         Current learning rate.
+            include_hidden_states: Whether to run the expensive hidden-state
+                                   SVD + cosine-sim analysis (only at val_interval).
+
+        Returns:
+            Dict of telemetry metrics for W&B logging.
+        """
+        from ...scripts.training.telemetry import (
+            compute_routing_telemetry,
+            compute_weight_update_ratios,
+            compute_hidden_state_telemetry,
+        )
+        metrics = {}
+
+        # 1. Routing entropy + router weight cosine sim (lightweight)
+        metrics.update(compute_routing_telemetry(self))
+
+        # 2. Weight update ratios (needs optimizer state)
+        if optimizer is not None:
+            metrics.update(compute_weight_update_ratios(self, optimizer, lr))
+
+        # 3. Hidden state collapse (expensive — only at val_interval)
+        if include_hidden_states and input_ids is not None:
+            metrics.update(compute_hidden_state_telemetry(self, input_ids))
 
         return metrics
