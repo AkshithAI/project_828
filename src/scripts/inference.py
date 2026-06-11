@@ -427,7 +427,7 @@ if __name__ == '__main__':
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Device used : {device}")
     model = GPT_FLASH(config,device,inference=True)
-    model.load_state_dict(torch.load("/Users/apple/Documents/project-828/project_828/checkpoints/model_08000.pt",map_location="cpu"))
+    model.load_state_dict(torch.load("project_828/checkpoints/model_09000.pt",map_location="cpu"))
     # Reset expert counts from training before inference
     for layer in model.layers:
         if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'reset_expert_counts'):

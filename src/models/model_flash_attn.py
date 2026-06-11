@@ -523,47 +523,51 @@ class Attention(nn.Module):
             K = self.cache_k[:,:end_pos,:,:]
             V = self.cache_v[:,:end_pos,:,:]
 
-            # ── Inference: FlexAttention with soft-capping ──
-            Q = Q.transpose(1,2)  # (B, H, S, D)
-            K = K.transpose(1,2)
-            V = V.transpose(1,2)
+            # ── Inference: Manual attention with softcap + causal/padding masks ──
+            # NOTE: flex_attention was removed here because it is NOT causal by
+            # default (requires a compiled block_mask) and ignored the attn_mask
+            # parameter, causing bidirectional prefill and padding-mask bypass.
+            # Manual attention is correct and equally fast for seq_len=1 decoding.
+            Q = Q.transpose(1, 2)  # (B, H, S, D)
+            K = K.transpose(1, 2)
+            V = V.transpose(1, 2)
 
-            if _FLEX_AVAILABLE and self.attn_logit_cap > 0 and x.is_cuda:
-                # FlexAttention fuses soft-capping into the attention kernel
-                score_mod = _make_softcap_score_mod(self.attn_logit_cap)
-                # Expand KV heads for GQA (FlexAttention needs matching head counts)
-                groups = self.n_heads // self.n_kv_heads
+            # GQA expansion
+            groups = self.n_heads // self.n_kv_heads
+            if groups > 1:
                 K = K[:, :, None, :, :].expand(-1, -1, groups, -1, -1)
                 K = K.reshape(batch_size, self.n_heads, -1, self.head_dim)
                 V = V[:, :, None, :, :].expand(-1, -1, groups, -1, -1)
                 V = V.reshape(batch_size, self.n_heads, -1, self.head_dim)
-                attn_out = flex_attention(
-                    Q, K, V,
-                    score_mod=score_mod,
-                )
-            else:
-                # Fallback: manual attention with soft-capping (CPU or no FlexAttention)
-                cap = self.attn_logit_cap
-                groups = self.n_heads // self.n_kv_heads
-                K_exp = K[:, :, None, :, :].expand(-1, -1, groups, -1, -1)
-                K_exp = K_exp.reshape(batch_size, self.n_heads, -1, self.head_dim)
-                V_exp = V[:, :, None, :, :].expand(-1, -1, groups, -1, -1)
-                V_exp = V_exp.reshape(batch_size, self.n_heads, -1, self.head_dim)
 
-                scale = 1.0 / math.sqrt(self.head_dim)
-                attn_logits = (Q @ K_exp.transpose(-2, -1)) * scale
-                if cap > 0:
-                    attn_logits = cap * torch.tanh(attn_logits / cap)
-                # Causal mask
-                if seq_len > 1 and attn_mask is None:
-                    causal = torch.triu(
-                        torch.ones(seq_len, attn_logits.shape[-1], dtype=torch.bool, device=x.device),
-                        diagonal=end_pos - seq_len + 1,
-                    )
-                    attn_logits.masked_fill_(causal.unsqueeze(0).unsqueeze(0), float('-inf'))
-                elif attn_mask is not None:
-                    attn_logits = attn_logits + attn_mask
-                attn_out = F.softmax(attn_logits, dim=-1) @ V_exp
+            # Scaled dot-product attention logits
+            scale = 1.0 / math.sqrt(self.head_dim)
+            attn_logits = (Q @ K.transpose(-2, -1)) * scale
+
+            # Soft-capping (matches training's flash_attn softcap behaviour)
+            cap = self.attn_logit_cap
+            if cap > 0:
+                attn_logits = cap * torch.tanh(attn_logits / cap)
+
+            # Causal mask for prefill (seq_len > 1) when no explicit mask given
+            if seq_len > 1 and attn_mask is None:
+                causal = torch.triu(
+                    torch.ones(seq_len, attn_logits.shape[-1],
+                               dtype=torch.bool, device=x.device),
+                    diagonal=end_pos - seq_len + 1,
+                )
+                attn_logits.masked_fill_(
+                    causal.unsqueeze(0).unsqueeze(0), float('-inf')
+                )
+            elif attn_mask is not None:
+                # Padding mask from batched inference (generate_batch)
+                attn_logits = attn_logits + attn_mask
+
+            # Compute softmax in float32 for numerical stability, then
+            # nan_to_num handles fully-masked padding rows (all -inf → NaN)
+            # so they produce zero attention output (clean residual pass-through).
+            attn_weights = F.softmax(attn_logits.float(), dim=-1).nan_to_num(0.0)
+            attn_out = attn_weights.to(V.dtype) @ V
 
             attn_out = attn_out.transpose(1,2)
         else:
@@ -763,7 +767,7 @@ class GPT_FLASH(nn.Module):
         Returns:
             Dict of telemetry metrics for W&B logging.
         """
-        from ...scripts.training.telemetry import (
+        from ..scripts.training.telemetry import (
             compute_routing_telemetry,
             compute_weight_update_ratios,
             compute_hidden_state_telemetry,
