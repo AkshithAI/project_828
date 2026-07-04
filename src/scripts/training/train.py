@@ -254,6 +254,7 @@ def train_phase(
                         "step": optim_step,
                         "train_loss": avg_accum_loss,
                     }
+                if optim_step % 500 == 0:
                     dataloader_state = train_data.get_state()
 
                     # ── Async checkpoint save ──
