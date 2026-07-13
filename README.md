@@ -15,6 +15,7 @@ A Mixture-of-Experts (MoE) transformer implementation featuring a custom GPT-sty
 
 ---
 
+- **Training Report** : (https://wandb.ai/akshithmarepally-akai/828_pretraining_h200/reports/Phase-1-Pretraining-H200:-Training-Dynamics-and-MoE-Routing--VmlldzoxNzQ4MTcwOA==)
 </div>
 
 ## Table of Contents
