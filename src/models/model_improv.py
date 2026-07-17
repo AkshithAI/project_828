@@ -214,7 +214,7 @@ class MoE(nn.Module):
         inp_shape = x.shape
         x_flat = x.view(-1, self.dim)
 
-        if TRITON_MOE_AVAILABLE:
+        if TRITON_MOE_AVAILABLE and x_flat.is_cuda:
             # TritonMoE fused_moe_forward (bassrehab/triton-kernels)
             # Signature:
             #   fused_moe_forward(
