@@ -1,14 +1,16 @@
+# Core training dependencies
 torch>=2.0.0
 datasets>=2.14.0
 transformers>=4.30.0
 huggingface_hub>=0.16.0
 tqdm>=4.65.0
 wandb>=0.15.0
+
+#Distributed training dependencies
 # deepspeed>=0.10.0
 # accelerate>=0.20.0
 # ninja
 # packaging
-zstandard
 
 # NeMo Curator dependencies
 # nemo-curator>=0.1.0
@@ -18,6 +20,3 @@ zstandard
 # Data packing dependencies
 # numba
 # polars
-
-triton>=3.0.0; platform_system != "Darwin"
-triton-kernels @ git+https://github.com/bassrehab/triton-kernels.git; platform_system != "Darwin"
