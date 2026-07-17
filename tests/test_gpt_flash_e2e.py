@@ -63,6 +63,7 @@ def _make_config(**overrides) -> ModelConfig:
     cfg.ntk_beta = 32.0
     cfg.scaling_factor = 1.0
     cfg.dropout = 0.0
+    cfg.attn_logit_cap = overrides.get("attn_logit_cap", 0.0)
     return cfg
 
 
