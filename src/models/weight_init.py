@@ -132,7 +132,8 @@ def init_gpt_model(model, config):
             if hasattr(mlp, 'experts'):
                 for expert in mlp.experts:
                     nn.init.normal_(expert.w1.weight, mean=0.0, std=0.02)
-                    nn.init.normal_(expert.w3.weight, mean=0.0, std=0.02)
+                    if hasattr(expert, 'w3'):
+                        nn.init.normal_(expert.w3.weight, mean=0.0, std=0.02)
                     std = 0.02 / math.sqrt(2 * config.num_hidden_layers)
                     nn.init.normal_(expert.w2.weight, mean=0.0, std=std)
                     
@@ -140,23 +141,25 @@ def init_gpt_model(model, config):
                         nn.init.zeros_(expert.w1.bias)
                     if expert.w2.bias is not None:
                         nn.init.zeros_(expert.w2.bias)
-                    if expert.w3.bias is not None:
+                    if hasattr(expert, 'w3') and expert.w3.bias is not None:
                         nn.init.zeros_(expert.w3.bias)
             
-            # Initialize shared experts
-            if hasattr(mlp, 'shared_experts'):
-                shared = mlp.shared_experts
-                nn.init.normal_(shared.w1.weight, mean=0.0, std=0.02)
-                nn.init.normal_(shared.w3.weight, mean=0.0, std=0.02)
-                std = 0.02 / math.sqrt(2 * config.num_hidden_layers)
-                nn.init.normal_(shared.w2.weight, mean=0.0, std=std)
-                
-                if shared.w1.bias is not None:
-                    nn.init.zeros_(shared.w1.bias)
-                if shared.w2.bias is not None:
-                    nn.init.zeros_(shared.w2.bias)
-                if shared.w3.bias is not None:
-                    nn.init.zeros_(shared.w3.bias)
+            # Initialize shared experts (plural and singular)
+            for shared_attr in ['shared_experts', 'shared_expert']:
+                if hasattr(mlp, shared_attr):
+                    shared = getattr(mlp, shared_attr)
+                    nn.init.normal_(shared.w1.weight, mean=0.0, std=0.02)
+                    if hasattr(shared, 'w3'):
+                        nn.init.normal_(shared.w3.weight, mean=0.0, std=0.02)
+                    std = 0.02 / math.sqrt(2 * config.num_hidden_layers)
+                    nn.init.normal_(shared.w2.weight, mean=0.0, std=std)
+                    
+                    if shared.w1.bias is not None:
+                        nn.init.zeros_(shared.w1.bias)
+                    if shared.w2.bias is not None:
+                        nn.init.zeros_(shared.w2.bias)
+                    if hasattr(shared, 'w3') and shared.w3.bias is not None:
+                        nn.init.zeros_(shared.w3.bias)
         
         # Layer norms - keep scale at 1.0 (default)
         if hasattr(layer, 'norm1'):
