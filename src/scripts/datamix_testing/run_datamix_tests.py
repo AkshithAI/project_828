@@ -116,12 +116,14 @@ def reconstruct_manifest_from_checkpoints(
 
     grid = experiment_config.mixture_grid
 
-    # ── Scan W&B to restore completed runs that are missing on the new instance ──
+    # ── Scan W&B to restore completed runs and download checkpoints for active run ──
     try:
         import wandb
         print(f"[Pipeline] Scanning W&B project '{WANDB_PROJECT}' for completed runs...")
         api = wandb.Api()
         runs = api.runs(f"{WANDB_ENTITY}/{WANDB_PROJECT}")
+        
+        # 1. First, reconstruct all completed runs from W&B
         for run in runs:
             if run.name.startswith("proxy_"):
                 label = run.name[len("proxy_"):]
@@ -154,6 +156,49 @@ def reconstruct_manifest_from_checkpoints(
                         manifest.completed_runs[mix_point.label] = result
                         save_manifest(manifest, output_dir)
                         print(f"[Pipeline] ✓ Restored completed run '{label}' from W&B cloud logs.")
+
+        # 2. Next, identify the first incomplete run and download its checkpoint from W&B if missing locally
+        first_incomplete = None
+        for mp in grid:
+            if mp.label not in manifest.completed_runs:
+                first_incomplete = mp
+                break
+        
+        if first_incomplete is not None:
+            label = first_incomplete.label
+            run_dir = Path(experiment_config.checkpoint_dir) / label
+            ckpt_dir = run_dir / "checkpoints"
+            
+            # Check if checkpoint exists locally
+            from ..helper_funcs import get_latest_checkpoint_step
+            local_step = get_latest_checkpoint_step(ckpt_dir) if ckpt_dir.exists() else None
+            
+            # If no local checkpoint, search for it on W&B
+            if local_step is None:
+                print(f"[Pipeline] Checking W&B for active run '{label}' checkpoints...")
+                for run in runs:
+                    if run.name == f"proxy_{label}":
+                        artifacts = run.logged_artifacts()
+                        model_artifacts = [a for a in artifacts if a.type == "model"]
+                        if model_artifacts:
+                            # Sort by step number in the name
+                            def get_step(art):
+                                try:
+                                    name_part = art.name.split(":")[0]
+                                    return int(name_part.split("-")[-1])
+                                except Exception:
+                                    return -1
+                            model_artifacts.sort(key=get_step, reverse=True)
+                            latest_art = model_artifacts[0]
+                            latest_art_step = get_step(latest_art)
+                            
+                            if latest_art_step > 0:
+                                print(f"[Pipeline] Downloading latest checkpoint '{latest_art.name}' (step {latest_art_step}) from W&B...")
+                                ckpt_dir.mkdir(parents=True, exist_ok=True)
+                                latest_art.download(root=str(ckpt_dir))
+                                print(f"[Pipeline] ✓ Checkpoint files downloaded successfully to {ckpt_dir}")
+                        break
+
     except Exception as wb_err:
         print(f"[Pipeline] Warning: Could not scan/restore from W&B: {wb_err}")
 
