@@ -207,8 +207,8 @@ class ProxyExperimentConfig:
     # Training budget per run
     tokens_per_run: int = 500_000_000       # 500M tokens per mixture point
     context_length: int = 2048
-    micro_batch_size: int = 32
-    grad_accum_steps: int = 4
+    micro_batch_size: int = 8
+    grad_accum_steps: int = 16
     grad_clip: float = 1.0
 
     # LR schedule (WSD)

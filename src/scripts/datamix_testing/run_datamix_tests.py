@@ -95,6 +95,122 @@ def save_manifest(manifest: ProxyManifest, output_dir: str) -> None:
         json.dump(manifest.to_dict(), f, indent=2)
 
 
+def reconstruct_manifest_from_checkpoints(
+    output_dir: str,
+    experiment_config: ProxyExperimentConfig,
+    device: str = "cuda",
+) -> ProxyManifest:
+    """Load proxy manifest, auto-reconstructing completed runs from disk checkpoints or W&B if missing."""
+    manifest = ProxyManifest(total_runs=len(experiment_config.mixture_grid))
+    manifest_path = Path(output_dir) / "proxy_manifest.json"
+
+    if manifest_path.exists():
+        try:
+            with open(manifest_path) as f:
+                data = json.load(f)
+            manifest = ProxyManifest.from_dict(data)
+            n_done = len(manifest.completed_runs)
+            print(f"[Pipeline] Loaded manifest: {n_done}/{manifest.total_runs} runs complete")
+        except Exception as e:
+            print(f"[Pipeline] Warning: Could not parse manifest file: {e}. Reconstructing...")
+
+    grid = experiment_config.mixture_grid
+
+    # ── Scan W&B to restore completed runs that are missing on the new instance ──
+    try:
+        import wandb
+        print(f"[Pipeline] Scanning W&B project '{WANDB_PROJECT}' for completed runs...")
+        api = wandb.Api()
+        runs = api.runs(f"{WANDB_ENTITY}/{WANDB_PROJECT}")
+        for run in runs:
+            if run.name.startswith("proxy_"):
+                label = run.name[len("proxy_"):]
+                if label not in manifest.completed_runs:
+                    # Find matching mix point in grid
+                    mix_point = None
+                    for mp in grid:
+                        if mp.label == label:
+                            mix_point = mp
+                            break
+                    if mix_point is None:
+                        continue
+
+                    s = run.summary
+                    # Check if the run finished and has final evaluation metrics
+                    if "eval/combined_loss" in s:
+                        print(f"[Pipeline] Found completed run '{label}' on W&B.")
+                        from .proxy_runner import _build_result
+                        metrics = {
+                            "eval/code/loss": s.get("eval/code/loss", 0.0),
+                            "eval/general/loss": s.get("eval/general/loss", 0.0),
+                            "eval/reasoning/loss": s.get("eval/reasoning/loss", 0.0),
+                            "eval/code/ppl": s.get("eval/code/ppl", 1.0),
+                            "eval/general/ppl": s.get("eval/general/ppl", 1.0),
+                            "eval/reasoning/ppl": s.get("eval/reasoning/ppl", 1.0),
+                            "eval/combined_loss": s.get("eval/combined_loss", 0.0),
+                        }
+                        final_step = s.get("global_step", experiment_config.total_steps_per_run())
+                        result = _build_result(mix_point, final_step, experiment_config, metrics)
+                        manifest.completed_runs[mix_point.label] = result
+                        save_manifest(manifest, output_dir)
+                        print(f"[Pipeline] ✓ Restored completed run '{label}' from W&B cloud logs.")
+    except Exception as wb_err:
+        print(f"[Pipeline] Warning: Could not scan/restore from W&B: {wb_err}")
+
+    # ── Scan local checkpoints directory to see if any runs completed locally ──
+    for mix_point in grid:
+        if mix_point.label in manifest.completed_runs:
+            continue
+
+        run_dir = Path(experiment_config.checkpoint_dir) / mix_point.label
+        ckpt_dir = run_dir / "checkpoints"
+        if not ckpt_dir.exists():
+            continue
+
+        from ..helper_funcs import get_latest_checkpoint_step
+        latest_step = get_latest_checkpoint_step(ckpt_dir)
+        if latest_step is None:
+            continue
+
+        total_steps = experiment_config.total_steps_per_run()
+        # If it reached the final training step, it's completed
+        if latest_step >= total_steps:
+            print(f"[Pipeline] Found completed checkpoint on disk for '{mix_point.label}' (step {latest_step}).")
+            print(f"[Pipeline] Automatically running final evaluation to reconstruct manifest entry...")
+
+            try:
+                # Create model
+                from .proxy_runner import create_proxy_model
+                model = create_proxy_model(experiment_config.model_config, device)
+
+                # Load checkpoints
+                from ..helper_funcs import load_checkpoint
+                load_checkpoint(ckpt_dir, model, device=device)
+
+                # Evaluate
+                from .proxy_eval import evaluate_proxy
+                metrics = evaluate_proxy(
+                    model, device,
+                    experiment_config.eval_batch_size,
+                    experiment_config.context_length,
+                    experiment_config.eval_batches_per_domain,
+                )
+
+                from .proxy_runner import _build_result
+                result = _build_result(mix_point, latest_step, experiment_config, metrics)
+                manifest.completed_runs[mix_point.label] = result
+                save_manifest(manifest, output_dir)
+                print(f"[Pipeline] ✓ Reconstructed manifest entry for '{mix_point.label}' successfully.")
+            except Exception as eval_err:
+                print(f"[Pipeline] Failed to evaluate completed run '{mix_point.label}': {eval_err}")
+            finally:
+                if 'model' in locals():
+                    del model
+                torch.cuda.empty_cache()
+
+    return manifest
+
+
 # ══════════════════════════════════════════════════════════════
 #  Dry Run (Mock Metrics for Testing)
 # ══════════════════════════════════════════════════════════════
@@ -187,7 +303,7 @@ def validate_repetition_budget(
 
 def run_pipeline(args: argparse.Namespace) -> None:
     """Execute the full datamix testing pipeline."""
-    output_dir = args.output_dir
+    output_dir = os.path.abspath(args.output_dir)
     device = args.device
     dry_run = args.dry_run
     analysis_only = args.analysis_only
@@ -199,8 +315,8 @@ def run_pipeline(args: argparse.Namespace) -> None:
     )
     grid = experiment_config.mixture_grid
 
-    # ── Load manifest ──
-    manifest = load_manifest(output_dir)
+    # ── Load manifest (reconstructing completed runs if missing) ──
+    manifest = reconstruct_manifest_from_checkpoints(output_dir, experiment_config, device)
 
     # ── Phase 1: Run proxy experiments ──
     if not analysis_only:
