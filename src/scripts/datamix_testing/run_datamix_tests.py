@@ -360,6 +360,15 @@ def run_pipeline(args: argparse.Namespace) -> None:
     )
     grid = experiment_config.mixture_grid
 
+    if args.run:
+        matching = [mix for mix in grid if mix.label == args.run]
+        if not matching:
+            print(f"[Pipeline] ERROR: No mixture found matching label '{args.run}'. ")
+            print(f"Available labels: {[m.label for m in grid]}")
+            sys.exit(1)
+        grid = matching
+        print(f"[Pipeline] Filtering grid to run ONLY '{args.run}'")
+
     # ── Load manifest (reconstructing completed runs if missing) ──
     manifest = reconstruct_manifest_from_checkpoints(output_dir, experiment_config, device)
 
@@ -495,6 +504,10 @@ Examples:
     parser.add_argument(
         "--analysis-only", action="store_true",
         help="Skip training, only run analysis on existing results in manifest",
+    )
+    parser.add_argument(
+        "--run", type=str, default=None,
+        help="Run only a specific mixture configuration by its label (e.g. code25_book05)",
     )
 
     return parser.parse_args()
