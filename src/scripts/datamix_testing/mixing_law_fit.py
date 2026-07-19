@@ -81,38 +81,30 @@ def fit_quadratic_surface(
         )
 
     # Build design matrix X and target vector y
-    # Features: [1, code, book, code², book², code*book]
+    # Features: [1, code, book, code², code*book]
+    # NOTE: book² is omitted because book_pct only has 2 unique values (5%, 15%),
+    # making book² collinear with 1 and book.
     X = []
     y = []
     for r in results:
         c, b = float(r.code_pct), float(r.book_pct)
-        X.append([1.0, c, b, c * c, b * b, c * b])
+        X.append([1.0, c, b, c * c, c * b])
         y.append(getattr(r, metric_key))
 
-    num_features = min(6, n)  # Can't fit more features than data points
+    num_features = min(5, n)
 
-    if n < 6:
-        # With fewer points than features, use reduced model
-        # Drop interaction and quadratic terms progressively
+    if n < 5:
         if n < 4:
             # Linear only: [1, code, book]
             X = [[row[0], row[1], row[2]] for row in X]
             num_features = 3
-        elif n < 5:
+        else:
             # Linear + code²: [1, code, book, code²]
             X = [[row[0], row[1], row[2], row[3]] for row in X]
             num_features = 4
-        else:
-            # Drop interaction: [1, code, book, code², book²]
-            X = [[row[0], row[1], row[2], row[3], row[4]] for row in X]
-            num_features = 5
 
     # Solve via normal equation: β = (X^T X)^{-1} X^T y
     beta = _solve_ols(X, y, num_features)
-
-    # Pad beta to always have 6 coefficients
-    while len(beta) < 6:
-        beta.append(0.0)
 
     # Compute R²
     y_mean = sum(y) / n
@@ -126,14 +118,22 @@ def fit_quadratic_surface(
     ss_res = sum(r ** 2 for r in residuals)
     r_squared = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
 
+    # Map the solved coefficients back to the full 6-parameter QuadraticFit
+    alpha_val = beta[0] if len(beta) > 0 else 0.0
+    b1_val = beta[1] if len(beta) > 1 else 0.0
+    b2_val = beta[2] if len(beta) > 2 else 0.0
+    b3_val = beta[3] if len(beta) > 3 else 0.0
+    b4_val = 0.0  # book² is omitted due to collinearity
+    b5_val = beta[4] if len(beta) > 4 else 0.0
+
     return QuadraticFit(
         metric_name=metric_key,
-        alpha=beta[0],
-        b1=beta[1],
-        b2=beta[2],
-        b3=beta[3],
-        b4=beta[4],
-        b5=beta[5],
+        alpha=alpha_val,
+        b1=b1_val,
+        b2=b2_val,
+        b3=b3_val,
+        b4=b4_val,
+        b5=b5_val,
         r_squared=r_squared,
         residuals=residuals,
     )
@@ -224,7 +224,7 @@ def find_optimal_mixture(
     general_weight: float = 0.25,
     reasoning_weight: float = 0.15,
     code_range: Tuple[float, float] = (5, 35),
-    book_range: Tuple[float, float] = (5, 20),
+    book_range: Tuple[float, float] = (5, 15),
     grid_resolution: float = 1.0,
 ) -> OptimalMixture:
     """Find the mixture that minimizes the weighted combined loss.
