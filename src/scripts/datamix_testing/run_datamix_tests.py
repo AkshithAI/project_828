@@ -138,8 +138,8 @@ def reconstruct_manifest_from_checkpoints(
                         continue
 
                     s = run.summary
-                    # Check if the run finished and has final evaluation metrics
-                    if "eval/combined_loss" in s:
+                    # Check if the run finished successfully and has final evaluation metrics
+                    if run.state == "finished" and "eval/combined_loss" in s:
                         print(f"[Pipeline] Found completed run '{label}' on W&B.")
                         from .proxy_runner import _build_result
                         metrics = {
@@ -382,7 +382,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
         print(f"{'='*70}\n")
 
         for i, mix_point in enumerate(grid):
-            if manifest.is_run_complete(mix_point.label):
+            if manifest.is_run_complete(mix_point.label) and not args.run:
                 print(f"[{i+1}/{len(grid)}] {mix_point.label}: "
                       f"ALREADY COMPLETE — skipping")
                 continue
