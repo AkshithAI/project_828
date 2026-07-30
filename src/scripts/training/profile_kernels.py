@@ -147,12 +147,11 @@ def run_ncu_profile(
         print(f"[WARNING] Unknown kernel: {kernel_name}")
         return None
 
-    # ncu strips environment variables, so `python3 -m src.kernels.X` can't
-    # find the `src` package. Instead, use `python3 -c` with inline sys.path
-    # setup and runpy to guarantee the module is found.
+    kernel_file = PROJECT_ROOT / "src" / "kernels" / f"{kernel_name}.py"
     py_inline = (
         f"import sys; sys.path.insert(0, '{PROJECT_ROOT}'); "
-        f"import runpy; runpy.run_module('{module}', run_name='__main__')"
+        f"sys.path.insert(0, '{PROJECT_ROOT / 'src' / 'kernels'}'); "
+        f"exec(open('{kernel_file}').read())"
     )
 
     cmd = [
@@ -170,13 +169,15 @@ def run_ncu_profile(
     # For fused_linear_cross_entropy, add CLI args to the inline script
     if kernel_name == "fused_linear_cross_entropy":
         py_inline = (
-            f"import sys; sys.path.insert(0, '{PROJECT_ROOT}'); sys.argv.append('--correctness-only'); "
-            f"import runpy; runpy.run_module('{module}', run_name='__main__')"
+            f"import sys; sys.path.insert(0, '{PROJECT_ROOT}'); "
+            f"sys.path.insert(0, '{PROJECT_ROOT / 'src' / 'kernels'}'); "
+            f"sys.argv.append('--correctness-only'); "
+            f"exec(open('{kernel_file}').read())"
         )
         cmd[-1] = py_inline
 
     print(f"\n  [NCU] Profiling {kernel_name}...")
-    print(f"  [NCU] Command: {ncu_bin} ... python3 -c 'runpy.run_module({module})'")
+    print(f"  [NCU] Command: {ncu_bin} ... python3 -c 'exec(open({kernel_file.name}))'")
 
     env = os.environ.copy()
     env["TOKENIZERS_PARALLELISM"] = "false"

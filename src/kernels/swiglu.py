@@ -2,7 +2,13 @@ import torch
 import triton
 import triton.language as tl
 import torch.nn.functional as F
-from .utils import ensure_contiguous
+try:
+    from .utils import ensure_contiguous
+except ImportError:
+    try:
+        from src.kernels.utils import ensure_contiguous
+    except ImportError:
+        from utils import ensure_contiguous
 
 
 # ── Autotuning configs for SwiGLU forward kernel ─────────────────────
