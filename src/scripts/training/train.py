@@ -466,7 +466,10 @@ if __name__ == '__main__':
     phase_config = PHASE_2_CONFIG
 
     # ── Eval Suite interval ───────────────────────────────
-    eval_suite_interval = phase_config.eval_suite_interval
+    try:
+        eval_suite_interval = int(getattr(phase_config, "eval_suite_interval", 0))
+    except (ValueError, TypeError):
+        eval_suite_interval = 0
     if eval_suite_interval > 0:
         print(f"[Train] Eval suite will run every {eval_suite_interval} steps")
 

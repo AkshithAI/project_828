@@ -61,23 +61,38 @@ class ModelConfig:
 
 
 
+from .model_config import PhaseConfig, DatasetEntry
+
 PRETRAINING_PHASE_CONFIG = PhaseConfig(
     phase_name="pretraining_phase",
     phase_num=1,
     peak_lr=3e-4,
     min_lr=3e-5,
-    warmup_steps="--placeholder_for_warmup_steps--",
-    total_steps="--placeholder_for_total_steps--",
+    warmup_steps=2000,
+    total_steps=34300,
     scheduler_type="wsd",
     wsd_stable_frac=0.795,
-    micro_batch_size="--placeholder_for_micro_batch_size--",
-    grad_accum_steps="--placeholder_for_grad_accum_steps--",
+    micro_batch_size=8,
+    grad_accum_steps=8,
     grad_clip=1.0,
-    val_interval="--placeholder_for_val_interval--",
-    val_steps="--placeholder_for_val_steps--",
-    eval_suite_interval="--placeholder_for_eval_suite_interval--",
+    val_interval=2500,
+    val_steps=5000,
+    eval_suite_interval=0,
     datasets=[
-        # Yet to be filled
+        DatasetEntry(
+            name="starcoderdata-python",
+            repo_id="bigcode/starcoderdata",
+            weight=50,
+            format_fn="starcoder",
+            data_dir="python",
+        ),
+        DatasetEntry(
+            name="fineweb-edu-dedup",
+            repo_id="HuggingFaceTB/smollm-corpus",
+            weight=50,
+            format_fn="default",
+            config_name="fineweb-edu-dedup",
+        ),
     ],
 )
 
