@@ -345,29 +345,37 @@ def generate_batch(model, prompts, device, max_tokens=500, k=50, temp=0.8,
     )
 
     all_tokens = [list(encoded[i]) + [next_tokens[i].item()] for i in range(batch_size)]
-    finished = [next_tokens[i].item() == tokenizer.eos_token_id for i in range(batch_size)]
-    for i in range(batch_size):
-        generated_ids[i, gen_idx] = next_tokens[i]
+    finished_t = (next_tokens.squeeze(1) == tokenizer.eos_token_id)
+    generated_ids[:, gen_idx] = next_tokens.squeeze(1)
     gen_idx += 1
 
-    frozen_position = [prompt_lengths[i] for i in range(batch_size)]
+    # Pre-compute tensors for vectorized decode loop
+    prompt_lens_t = torch.tensor(prompt_lengths, device=device, dtype=torch.long)
+    frozen_pos_t = prompt_lens_t.clone()
+    pad_id_t = torch.full((batch_size, 1), pad_id, device=device, dtype=torch.long)
+
+    # Pre-build the full KV mask once — slice per step instead of rebuilding
+    max_kv_len = max_prompt_len + max_tokens
+    kv_mask_full = torch.zeros(batch_size, 1, 1, max_kv_len, device=device)
+    for i in range(batch_size):
+        if padding_lengths[i] > 0:
+            kv_mask_full[i, :, :, :padding_lengths[i]] = float('-inf')
 
     for step in tqdm(range(1, max_tokens), desc="Batch generation", disable=not show_progress):
-        if all(finished):
+        if finished_t.all():
             break
 
         start_pos = max_prompt_len + step - 1
         kv_len = start_pos + 1
 
-        step_position_ids = torch.zeros(batch_size, 1, device=device, dtype=torch.long)
-        for i in range(batch_size):
-            if finished[i]:
-                next_tokens[i, 0] = pad_id
-                step_position_ids[i, 0] = frozen_position[i]
-            else:
-                step_position_ids[i, 0] = prompt_lengths[i] + step - 1
+        # Vectorized: mask finished sequences and compute position IDs
+        active_pos = prompt_lens_t + step - 1
+        step_position_ids = torch.where(
+            finished_t, frozen_pos_t, active_pos
+        ).unsqueeze(1)
+        next_tokens = torch.where(finished_t.unsqueeze(1), pad_id_t, next_tokens)
 
-        kv_mask = _build_kv_mask(padding_lengths, kv_len, device)
+        kv_mask = kv_mask_full[:, :, :, :kv_len]
 
         with _autocast_ctx(device):
             logits = model(
@@ -379,16 +387,15 @@ def generate_batch(model, prompts, device, max_tokens=500, k=50, temp=0.8,
             logits[:, -1, :], temp, k, top_p, repetition_penalty,
             generated_ids[:, :gen_idx],
         )
-        for i in range(batch_size):
-            generated_ids[i, gen_idx] = next_tokens[i]
+        generated_ids[:, gen_idx] = next_tokens.squeeze(1)
         gen_idx += 1
 
         for i in range(batch_size):
-            if not finished[i]:
-                tok = next_tokens[i].item()
-                all_tokens[i].append(tok)
-                if tok == tokenizer.eos_token_id:
-                    finished[i] = True
+            if not finished_t[i]:
+                all_tokens[i].append(next_tokens[i].item())
+
+        # Vectorized EOS detection
+        finished_t = finished_t | (next_tokens.squeeze(1) == tokenizer.eos_token_id)
 
     _sync_device(device)
     decode_sec = time.perf_counter() - decode_start

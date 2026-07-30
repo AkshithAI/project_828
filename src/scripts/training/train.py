@@ -8,16 +8,14 @@ import wandb
 import torch.nn as nn
 from tqdm import tqdm
 from torch.amp import autocast
-from ..configs.model_config import config, PHASE_1_CONFIG, PHASE_2_CONFIG
 from ..tokenizer import tokenizer
 from ..dataloader import create_phase_dataloaders
-from ...models.model_flash_attn import GPT_FLASH
 from ..helper_funcs import (
     get_base_dir, save_checkpoint, save_checkpoint_async,
     load_checkpoint, get_gpu_peak_flops, get_training_logger,
 )
 from .schedulers import create_phase_scheduler
-from ...models.weight_init import init_gpt_model, count_parameters
+from ...models.weight_init import initialize_gpt_model, count_parameters
 from ..inference import generate
 from .validate_domains import validate_domains
 from .telemetry import (
@@ -27,14 +25,25 @@ from .telemetry import (
 )
 
 
+def nvtx_push(name: str):
+    if torch.cuda.is_available():
+        torch.cuda.nvtx.range_push(name)
+
+
+def nvtx_pop():
+    if torch.cuda.is_available():
+        torch.cuda.nvtx.range_pop()
+
+
 def train_phase(
     model, optimizer, scheduler,
     train_data, wandb_run, phase_config,
     base_dir, start_step=0, eval_suite_interval=0,
+    profile=False, profile_warmup_steps=5, profile_active_steps=10, profile_exit=True,
 ):
     """
     Train one phase.  Supports exact resumption via the ResumableDataLoader
-    and MixerState checkpoint.
+    and MixerState checkpoint. Optionally profiles a window of steps using CUDA Profiler API + NVTX.
 
     Args:
         model, optimizer, scheduler: the usual.
@@ -62,6 +71,14 @@ def train_phase(
     flops_per_token = 6 * n_params  
     gpu_peak_flops = get_gpu_peak_flops(config.device)
 
+    # ── Profiling State ──
+    profiling_started = False
+    profiling_stopped = False
+    profile_target_start = start_step + profile_warmup_steps
+    profile_target_stop = profile_target_start + profile_active_steps
+    if profile:
+        print(f"[NSYS Profile] Profiling enabled: Warmup until step {profile_target_start}, profile {profile_active_steps} steps until step {profile_target_stop}.")
+
     # ── Async checkpoint thread handle ──
     _save_thread = None
 
@@ -75,39 +92,72 @@ def train_phase(
         step_start_time = time.perf_counter()
 
         for i, batch in enumerate(tqdm(train_data, desc=f"Phase {phase_num} Training")):
+            # Start CUDA Profiler at warmup step
+            if profile and not profiling_started and optim_step >= profile_target_start:
+                print(f"\n[NSYS Profile] >>> Starting CUDA Profiler at optimizer step {optim_step} <<<")
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                    torch.cuda.profiler.start()
+                profiling_started = True
+
+            nvtx_push("data_to_device")
             batch = batch.to(config.device, non_blocking=True).long()
             inputs = batch[:, :-1].contiguous()
             targets = batch[:, 1:].contiguous()
+            nvtx_pop()
+
+            nvtx_push("forward")
             with autocast(device_type="cuda", dtype=torch.bfloat16):
-                logits = model(inputs)
+                logits, aux_loss = model(inputs)
+            nvtx_pop()
+
+            nvtx_push("loss_calc")
+            with autocast(device_type="cuda", dtype=torch.bfloat16):
                 loss = criterion(
                     logits.view(-1, logits.shape[-1]),
                     targets.view(-1),
                 )
+            nvtx_pop()
 
-            (loss / grad_accumulation_steps).backward()
+            nvtx_push("backward")
+            total_loss = loss + aux_loss
+            (total_loss / grad_accumulation_steps).backward()
+            nvtx_pop()
+
             accum_loss = accum_loss + loss.detach()  
             micro_count += 1
             last_inputs = inputs.detach()  # Keep reference for telemetry
 
             if micro_count == grad_accumulation_steps:
                 optim_step += 1
+
+                nvtx_push("grad_clip")
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     model.parameters(), phase_config.grad_clip
                 )
+                nvtx_pop()
+
+                nvtx_push("optimizer_step")
                 optimizer.step()
+                nvtx_pop()
+
+                nvtx_push("scheduler_step")
                 scheduler.step()
                 optimizer.zero_grad()
+                nvtx_pop()
 
-                # ── QK-norm scale annealing (Option C: gradual clamp) ──
+                # Stop CUDA Profiler after profile active steps
+                if profile and profiling_started and not profiling_stopped and optim_step >= profile_target_stop:
+                    print(f"\n[NSYS Profile] >>> Stopping CUDA Profiler at optimizer step {optim_step} <<<")
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                        torch.cuda.profiler.stop()
+                    profiling_stopped = True
+                    if profile_exit:
+                        print("[NSYS Profile] Targeted profiling window finished. Exiting training run.")
+                        break
+
                 raw_model = _unwrap(model)
-                qk_clamp = raw_model.step_qk_scale_anneal(
-                    current_step=optim_step,
-                    anneal_start_step=start_step + 1,  # begin immediately on resume
-                    anneal_steps=config.qk_scale_anneal_steps,
-                    target_max_scale=config.qk_scale_max,
-                )
-
 
                 avg_accum_loss = (accum_loss / grad_accumulation_steps).item()  
                 # ── Throughput & hardware metrics ──
@@ -145,12 +195,11 @@ def train_phase(
                             })
                             moe.reset_expert_counts()
 
-                # ── Attention health monitoring ──
-                metrics["attn/qk_scale_clamp"] = qk_clamp
 
                 # ── Telemetry: routing entropy + weight update ratios (every step) ──
                 current_lr = scheduler.get_last_lr()[0]
                 include_hidden = (optim_step % val_interval == 0)
+                nvtx_push("telemetry_diagnostics")
                 telemetry_metrics = raw_model.get_telemetry_diagnostics(
                     input_ids=last_inputs if include_hidden else None,
                     optimizer=optimizer,
@@ -162,6 +211,7 @@ def train_phase(
                 if optim_step % val_interval == 0:
                     attn_diag = raw.get_attention_diagnostics()
                     metrics.update(attn_diag)
+                nvtx_pop()
 
                 wandb_run.log(metrics, step=grad_accumulation_steps * optim_step)
                 accum_loss = 0.0
@@ -246,7 +296,7 @@ def train_phase(
                     # 12. Wikipedia (General Knowledge 3%)
                     print("--- 12. Wikipedia (3%) ---")
                     print(generate(raw,
-                            "Alan Turing (23 June 1912 – 7 June 1954) was an English mathematician, computer scientist, logician, cryptanalyst, philosopher, and theoretical biologist. Turing was highly influential in the development of theoretical computer science, providing a formalisation of the concepts of algorithm and computation with the Turing machine. During the Second World War, Turing worked for",
+                            "Alan Turing (23 June 1912 - 7 June 1954) was an English mathematician, computer scientist, logician, cryptanalyst, philosopher, and theoretical biologist. Turing was highly influential in the development of theoretical computer science, providing a formalisation of the concepts of algorithm and computation with the Turing machine. During the Second World War, Turing worked for",
                             config.device, max_tokens=150, temp=0.3))
                     print("-----------------------------------------\n")
                     model.train()
@@ -357,6 +407,30 @@ def _unwrap(model):
 
 
 if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(description="Pretraining script with Nsight Systems profiling")
+    parser.add_argument("--model", type=str, default="model_improv", choices=["model_adv", "model_improv"],
+                        help="Which model architecture to use (default: model_improv)")
+    parser.add_argument("--profile", action="store_true", help="Enable Nsight Systems profiling window via CUDA profiler API")
+    parser.add_argument("--profile-warmup-steps", type=int, default=5, help="Optimizer steps to wait before starting CUDA profiler")
+    parser.add_argument("--profile-active-steps", type=int, default=10, help="Optimizer steps to profile before stopping CUDA profiler")
+    parser.add_argument("--profile-no-exit", action="store_true", help="Do not exit training after profiling range finishes")
+    parser.add_argument("--no-compile", action="store_true", help="Disable torch.compile during profiling/execution")
+    cli_args, _ = parser.parse_known_args()
+
+    # ── Conditional model + config import ─────────────────
+    if cli_args.model == "model_adv":
+        from ..configs.new_model_config import config, PRETRAINING_PHASE_CONFIG
+        from ...models.model_adv import GPT_FLASH, build_optimizer_param_groups
+        PHASE_1_CONFIG = PRETRAINING_PHASE_CONFIG
+        PHASE_2_CONFIG = PRETRAINING_PHASE_CONFIG
+    else:
+        from ..configs.model_config import config, PHASE_1_CONFIG, PHASE_2_CONFIG
+        from ...models.model_improv import GPT_FLASH
+        from ...models.model_adv import build_optimizer_param_groups
+
+    profile_enabled = cli_args.profile or (os.environ.get("PROFILE_NSYS", "0").lower() in ("1", "true", "yes"))
+
     warnings.filterwarnings("ignore")
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -376,10 +450,16 @@ if __name__ == '__main__':
     tlog.logger.info(f"[INIT] Training started | phase={PHASE_2_CONFIG.phase_name}")
 
     # ── Model ──────────────────────────────────────────────
+    print(f"[Train] Using model: {cli_args.model}")
     model = GPT_FLASH(config, "cuda")
 
-    # Initialize model weights
-    init_gpt_model(model, config)
+    # model_adv has its own reset_parameters() called in __init__;
+    # model_improv uses the external weight_init module
+    if cli_args.model != "model_adv":
+        initialize_gpt_model(
+            model=model,
+            model_config=config,
+        )
     count_parameters(model)
 
     # ── Phase selection ────────────────────────────────────
@@ -391,10 +471,12 @@ if __name__ == '__main__':
         print(f"[Train] Eval suite will run every {eval_suite_interval} steps")
 
     optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=phase_config.peak_lr,
+        build_optimizer_param_groups(
+            model,
+            config.weight_decay,
+        ),
+        lr=config.learning_rate,
         betas=(0.9, 0.95),
-        weight_decay=0.1,
         eps=1e-8,
     )
     scheduler = create_phase_scheduler(optimizer, phase_config)
@@ -466,8 +548,13 @@ if __name__ == '__main__':
         print(f"[Scheduler] Remaining steps: {phase_config.total_steps - start_step}")
 
     # ── Compile model ──────────────────────────────────────
-    torch._dynamo.config.capture_scalar_outputs = True
-    model = torch.compile(model, mode="max-autotune-no-cudagraphs")
+    if not cli_args.no_compile:
+        torch._dynamo.config.capture_scalar_outputs = True
+        compile_mode = "default" if profile_enabled else "max-autotune-no-cudagraphs"
+        print(f"[Train] Compiling model with mode='{compile_mode}'...")
+        model = torch.compile(model, mode=compile_mode)
+    else:
+        print("[Train] torch.compile disabled via --no-compile")
 
     # ── Dataloaders ────────────────────────────────────────
     train_data, val_data = create_phase_dataloaders(
@@ -485,6 +572,10 @@ if __name__ == '__main__':
             train_data, wandb_run, phase_config,
             base_dir, start_step=start_step,
             eval_suite_interval=eval_suite_interval,
+            profile=profile_enabled,
+            profile_warmup_steps=cli_args.profile_warmup_steps,
+            profile_active_steps=cli_args.profile_active_steps,
+            profile_exit=not cli_args.profile_no_exit,
         )
     except KeyboardInterrupt:
         pass

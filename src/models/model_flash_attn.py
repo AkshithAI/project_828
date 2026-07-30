@@ -483,11 +483,11 @@ class Attention(nn.Module):
             device = self.wq.weight.device
             dtype = self.wq.weight.dtype
             self.cache_k = torch.zeros(
-                batch_size, self.max_cache_len, self.n_kv_heads, self.head_dim,
+                batch_size, self.n_kv_heads, self.max_cache_len, self.head_dim,
                 device=device, dtype=dtype,
             )
             self.cache_v = torch.zeros(
-                batch_size, self.max_cache_len, self.n_kv_heads, self.head_dim,
+                batch_size, self.n_kv_heads, self.max_cache_len, self.head_dim,
                 device=device, dtype=dtype,
             )
 
@@ -518,19 +518,14 @@ class Attention(nn.Module):
         Q,K = self.rope(Q,K,offset = start_pos,position_ids = position_ids)
 
         if self.inference:
-            self.cache_k[:,start_pos:end_pos,:,:] = K
-            self.cache_v[:,start_pos:end_pos,:,:] = V
-            K = self.cache_k[:,:end_pos,:,:]
-            V = self.cache_v[:,:end_pos,:,:]
+            # Write: transpose small new tokens (B,S,Hkv,D) → (B,Hkv,S,D)
+            self.cache_k[:, :, start_pos:end_pos, :] = K.transpose(1, 2)
+            self.cache_v[:, :, start_pos:end_pos, :] = V.transpose(1, 2)
+            # Read: already in (B, Hkv, end_pos, D) — SDPA format, no transpose
+            K = self.cache_k[:, :, :end_pos, :]
+            V = self.cache_v[:, :, :end_pos, :]
 
-            # ── Inference: Manual attention with softcap + causal/padding masks ──
-            # NOTE: flex_attention was removed here because it is NOT causal by
-            # default (requires a compiled block_mask) and ignored the attn_mask
-            # parameter, causing bidirectional prefill and padding-mask bypass.
-            # Manual attention is correct and equally fast for seq_len=1 decoding.
             Q = Q.transpose(1, 2)  # (B, H, S, D)
-            K = K.transpose(1, 2)
-            V = V.transpose(1, 2)
 
             # GQA expansion
             groups = self.n_heads // self.n_kv_heads

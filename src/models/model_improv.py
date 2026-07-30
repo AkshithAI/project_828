@@ -53,24 +53,22 @@ def soft_clamp(x: torch.Tensor, limit: float = 5.0):
     """
     return limit * torch.tanh(x / limit)
 
-def swiglu(x: torch.Tensor, alpha: float = 1.702, limit: float = 5.0):
+def swiglu(x: torch.Tensor, limit: float = 30.0):
     """SwiGLU activation with soft-clamping for gradient stability.
 
     Splits *x* along the last dimension into a gating half and a linear half,
-    applies soft-clamped SiLU-style gating, and returns the fused result.
+    applies SiLU-style gating, and returns the fused result.
 
     Args:
         x: Input tensor whose last dimension is even.
-        alpha: Temperature coefficient for the sigmoid gate.
         limit: Soft-clamping bound applied before gating.
 
     Returns:
         Activated tensor with last dimension halved.
     """
-    x_glu, x_linear = x.chunk(2, dim=-1)
-    x_glu_s = soft_clamp(x_glu, limit)
-    x_lin_s = soft_clamp(x_linear, limit)
-    return x_glu_s * torch.sigmoid(alpha * x_glu_s) * (x_lin_s + 1)
+    x_gate, x_up = x.chunk(2, dim=-1)
+    out = F.silu(x_gate) * x_up
+    return soft_clamp(out, limit)
 
 class MLPBlock(nn.Module):
     def __init__(self,
@@ -165,22 +163,6 @@ class Gate(nn.Module):
         if dist.is_available() and dist.is_initialized():
             dist.all_reduce(load, op=dist.ReduceOp.SUM)
         mean = load.mean()
-        e = torch.sign(mean - load)
-        self.bias.data.add_(self.effective_update * e)
-        self.bias.data.clamp_(-10.0, 10.0)
-        self.load_accum.zero_()
-
-    def commit_bias_update(self):
-        """Apply a sign-based bias correction to rebalance expert utilisation.
-
-        Aggregates load counts across distributed workers (if available),
-        then nudges each expert's bias toward the mean load. Should be
-        called once per training step after the backward pass.
-        """
-        load = self.load_accum.clone()
-        if dist.is_available() and dist.is_initialized():
-            dist.all_reduce(load, op=dist.ReduceOp.SUM)
-        mean = load.mean()
         e = torch.sign(mean - load)                            
         self.bias.data.add_(self.effective_update * e)
         self.bias.data.clamp_(-10.0, 10.0)
@@ -254,13 +236,9 @@ class MoE(nn.Module):
                 gating="sigmoid",
             )
 
-            # Apply resid_scale (MLPBlock scales output by √0.5)
             triton_out = triton_out * self.experts[0].resid_scale
-
-            # Add shared expert contribution (not part of TritonMoE kernel)
             triton_out = triton_out + self.shared_expert(x_flat)
 
-            # Compute aux loss from kernel's routing decisions
             T = x_flat.shape[0]
             scores = torch.sigmoid(self.gate.router(x_flat.float()))
             current_load = torch.bincount(
@@ -270,7 +248,6 @@ class MoE(nn.Module):
             P = scores.mean(dim=0)
             aux_loss = self.num_experts * torch.sum(f * P)
 
-            # Update expert counts for telemetry
             if self.training:
                 self.expert_counts += current_load.to(self.expert_counts.dtype)
                 self.total_tokens += T * self.gate.topk
@@ -313,39 +290,6 @@ class MoE(nn.Module):
         return mlp_out.view(*inp_shape), aux_loss
 
 
-def apply_rope(x : torch.Tensor,
-               cos : torch.Tensor,
-               sin : torch.Tensor
-    ) -> torch.Tensor:
-    """Apply Rotary Position Embedding to tensor *x*.
-
-    Splits the last dimension of *x* in half and applies the standard RoPE
-    rotation using the precomputed *cos* and *sin* tables.
-
-    Args:
-        x: Input tensor of shape ``(B, S, H, D)``.
-        cos: Cosine table, either ``(S, D//2)`` or ``(B, S, D//2)``.
-        sin: Sine table with the same shape as *cos*.
-
-    Returns:
-        Rotated tensor of the same shape as *x*.
-    """
-    if cos.dim() == 2:
-        # (seq_len, head_dim//2) -> (1, seq_len, 1, head_dim//2)
-        cos = cos.unsqueeze(0).unsqueeze(-2)
-        sin = sin.unsqueeze(0).unsqueeze(-2)
-    else:
-        # (batch, seq_len, head_dim//2) -> (batch, seq_len, 1, head_dim//2)
-        cos = cos.unsqueeze(-2)
-        sin = sin.unsqueeze(-2)
-    cos = cos.to(x.device).to(x.dtype)
-    sin = sin.to(x.device).to(x.dtype)
-    x1,x2 = torch.chunk(x,2,dim = -1)
-    o1 = x1 * cos - x2 * sin
-    o2 = x1 * sin + x2 * cos
-    return torch.cat([o1,o2],dim = -1)
-
-
 class RotaryEmbedding(nn.Module):
     def __init__(self,
                  head_dim : int,
@@ -380,6 +324,39 @@ class RotaryEmbedding(nn.Module):
         self.ntk_beta = ntk_beta
         self.scaling_factor = scaling_factor
         self.device = device
+
+    @staticmethod
+    def apply_rope(x : torch.Tensor,
+                cos : torch.Tensor,
+                sin : torch.Tensor
+        ) -> torch.Tensor:
+        """Apply Rotary Position Embedding to tensor *x*.
+
+        Splits the last dimension of *x* in half and applies the standard RoPE
+        rotation using the precomputed *cos* and *sin* tables.
+
+        Args:
+            x: Input tensor of shape ``(B, S, H, D)``.
+            cos: Cosine table, either ``(S, D//2)`` or ``(B, S, D//2)``.
+            sin: Sine table with the same shape as *cos*.
+
+        Returns:
+            Rotated tensor of the same shape as *x*.
+        """
+        if cos.dim() == 2: 
+            # (seq_len, head_dim//2) -> (1, seq_len, 1, head_dim//2)
+            cos = cos.unsqueeze(0).unsqueeze(-2)
+            sin = sin.unsqueeze(0).unsqueeze(-2)
+        else: # inference
+            # (batch, seq_len, head_dim//2) -> (batch, seq_len, 1, head_dim//2) * (batch, seq_len, n_heads, head_dim)
+            cos = cos.unsqueeze(-2)
+            sin = sin.unsqueeze(-2)
+        cos = cos.to(x.device).to(x.dtype)
+        sin = sin.to(x.device).to(x.dtype)
+        x1,x2 = torch.chunk(x,2,dim = -1)
+        o1 = x1 * cos - x2 * sin
+        o2 = x1 * sin + x2 * cos
+        return torch.cat([o1,o2],dim = -1)
 
     def _compute_concentration_and_inv_freq(self) -> Tuple[float,torch.Tensor]:
         """Refer gpt-oss implemention of YaRN and See YaRN paper for more details: https://arxiv.org/abs/2309.00071"""
@@ -456,12 +433,12 @@ class RotaryEmbedding(nn.Module):
 
         query_shape = q.shape
         q = q.view(batch_size,seq_len,-1,self.head_dim)
-        q = apply_rope(q,cos,sin)
+        q = RotaryEmbedding.apply_rope(q,cos,sin)
         q = q.reshape(query_shape)
 
         key_shape = k.shape
         k = k.view(batch_size,seq_len,-1,self.head_dim)
-        k = apply_rope(k,cos,sin)
+        k = RotaryEmbedding.apply_rope(k,cos,sin)
         k = k.reshape(key_shape)
 
         return q,k
@@ -523,11 +500,11 @@ class Attention(nn.Module):
             device = self.wq.weight.device
             dtype = self.wq.weight.dtype
             self.cache_k = torch.zeros(
-                batch_size, self.max_cache_len, self.n_kv_heads, self.head_dim,
+                batch_size, self.n_kv_heads, self.max_cache_len, self.head_dim,
                 device=device, dtype=dtype,
             )
             self.cache_v = torch.zeros(
-                batch_size, self.max_cache_len, self.n_kv_heads, self.head_dim,
+                batch_size, self.n_kv_heads, self.max_cache_len, self.head_dim,
                 device=device, dtype=dtype,
             )
 
@@ -560,14 +537,14 @@ class Attention(nn.Module):
         Q,K = self.rope(Q, K, cos, sin, offset = start_pos, position_ids = position_ids)
 
         if self.inference:
-            self.cache_k[:,start_pos:end_pos,:,:] = K
-            self.cache_v[:,start_pos:end_pos,:,:] = V
-            K = self.cache_k[:,:end_pos,:,:]
-            V = self.cache_v[:,:end_pos,:,:]
+            # Write: transpose small new tokens (B,S,Hkv,D) → (B,Hkv,S,D)
+            self.cache_k[:, :, start_pos:end_pos, :] = K.transpose(1, 2)
+            self.cache_v[:, :, start_pos:end_pos, :] = V.transpose(1, 2)
+            # Read: already in (B, Hkv, end_pos, D) — SDPA format, no transpose
+            K = self.cache_k[:, :, :end_pos, :]
+            V = self.cache_v[:, :, :end_pos, :]
 
             Q = Q.transpose(1, 2)  # (B, H, S, D)
-            K = K.transpose(1, 2)
-            V = V.transpose(1, 2)
 
             attn_out = F.scaled_dot_product_attention(
                 Q,K,V,
@@ -578,7 +555,6 @@ class Attention(nn.Module):
 
             attn_out = attn_out.transpose(1,2)
         else:
-            # ── Training: FlashAttention with native softcap ──
             attn_out = flash_attn_func(
                 Q, K, V, causal=True,
             )
@@ -756,3 +732,5 @@ class GPT_FLASH(nn.Module):
             metrics.update(compute_hidden_state_telemetry(self, input_ids))
 
         return metrics
+
+apply_rope = RotaryEmbedding.apply_rope
