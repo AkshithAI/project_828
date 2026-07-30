@@ -151,7 +151,7 @@ def run_ncu_profile(
     py_inline = (
         f"import sys; sys.path.insert(0, '{PROJECT_ROOT}'); "
         f"sys.path.insert(0, '{PROJECT_ROOT / 'src' / 'kernels'}'); "
-        f"exec(open('{kernel_file}').read())"
+        f"import runpy; runpy.run_path('{kernel_file}', run_name='__main__')"
     )
 
     cmd = [
@@ -172,12 +172,12 @@ def run_ncu_profile(
             f"import sys; sys.path.insert(0, '{PROJECT_ROOT}'); "
             f"sys.path.insert(0, '{PROJECT_ROOT / 'src' / 'kernels'}'); "
             f"sys.argv.append('--correctness-only'); "
-            f"exec(open('{kernel_file}').read())"
+            f"import runpy; runpy.run_path('{kernel_file}', run_name='__main__')"
         )
         cmd[-1] = py_inline
 
     print(f"\n  [NCU] Profiling {kernel_name}...")
-    print(f"  [NCU] Command: {ncu_bin} ... python3 -c 'exec(open({kernel_file.name}))'")
+    print(f"  [NCU] Command: {ncu_bin} ... python3 -c 'run_path({kernel_file.name})'")
 
     env = os.environ.copy()
     env["TOKENIZERS_PARALLELISM"] = "false"

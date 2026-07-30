@@ -9,7 +9,13 @@ import math
 import statistics
 from dataclasses import dataclass
 from typing import Callable, Optional
-from .utils import amp_custom_fwd, amp_custom_bwd
+try:
+    from .utils import amp_custom_fwd, amp_custom_bwd
+except ImportError:
+    try:
+        from src.kernels.utils import amp_custom_fwd, amp_custom_bwd
+    except ImportError:
+        from utils import amp_custom_fwd, amp_custom_bwd
 
 
 LOG2_E = tl.constexpr(1.4426950408889634)
