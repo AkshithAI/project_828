@@ -24,39 +24,52 @@ except ImportError:
 
 
 try:
-    from src.kernels.fused_linear_cross_entropy import fused_linear_cross_entropy
+    from ..kernels.fused_linear_cross_entropy import fused_linear_cross_entropy
     FUSED_LINEAR_CE_AVAILABLE = True
 except ImportError:
     try:
-        from kernels.fused_linear_cross_entropy import fused_linear_cross_entropy
+        from src.kernels.fused_linear_cross_entropy import fused_linear_cross_entropy
         FUSED_LINEAR_CE_AVAILABLE = True
     except ImportError:
-        fused_linear_cross_entropy = None
-        FUSED_LINEAR_CE_AVAILABLE = False
+        try:
+            from kernels.fused_linear_cross_entropy import fused_linear_cross_entropy
+            FUSED_LINEAR_CE_AVAILABLE = True
+        except ImportError:
+            fused_linear_cross_entropy = None
+            FUSED_LINEAR_CE_AVAILABLE = False
 
 
 try:
-    from src.kernels.apply_rope import TritonRoPEFunction
-    from src.kernels.swiglu import TritonSwigluFunction
+    from ..kernels.apply_rope import TritonRoPEFunction
+    from ..kernels.swiglu import TritonSwigluFunction
 except ImportError:
     try:
-        from kernels.apply_rope import TritonRoPEFunction
-        from kernels.swiglu import TritonSwigluFunction
+        from src.kernels.apply_rope import TritonRoPEFunction
+        from src.kernels.swiglu import TritonSwigluFunction
     except ImportError:
-        TritonRoPEFunction = None
-        TritonSwigluFunction = None
+        try:
+            from kernels.apply_rope import TritonRoPEFunction
+            from kernels.swiglu import TritonSwigluFunction
+        except ImportError as e:
+            print(f"[WARNING] Failed to import Triton kernels (RoPE/SwiGLU): {e}")
+            TritonRoPEFunction = None
+            TritonSwigluFunction = None
 
 
 try:
-    from src.kernels.fused_add_rms_norm import FusedAddRMSNormFunction
+    from ..kernels.fused_add_rms_norm import FusedAddRMSNormFunction
     FUSED_ADD_RMS_NORM_AVAILABLE = True
 except ImportError:
     try:
-        from kernels.fused_add_rms_norm import FusedAddRMSNormFunction
+        from src.kernels.fused_add_rms_norm import FusedAddRMSNormFunction
         FUSED_ADD_RMS_NORM_AVAILABLE = True
     except ImportError:
-        FusedAddRMSNormFunction = None
-        FUSED_ADD_RMS_NORM_AVAILABLE = False
+        try:
+            from kernels.fused_add_rms_norm import FusedAddRMSNormFunction
+            FUSED_ADD_RMS_NORM_AVAILABLE = True
+        except ImportError:
+            FusedAddRMSNormFunction = None
+            FUSED_ADD_RMS_NORM_AVAILABLE = False
 
 
 class RMS_Norm(nn.Module):
@@ -572,6 +585,24 @@ class RotaryEmbedding(nn.Module):
         sin = freqs.sin() * concentration
         return cos,sin
 
+    def _apply_rope_pytorch(self, x, cos, sin):
+        """PyTorch fallback for RoPE when Triton kernel is unavailable."""
+        # x: (B, T, nH, head_dim), cos/sin: (T, head_dim//2) or (B, T, head_dim//2)
+        half = x.shape[-1] // 2
+        x1, x2 = x[..., :half], x[..., half:]
+        # Broadcast cos/sin to match x shape
+        if cos.dim() == 2:
+            cos = cos.unsqueeze(0).unsqueeze(2)  # (1, T, 1, half)
+            sin = sin.unsqueeze(0).unsqueeze(2)
+        elif cos.dim() == 3:
+            cos = cos.unsqueeze(2)  # (B, T, 1, half)
+            sin = sin.unsqueeze(2)
+        out = torch.cat([
+            x1 * cos - x2 * sin,
+            x2 * cos + x1 * sin,
+        ], dim=-1)
+        return out
+
     def forward(self,
                 q : torch.Tensor,
                 k : torch.Tensor,
@@ -590,12 +621,18 @@ class RotaryEmbedding(nn.Module):
 
         query_shape = q.shape
         q = q.view(batch_size,seq_len,-1,self.head_dim)
-        q = TritonRoPEFunction.apply(q,cos,sin)
+        if TritonRoPEFunction is not None:
+            q = TritonRoPEFunction.apply(q,cos,sin)
+        else:
+            q = self._apply_rope_pytorch(q, cos, sin)
         q = q.reshape(query_shape)
 
         key_shape = k.shape
         k = k.view(batch_size,seq_len,-1,self.head_dim)
-        k = TritonRoPEFunction.apply(k,cos,sin)
+        if TritonRoPEFunction is not None:
+            k = TritonRoPEFunction.apply(k,cos,sin)
+        else:
+            k = self._apply_rope_pytorch(k, cos, sin)
         k = k.reshape(key_shape)
 
         return q,k
