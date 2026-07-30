@@ -147,6 +147,14 @@ def run_ncu_profile(
         print(f"[WARNING] Unknown kernel: {kernel_name}")
         return None
 
+    # ncu strips environment variables, so `python3 -m src.kernels.X` can't
+    # find the `src` package. Instead, use `python3 -c` with inline sys.path
+    # setup and runpy to guarantee the module is found.
+    py_inline = (
+        f"import sys; sys.path.insert(0, '{PROJECT_ROOT}'); "
+        f"import runpy; runpy.run_module('{module}', run_name='__main__')"
+    )
+
     cmd = [
         ncu_bin,
         "--set", "full",                   # Full metric collection
@@ -156,20 +164,22 @@ def run_ncu_profile(
         "--kernel-name-base", "function",  # Use function names for readability
         "--launch-skip", "0",              # Profile from start
         "--launch-count", "20",            # Limit kernel launches to profile
-        "python3", "-m", module,
+        "python3", "-c", py_inline,
     ]
 
-    # For fused_linear_cross_entropy, add CLI args
+    # For fused_linear_cross_entropy, add CLI args to the inline script
     if kernel_name == "fused_linear_cross_entropy":
-        cmd.extend(["--correctness-only"])  # Just run correctness (lighter)
+        py_inline = (
+            f"import sys; sys.path.insert(0, '{PROJECT_ROOT}'); sys.argv.append('--correctness-only'); "
+            f"import runpy; runpy.run_module('{module}', run_name='__main__')"
+        )
+        cmd[-1] = py_inline
 
     print(f"\n  [NCU] Profiling {kernel_name}...")
-    print(f"  [NCU] Command: {' '.join(cmd[:6])}... python3 -m {module}")
+    print(f"  [NCU] Command: {ncu_bin} ... python3 -c 'runpy.run_module({module})'")
 
     env = os.environ.copy()
     env["TOKENIZERS_PARALLELISM"] = "false"
-    # ncu spawns a new python process — it needs PYTHONPATH to find `src.*` modules
-    env["PYTHONPATH"] = str(PROJECT_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
 
     try:
         result = subprocess.run(
