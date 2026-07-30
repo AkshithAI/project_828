@@ -208,6 +208,7 @@ class Gate(nn.Module):
             "last_load",
             torch.zeros(self.num_experts, dtype=torch.float32, device=device,), persistent=False,
         )
+        self.last_routing_probs = None
 
     def forward(self, x: torch.Tensor,) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,]:
         """
@@ -249,6 +250,7 @@ class Gate(nn.Module):
                 self.load_accum.add_(current_load.float())
                 self.last_load.copy_(current_load.float())
                 self.last_mean_scores.copy_(mean_probability.detach())
+                self.last_routing_probs = scores.detach()
 
         return routing_weights, expert_indices, current_load, auxiliary_loss
 

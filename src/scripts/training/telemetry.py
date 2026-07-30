@@ -106,7 +106,7 @@ def compute_routing_telemetry(model: nn.Module) -> Dict[str, float]:
         max_entropy = math.log(num_experts)
 
         # ── Routing entropy from cached sigmoid probs ──
-        probs = gate.last_routing_probs  # (N_tokens, E) or None
+        probs = getattr(gate, "last_routing_probs", None)  # (N_tokens, E) or None
         if probs is not None:
             # Normalize sigmoid outputs to a probability distribution
             probs_float = probs.float()
