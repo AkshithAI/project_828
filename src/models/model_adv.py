@@ -159,7 +159,7 @@ class Gate(nn.Module):
         self.num_experts = config.num_experts
         self.route_scale = config.route_scale
 
-        self.bias_update_rate = getattr(config, "router_bias_update_rate", config.update_param)
+        self.bias_update_rate = getattr(config, "router_bias_update_rate", getattr(config, "update_param", 2e-3))
         self.bias_max = getattr(config, "router_bias_max", 1.0)
 
         self.router = nn.Linear(

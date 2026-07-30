@@ -27,6 +27,7 @@ class ModelConfig:
         # Training
         dropout : float = 0.0
         learning_rate : float = 3e-4
+        weight_decay : float = 0.1
         batch_size : int = 8
         device = "cuda" if torch.cuda.is_available() else "cpu"
         dtype = torch.bfloat16

@@ -19,6 +19,7 @@ class ModelConfig:
 
     use_liger_moe: bool = True
     router_bias_update_rate: float = 2e-3
+    update_param: float = 2e-3
     router_bias_max: float = 1.0
     moe_aux_loss_weight: float = 1e-3
     initializer_std: float = 0.02
