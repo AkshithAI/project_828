@@ -106,17 +106,18 @@ def train_phase(
             targets = batch[:, 1:].contiguous()
             nvtx_pop()
 
-            nvtx_push("forward")
+            nvtx_push("forward_and_loss")
             with autocast(device_type="cuda", dtype=torch.bfloat16):
-                logits, aux_loss = model(inputs)
-            nvtx_pop()
-
-            nvtx_push("loss_calc")
-            with autocast(device_type="cuda", dtype=torch.bfloat16):
-                loss = criterion(
-                    logits.view(-1, logits.shape[-1]),
-                    targets.view(-1),
-                )
+                try:
+                    res = model(inputs, labels=targets)
+                except TypeError:
+                    res = model(inputs)
+                
+                first, aux_loss = res
+                if first.dim() == 0:
+                    loss = first
+                else:
+                    loss = criterion(first.view(-1, first.shape[-1]), targets.view(-1))
             nvtx_pop()
 
             nvtx_push("backward")
