@@ -24,29 +24,39 @@ except ImportError:
 
 
 try:
-    from kernels.fused_linear_cross_entropy import fused_linear_cross_entropy
-
+    from src.kernels.fused_linear_cross_entropy import fused_linear_cross_entropy
     FUSED_LINEAR_CE_AVAILABLE = True
 except ImportError:
-    fused_linear_cross_entropy = None
-    FUSED_LINEAR_CE_AVAILABLE = False
+    try:
+        from kernels.fused_linear_cross_entropy import fused_linear_cross_entropy
+        FUSED_LINEAR_CE_AVAILABLE = True
+    except ImportError:
+        fused_linear_cross_entropy = None
+        FUSED_LINEAR_CE_AVAILABLE = False
 
 
 try:
-    from kernels.apply_rope import TritonRoPEFunction
-    from kernels.swiglu import TritonSwigluFunction
+    from src.kernels.apply_rope import TritonRoPEFunction
+    from src.kernels.swiglu import TritonSwigluFunction
 except ImportError:
-    TritonRoPEFunction = None
-    TritonSwigluFunction = None
+    try:
+        from kernels.apply_rope import TritonRoPEFunction
+        from kernels.swiglu import TritonSwigluFunction
+    except ImportError:
+        TritonRoPEFunction = None
+        TritonSwigluFunction = None
 
 
 try:
-    from kernels.fused_add_rms_norm import FusedAddRMSNormFunction
-
+    from src.kernels.fused_add_rms_norm import FusedAddRMSNormFunction
     FUSED_ADD_RMS_NORM_AVAILABLE = True
 except ImportError:
-    FusedAddRMSNormFunction = None
-    FUSED_ADD_RMS_NORM_AVAILABLE = False
+    try:
+        from kernels.fused_add_rms_norm import FusedAddRMSNormFunction
+        FUSED_ADD_RMS_NORM_AVAILABLE = True
+    except ImportError:
+        FusedAddRMSNormFunction = None
+        FUSED_ADD_RMS_NORM_AVAILABLE = False
 
 
 class RMS_Norm(nn.Module):

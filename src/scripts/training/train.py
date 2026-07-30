@@ -416,6 +416,7 @@ if __name__ == '__main__':
     parser.add_argument("--profile-active-steps", type=int, default=10, help="Optimizer steps to profile before stopping CUDA profiler")
     parser.add_argument("--profile-no-exit", action="store_true", help="Do not exit training after profiling range finishes")
     parser.add_argument("--no-compile", action="store_true", help="Disable torch.compile during profiling/execution")
+    parser.add_argument("--no-resume", action="store_true", help="Start fresh, skip checkpoint loading")
     cli_args, _ = parser.parse_known_args()
 
     # ── Conditional model + config import ─────────────────
@@ -518,9 +519,13 @@ if __name__ == '__main__':
     )
 
     # ── Resume from checkpoint ─────────────────────────────
-    start_step, dataloader_state, saved_phase = load_checkpoint(
-        base_dir, model, optimizer, scheduler, device=config.device
-    )
+    if getattr(cli_args, 'no_resume', False):
+        print("[Train] --no-resume: skipping checkpoint, starting fresh")
+        start_step, dataloader_state, saved_phase = 0, None, phase_config.phase_num
+    else:
+        start_step, dataloader_state, saved_phase = load_checkpoint(
+            base_dir, model, optimizer, scheduler, device=config.device
+        )
 
     if saved_phase != phase_config.phase_num:
         tlog.log_phase_transition(saved_phase, phase_config.phase_num, start_step)

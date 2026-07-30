@@ -112,6 +112,7 @@ def run_nsys_profile(
         "--profile-warmup-steps", str(warmup_steps),
         "--profile-active-steps", str(active_steps),
         "--no-compile",                          # Disable torch.compile for cleaner traces
+        "--no-resume",                             # Start fresh, don't load existing checkpoints
     ]
 
     print(f"\n{'='*70}")
