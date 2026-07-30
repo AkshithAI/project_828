@@ -52,7 +52,7 @@ from typing import Dict, List, Optional
 
 # ── Ensure project root is importable ──────────────────────
 SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent.parent.parent.parent  # project-828/
+PROJECT_ROOT = SCRIPT_DIR.parent.parent.parent  # project_828/
 sys.path.insert(0, str(PROJECT_ROOT))
 
 
