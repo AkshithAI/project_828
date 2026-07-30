@@ -136,10 +136,10 @@ def run_ncu_profile(
 
     # Map kernel names to their module paths
     kernel_modules = {
-        "apply_rope": "project_828.src.kernels.apply_rope",
-        "swiglu": "project_828.src.kernels.swiglu",
-        "fused_add_rms_norm": "project_828.src.kernels.fused_add_rms_norm",
-        "fused_linear_cross_entropy": "project_828.src.kernels.fused_linear_cross_entropy",
+        "apply_rope": "src.kernels.apply_rope",
+        "swiglu": "src.kernels.swiglu",
+        "fused_add_rms_norm": "src.kernels.fused_add_rms_norm",
+        "fused_linear_cross_entropy": "src.kernels.fused_linear_cross_entropy",
     }
 
     module = kernel_modules.get(kernel_name)
@@ -218,7 +218,7 @@ def run_rope_tests() -> KernelResults:
     results = KernelResults(kernel_name="apply_rope")
 
     try:
-        from project_828.src.kernels.apply_rope import (
+        from src.kernels.apply_rope import (
             TritonRoPEFunction, pytorch_apply_rope,
             run_correctness_tests, run_benchmark,
         )
@@ -300,7 +300,7 @@ def run_swiglu_tests() -> KernelResults:
     results = KernelResults(kernel_name="swiglu")
 
     try:
-        from project_828.src.kernels.swiglu import (
+        from src.kernels.swiglu import (
             TritonSwigluFunction, triton_swiglu, naive_swiglu,
         )
 
@@ -367,7 +367,7 @@ def run_fused_add_rms_norm_tests() -> KernelResults:
     results = KernelResults(kernel_name="fused_add_rms_norm")
 
     try:
-        from project_828.src.kernels.fused_add_rms_norm import (
+        from src.kernels.fused_add_rms_norm import (
             FusedAddRMSNormFunction, PyTorchFusedAddRMSNorm,
         )
 
@@ -464,7 +464,7 @@ def run_fused_linear_ce_tests() -> KernelResults:
     results = KernelResults(kernel_name="fused_linear_cross_entropy")
 
     try:
-        from project_828.src.kernels.fused_linear_cross_entropy import (
+        from src.kernels.fused_linear_cross_entropy import (
             fused_linear_cross_entropy, naive_linear_cross_entropy,
             tensor_error_metrics, create_inputs,
         )

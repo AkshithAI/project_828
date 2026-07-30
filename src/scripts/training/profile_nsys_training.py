@@ -94,7 +94,7 @@ def run_nsys_profile(
     output_prefix = output_dir / f"nsys_training_{model_name}_{timestamp}"
 
     # The training script is run as a module from the project root
-    train_module = "project_828.src.scripts.training.train"
+    train_module = "src.scripts.training.train"
 
     cmd = [
         nsys_bin, "profile",
