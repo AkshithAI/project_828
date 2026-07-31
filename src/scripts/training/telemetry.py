@@ -27,7 +27,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict
+from typing import Dict, Any
 
 try:
     from flash_attn import flash_attn_func as _orig_flash_attn_func
@@ -382,3 +382,61 @@ def compute_weight_update_ratios(
         metrics["telemetry/update_ratio_max"] = max(all_ratios)
 
     return metrics
+
+
+# ═══════════════════════════════════════════════════════════════
+# 4. Async Non-Blocking Telemetry Logger
+# ═══════════════════════════════════════════════════════════════
+
+import queue
+import threading
+
+class AsyncTelemetryLogger:
+    """
+    Non-blocking async telemetry logger.
+    Offloads wandb.log() network I/O and dictionary logging to a background
+    thread queue, ensuring 0 ms blocking overhead on the GPU training loop.
+    """
+
+    def __init__(self, wandb_run=None, queue_size: int = 1000):
+        self.wandb_run = wandb_run
+        self.queue: queue.Queue = queue.Queue(maxsize=queue_size)
+        self._stop_event = threading.Event()
+        self._worker_thread = threading.Thread(
+            target=self._logging_worker, daemon=True, name="async-telemetry-logger"
+        )
+        self._worker_thread.start()
+
+    def log(self, metrics: Dict[str, Any], step: int):
+        """Enqueue metrics for non-blocking background logging."""
+        if not self.wandb_run:
+            return
+        try:
+            self.queue.put_nowait((metrics.copy(), step))
+        except queue.Full:
+            pass  # Drop metric frame if queue overflows to protect training loop
+
+    def _logging_worker(self):
+        while not self._stop_event.is_set() or not self.queue.empty():
+            try:
+                item = self.queue.get(timeout=0.5)
+                if item is None:
+                    break
+                metrics, step = item
+                if self.wandb_run:
+                    self.wandb_run.log(metrics, step=step)
+                self.queue.task_done()
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"[AsyncTelemetryLogger] Warning: failed to log metrics: {e}")
+
+    def flush_and_shutdown(self):
+        """Flush remaining metrics and stop worker thread."""
+        self._stop_event.set()
+        try:
+            self.queue.put_nowait(None)
+        except queue.Full:
+            pass
+        if self._worker_thread.is_alive():
+            self._worker_thread.join(timeout=3.0)

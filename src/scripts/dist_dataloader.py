@@ -4,7 +4,8 @@ from .dataloader import (
 from .dataloader import (
     resolve_dataset_files as _resolve_dataset_files_base,
     _compute_shard_skip, _count_shard_rows_fast,
-    ShardedStream, ResumableDataset, ResumableDataLoader, PrefetchedDataLoader
+    ShardedStream, ResumableDataset, ResumableDataLoader, PrefetchedDataLoader,
+    ZeroStallDataLoader
 )
 from .dataloader import FORMAT_FNS
 import math
@@ -274,6 +275,87 @@ class WeightedMixerDataset(IterableDataset):
                 yield chunk 
  
             self.state.dataset_states[name].buffer_tokens = buffers[ds_idx].copy()
+
+    # ── text-only iterator for ZeroStallDataLoader ─────────────
+
+    def __iter_texts__(self):
+        """Yield raw text strings without tokenizing.
+
+        Maintains the same deterministic round-robin draw order, format
+        function application, epoch tracking, and document counting as
+        :meth:`__iter__`.  Yields text strings instead of token chunks so
+        that :class:`ZeroStallDataLoader` can batch-tokenize externally via
+        gigatoken's GIL-releasing Rust encoder.
+        """
+        iterators: List[Optional[Any]] = [
+            iter(stream) for _, stream, _, _ in self.entries
+        ]
+        exhausted: List[bool] = [
+            self.state.dataset_states[name].epochs_completed >= self._max_epochs[i]
+            for i, (name, _, _, _) in enumerate(self.entries)
+        ]
+        if any(exhausted):
+            already = [self.entries[i][0] for i, e in enumerate(exhausted) if e]
+            print(f"[Mixer] Already exhausted on resume: {already}")
+
+        pos = self.state.draw_cycle_position
+
+        while True:
+            if all(exhausted):
+                break
+
+            ds_idx = self._draw_schedule[pos % self._cycle_len]
+            pos += 1
+            self.state.draw_cycle_position = pos
+
+            if exhausted[ds_idx]:
+                continue
+
+            name, _, _, fmt_fn = self.entries[ds_idx]
+            it = iterators[ds_idx]
+
+            try:
+                row = next(it)
+            except StopIteration:
+                ds_state = self.state.dataset_states[name]
+                max_ep = self._max_epochs[ds_idx]
+
+                if ds_state.epochs_completed + 1 < max_ep:
+                    ds_state.epochs_completed += 1
+                    ds_state.documents_processed = 0
+                    ds_state.docs_per_shard = []
+                    ds_state.buffer_tokens = []
+
+                    print(f"[Mixer] Dataset '{name}' completed epoch "
+                          f"{ds_state.epochs_completed}/{max_ep}. Restarting...")
+
+                    new_stream = self._create_fresh_stream(ds_idx)
+                    if new_stream is not None:
+                        self.entries[ds_idx] = (
+                            name, new_stream, self.entries[ds_idx][2], fmt_fn,
+                        )
+                        iterators[ds_idx] = iter(new_stream)
+                    else:
+                        exhausted[ds_idx] = True
+                        print(f"[Mixer] Failed to restart '{name}'. "
+                              f"Marking as exhausted.")
+                else:
+                    ds_state.epochs_completed += 1
+                    exhausted[ds_idx] = True
+                    print(f"[Mixer] Dataset '{name}' exhausted after "
+                          f"{ds_state.epochs_completed} epoch(s) "
+                          f"(max_epochs={max_ep}), "
+                          f"{ds_state.documents_processed} documents "
+                          f"in final epoch.")
+                continue
+
+            self.state.dataset_states[name].documents_processed += 1
+
+            text = fmt_fn(row)
+            if text is None:
+                continue
+
+            yield text
 
 
 def load_phase_datasets(
@@ -566,13 +648,12 @@ def create_phase_dataloaders(
         world_size=world_size,
         context_length=context_length,
     )
-    _raw_loader = ResumableDataLoader(
+    train_loader = ZeroStallDataLoader(
         mixer_dataset,
         batch_size=phase_config.micro_batch_size,
-        pin_memory=True,
-        num_workers=0,
+        num_prefetch=16,
+        tokenize_chunk_size=512,
     )
-    train_loader = PrefetchedDataLoader(_raw_loader, num_prefetch=3)
 
     # ── Validation ──
     val_stream = load_dataset(

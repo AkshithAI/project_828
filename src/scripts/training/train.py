@@ -22,6 +22,7 @@ from .telemetry import (
     compute_routing_telemetry,
     compute_weight_update_ratios,
     compute_hidden_state_telemetry,
+    AsyncTelemetryLogger,
 )
 
 
@@ -78,6 +79,9 @@ def train_phase(
     profile_target_stop = profile_target_start + profile_active_steps
     if profile:
         print(f"[NSYS Profile] Profiling enabled: Warmup until step {profile_target_start}, profile {profile_active_steps} steps until step {profile_target_stop}.")
+
+    # ── Async telemetry logger (non-blocking background thread) ──
+    async_logger = AsyncTelemetryLogger(wandb_run)
 
     # ── Async checkpoint thread handle ──
     _save_thread = None
@@ -214,7 +218,7 @@ def train_phase(
                     metrics.update(attn_diag)
                 nvtx_pop()
 
-                wandb_run.log(metrics, step=grad_accumulation_steps * optim_step)
+                async_logger.log(metrics, step=grad_accumulation_steps * optim_step)
                 accum_loss = 0.0
                 micro_count = 0
 
@@ -399,6 +403,8 @@ def train_phase(
         tlog.logger.error(f"[CRASH] {type(exc).__name__}: {exc}")
         tlog.flush()
         raise
+    finally:
+        async_logger.flush_and_shutdown()
 
 
 

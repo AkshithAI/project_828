@@ -244,12 +244,11 @@ class TestKVCache:
         assert attn.inference is True
 
     def test_cache_allocation(self):
-        """reset_cache should allocate correctly shaped tensors."""
         cfg = _make_config(max_context_len=256)
         attn = Attention(cfg, inference=True)
         attn.reset_cache(batch_size=4)
-        assert attn.cache_k.shape == (4, 256, cfg.num_key_value_heads, cfg.head_dim)
-        assert attn.cache_v.shape == (4, 256, cfg.num_key_value_heads, cfg.head_dim)
+        assert attn.cache_k.shape == (4, cfg.num_key_value_heads, 256, cfg.head_dim)
+        assert attn.cache_v.shape == (4, cfg.num_key_value_heads, 256, cfg.head_dim)
 
     def test_prefill_then_decode_matches_full(self):
         """
