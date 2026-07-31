@@ -28,6 +28,8 @@ try:
     tokenizer = gt_tokenizer.as_hf()
     if tokenizer.eos_token_id is None and _hf_tokenizer.eos_token_id is not None:
         tokenizer.eos_token_id = _hf_tokenizer.eos_token_id
+    if not hasattr(tokenizer, 'encode_batch'):
+        tokenizer.encode_batch = lambda texts: gt_tokenizer._backend.encode_batch(texts)
     print(f"[Tokenizer] Successfully loaded Gigatoken Rust/SIMD backend (microsoft/phi-2, eos_token_id={tokenizer.eos_token_id}).")
 except Exception as _e:
     print(f"[Tokenizer] Gigatoken initialization skipped ({_e}); using HF AutoTokenizer.")
@@ -35,6 +37,11 @@ except Exception as _e:
     if not hasattr(tokenizer, 'encode_batch'):
         tokenizer.encode_batch = lambda texts: tokenizer(texts, add_special_tokens=False)['input_ids']
 
-# Ensure vocab_size is accessible for model config initialization
-if not hasattr(tokenizer, 'vocab_size'):
-    tokenizer.vocab_size = _hf_tokenizer.vocab_size
+# Set vocab_size to actual total token count (including added tokens) padded to a multiple of 128 for GPU alignment
+_raw_vocab_len = max(len(_hf_tokenizer), getattr(_hf_tokenizer, 'vocab_size', 0))
+_padded_vocab_size = ((_raw_vocab_len + 127) // 128) * 128
+
+try:
+    type(tokenizer).vocab_size = property(lambda self: _padded_vocab_size)
+except Exception:
+    tokenizer.vocab_size = _padded_vocab_size

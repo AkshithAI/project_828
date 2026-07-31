@@ -1179,8 +1179,8 @@ class ZeroStallDataLoader:
         self,
         mixer_dataset,
         batch_size: int,
-        num_prefetch: int = 8,
-        tokenize_chunk_size: int = 512,
+        num_prefetch: int = 32,
+        tokenize_chunk_size: int = 64,
     ):
         self.dataset = mixer_dataset
         self.batch_size = batch_size
@@ -1211,7 +1211,7 @@ class ZeroStallDataLoader:
         return self.dataset.state.to_dict()
 
     def __iter__(self):
-        text_q: queue.Queue = queue.Queue(maxsize=self.chunk_size * 2)
+        text_q: queue.Queue = queue.Queue(maxsize=self.chunk_size * 4)
         tensor_q: queue.Queue = queue.Queue(maxsize=self.num_prefetch)
         _sentinel = object()
         _errors: list = [None, None]   # [text_producer_error, tokenizer_error]
@@ -1232,7 +1232,7 @@ class ZeroStallDataLoader:
                     self.pause_event.wait()
                     while not _stop.is_set():
                         try:
-                            text_q.put(text, timeout=1.0)
+                            text_q.put(text, timeout=0.1)
                             break
                         except queue.Full:
                             continue
@@ -1251,17 +1251,18 @@ class ZeroStallDataLoader:
                 token_buffer: list = []
                 text_batch: list = []
                 done = False
+                target_chunk = min(self.batch_size * 2, self.chunk_size)
 
                 while not done and not _stop.is_set():
-                    # ── Collect texts up to chunk_size ──
-                    while len(text_batch) < self.chunk_size:
+                    # ── Collect texts up to target_chunk ──
+                    while len(text_batch) < target_chunk:
                         try:
-                            item = text_q.get(timeout=0.1)
+                            item = text_q.get(timeout=0.005)
                         except queue.Empty:
                             if _stop.is_set():
                                 done = True
                                 break
-                            # Flush partial batch if queue is temporarily empty
+                            # Flush partial batch immediately if queue is empty
                             if text_batch:
                                 break
                             continue
@@ -1297,7 +1298,7 @@ class ZeroStallDataLoader:
                         self.pause_event.wait()
                         while not _stop.is_set():
                             try:
-                                tensor_q.put(t, timeout=1.0)
+                                tensor_q.put(t, timeout=0.1)
                                 break
                             except queue.Full:
                                 continue
@@ -1343,6 +1344,7 @@ class ZeroStallDataLoader:
                 yield item
         finally:
             _stop.set()
+
 
 
 # ── Weighted multi-dataset mixer with exact resumption ───────────────────────── 
@@ -1941,8 +1943,8 @@ def create_phase_dataloaders(
     train_loader = ZeroStallDataLoader(
         mixer_dataset,
         batch_size=phase_config.micro_batch_size,
-        num_prefetch=16,
-        tokenize_chunk_size=512,
+        num_prefetch=32,
+        tokenize_chunk_size=64,
     )
 
     # ── Validation ──

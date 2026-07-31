@@ -651,8 +651,8 @@ def create_phase_dataloaders(
     train_loader = ZeroStallDataLoader(
         mixer_dataset,
         batch_size=phase_config.micro_batch_size,
-        num_prefetch=16,
-        tokenize_chunk_size=512,
+        num_prefetch=32,
+        tokenize_chunk_size=64,
     )
 
     # ── Validation ──

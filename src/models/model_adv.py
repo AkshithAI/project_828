@@ -1212,11 +1212,11 @@ class GPT_FLASH(nn.Module):
         # 1. Routing entropy + router weight cosine sim (lightweight)
         metrics.update(compute_routing_telemetry(self))
 
-        # 2. Weight update ratios (needs optimizer state)
-        if optimizer is not None:
+        # 2. Weight update ratios (expensive — run only at val_interval)
+        if include_hidden_states and optimizer is not None:
             metrics.update(compute_weight_update_ratios(self, optimizer, lr))
 
-        # 3. Hidden state collapse (expensive — only at val_interval)
+        # 3. Hidden state collapse (expensive — run only at val_interval)
         if include_hidden_states and input_ids is not None:
             metrics.update(compute_hidden_state_telemetry(self, input_ids))
 
