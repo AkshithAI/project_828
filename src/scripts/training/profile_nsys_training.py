@@ -136,13 +136,16 @@ def run_nsys_profile(
         print(f"[WARNING] nsys exited with code {result.returncode} for {model_name}")
         print("  This may be expected if the training script exits after profiling window.")
 
-    # Find the generated files
+    # Find the generated trace file (.nsys-rep or .qdstrm)
     nsys_rep = Path(f"{output_prefix}.nsys-rep")
+    if not nsys_rep.exists():
+        nsys_rep = Path(f"{output_prefix}.qdstrm")
     sqlite_file = Path(f"{output_prefix}.sqlite")
 
     if not nsys_rep.exists():
-        # Try finding any .nsys-rep file matching the prefix
-        matches = list(output_dir.glob(f"nsys_training_{model_name}*.nsys-rep"))
+        # Try finding any matching trace file
+        matches = list(output_dir.glob(f"nsys_training_{model_name}*.nsys-rep")) + \
+                  list(output_dir.glob(f"nsys_training_{model_name}*.qdstrm"))
         if matches:
             nsys_rep = sorted(matches)[-1]  # Latest
             sqlite_file = nsys_rep.with_suffix(".sqlite")
@@ -311,11 +314,12 @@ def run_nsys_text_stats(output_dir: Path, model_name: str) -> dict:
     except FileNotFoundError:
         return text_reports
 
-    nsys_rep_files = sorted(output_dir.glob(f"nsys_training_{model_name}*.nsys-rep"))
+    nsys_rep_files = list(output_dir.glob(f"nsys_training_{model_name}*.nsys-rep")) + \
+                     list(output_dir.glob(f"nsys_training_{model_name}*.qdstrm"))
     if not nsys_rep_files:
         return text_reports
 
-    nsys_rep = nsys_rep_files[-1]
+    nsys_rep = sorted(nsys_rep_files)[-1]
 
     report_types = ["nvtx_sum", "cuda_gpu_kern_sum", "cuda_api_sum", "osrt_sum"]
     for report in report_types:
