@@ -186,7 +186,27 @@ def run_ncu_profile(
         if result.returncode != 0:
             print(f"  [NCU] Warning: ncu exited with code {result.returncode}")
             if result.stderr:
-                print(f"  [NCU] stderr: {result.stderr[:500]}")
+                print(f"  [NCU] stderr: {result.stderr[:1000]}")
+            if result.stdout:
+                print(f"  [NCU] stdout: {result.stdout[:1000]}")
+
+            # Fallback: try with --set basic in case --set full is restricted by GPU performance counters
+            print(f"  [NCU] Retrying {kernel_name} with --set basic...")
+            cmd_basic = list(cmd)
+            idx = cmd_basic.index("--set")
+            cmd_basic[idx + 1] = "basic"
+            result = subprocess.run(
+                cmd_basic,
+                cwd=str(PROJECT_ROOT),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+            if result.returncode != 0:
+                print(f"  [NCU] Retry failed with exit code {result.returncode}")
+                if result.stderr:
+                    print(f"  [NCU] Retry stderr: {result.stderr[:1000]}")
     except subprocess.TimeoutExpired:
         print(f"  [NCU] Timeout after 600s for {kernel_name}")
         return None
