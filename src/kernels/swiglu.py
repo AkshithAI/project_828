@@ -312,5 +312,7 @@ def benchmark_performance():
 
 
 if __name__ == "__main__":
+    import sys
     test_correctness()
-    benchmark_performance()
+    if "--correctness-only" not in sys.argv:
+        benchmark_performance()

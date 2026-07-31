@@ -151,6 +151,7 @@ def run_ncu_profile(
     py_inline = (
         f"import sys; sys.path.insert(0, '{PROJECT_ROOT}'); "
         f"sys.path.insert(0, '{PROJECT_ROOT / 'src' / 'kernels'}'); "
+        f"sys.argv.append('--correctness-only'); "
         f"import runpy; runpy.run_path('{kernel_file}', run_name='__main__')"
     )
 
@@ -165,16 +166,6 @@ def run_ncu_profile(
         "--launch-count", "20",            # Limit kernel launches to profile
         "python3", "-c", py_inline,
     ]
-
-    # For fused_linear_cross_entropy, add CLI args to the inline script
-    if kernel_name == "fused_linear_cross_entropy":
-        py_inline = (
-            f"import sys; sys.path.insert(0, '{PROJECT_ROOT}'); "
-            f"sys.path.insert(0, '{PROJECT_ROOT / 'src' / 'kernels'}'); "
-            f"sys.argv.append('--correctness-only'); "
-            f"import runpy; runpy.run_path('{kernel_file}', run_name='__main__')"
-        )
-        cmd[-1] = py_inline
 
     print(f"\n  [NCU] Profiling {kernel_name}...")
     print(f"  [NCU] Command: {ncu_bin} ... python3 -c 'run_path({kernel_file.name})'")
@@ -203,13 +194,16 @@ def run_ncu_profile(
         print(f"  [NCU] Error: {e}")
         return None
 
-    # Check for output file (ncu may add .ncu-rep suffix)
+    # Check for output file (supporting Linux formats: .ncu-rep, .csv, .raw, .log, .qdstrm)
     ncu_rep = output_file
     if not ncu_rep.exists():
         ncu_rep = output_file.with_suffix(".ncu-rep")
     if not ncu_rep.exists():
-        # Search for any matching file
-        matches = list(output_dir.glob(f"ncu_{kernel_name}*.ncu-rep"))
+        matches = []
+        for ext in [".ncu-rep", ".csv", ".raw", ".log", ".qdstrm", ".nsight-cuprod"]:
+            matches.extend(output_dir.glob(f"ncu_{kernel_name}*{ext}"))
+        if not matches:
+            matches = [f for f in output_dir.glob(f"ncu_{kernel_name}*") if f.is_file() and not f.name.endswith(".json")]
         if matches:
             ncu_rep = sorted(matches)[-1]
 
@@ -217,7 +211,7 @@ def run_ncu_profile(
         print(f"  [NCU] ✅ Report saved: {ncu_rep.name}")
         return ncu_rep
     else:
-        print(f"  [NCU] ⚠ No .ncu-rep file generated")
+        print(f"  [NCU] ⚠ No NCU profile file generated")
         return None
 
 
@@ -710,8 +704,8 @@ def upload_results_to_wandb(
                 f"{kernel_name}/avg_speedup": avg_speedup,
             })
 
-    # ── Upload .ncu-rep files as Artifacts ──
-    ncu_files = list(output_dir.glob("*.ncu-rep"))
+    # ── Upload NCU profile files as Artifacts ──
+    ncu_files = [f for f in output_dir.glob("ncu_*") if f.is_file() and not f.name.endswith(".json")]
     if ncu_files:
         artifact = wandb.Artifact(
             name="ncu_kernel_profiles",
@@ -724,7 +718,7 @@ def upload_results_to_wandb(
         for f in ncu_files:
             artifact.add_file(str(f))
         run.log_artifact(artifact)
-        print(f"  ✅ Uploaded {len(ncu_files)} .ncu-rep files as W&B Artifact")
+        print(f"  ✅ Uploaded {len(ncu_files)} NCU profile files as W&B Artifact")
 
     run.finish()
     print(f"  ✅ W&B run complete: {run_name}")

@@ -317,5 +317,7 @@ def run_benchmark(triton_fn):
     print("=" * 70)
 
 if __name__ == "__main__":
-  run_correctness_tests(TritonRoPEFunction.apply)
-  run_benchmark(TritonRoPEFunction.apply)
+    import sys
+    run_correctness_tests(TritonRoPEFunction.apply)
+    if "--correctness-only" not in sys.argv:
+        run_benchmark(TritonRoPEFunction.apply)
