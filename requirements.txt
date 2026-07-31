@@ -5,6 +5,7 @@ transformers>=4.30.0
 huggingface_hub>=0.16.0
 tqdm>=4.65.0
 wandb>=0.15.0
+liger-kernel>=0.5.0
 
 #Distributed training dependencies
 # deepspeed>=0.10.0

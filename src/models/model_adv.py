@@ -8,6 +8,16 @@ from torch import nn
 
 from ..scripts.tokenizer import tokenizer
 
+
+def nvtx_push(name: str):
+    if torch.cuda.is_available():
+        torch.cuda.nvtx.range_push(name)
+
+
+def nvtx_pop():
+    if torch.cuda.is_available():
+        torch.cuda.nvtx.range_pop()
+
 try:
     from flash_attn import flash_attn_func
 except ImportError:
@@ -91,7 +101,13 @@ class RMS_Norm(nn.Module):
         self.eps = eps
         self.scale = nn.Parameter(torch.ones(num_features, device=device, dtype=torch.float32))
 
-    def forward(self,x : torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if FUSED_ADD_RMS_NORM_AVAILABLE and x.is_cuda:
+            zeros = torch.zeros_like(x)
+            nvtx_push("triton_rms_norm")
+            y, _ = FusedAddRMSNormFunction.apply(x, zeros, self.scale, self.eps)
+            nvtx_pop()
+            return y
         t, dtype = x.float(), x.dtype
         y = t * torch.rsqrt(torch.mean(t ** 2, dim=-1, keepdim=True) + self.eps)
         return (y * self.scale).to(dtype)
@@ -156,7 +172,14 @@ class MLPBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = self.w1(x)
-        h = TritonSwigluFunction.apply(h, 30.0)
+        if TritonSwigluFunction is not None and h.is_cuda:
+            nvtx_push("triton_swiglu")
+            h = TritonSwigluFunction.apply(h, 30.0)
+            nvtx_pop()
+        else:
+            gate, up = h.chunk(2, dim=-1)
+            h = F.silu(gate) * up
+            h = soft_clamp(h, 30.0)
         h = self.dropout(h)
         return self.w2(h)    
 
@@ -385,11 +408,14 @@ class RoutedExperts(nn.Module):
                 bias=None,
             )
 
-            gate, up = gate_up.chunk(2, dim=-1)
-
-            # Replace with your custom SwiGLU kernel if desired.
-            expert_hidden = F.silu(gate) * up
-            expert_hidden = soft_clamp(expert_hidden, 30.0)
+            if TritonSwigluFunction is not None and gate_up.is_cuda:
+                nvtx_push("triton_swiglu")
+                expert_hidden = TritonSwigluFunction.apply(gate_up, 30.0)
+                nvtx_pop()
+            else:
+                gate, up = gate_up.chunk(2, dim=-1)
+                expert_hidden = F.silu(gate) * up
+                expert_hidden = soft_clamp(expert_hidden, 30.0)
 
             expert_output = F.linear(
                 expert_hidden,
@@ -623,16 +649,20 @@ class RotaryEmbedding(nn.Module):
 
         query_shape = q.shape
         q = q.view(batch_size,seq_len,-1,self.head_dim)
-        if TritonRoPEFunction is not None:
+        if TritonRoPEFunction is not None and q.is_cuda:
+            nvtx_push("triton_rope_q")
             q = TritonRoPEFunction.apply(q,cos,sin)
+            nvtx_pop()
         else:
             q = self._apply_rope_pytorch(q, cos, sin)
         q = q.reshape(query_shape)
 
         key_shape = k.shape
         k = k.view(batch_size,seq_len,-1,self.head_dim)
-        if TritonRoPEFunction is not None:
+        if TritonRoPEFunction is not None and k.is_cuda:
+            nvtx_push("triton_rope_k")
             k = TritonRoPEFunction.apply(k,cos,sin)
+            nvtx_pop()
         else:
             k = self._apply_rope_pytorch(k, cos, sin)
         k = k.reshape(key_shape)
@@ -1080,6 +1110,7 @@ class GPT_FLASH(nn.Module):
             n_non_ignore = torch.sum(labels_flat != self.ignore_index, dtype=torch.int32)
 
             if FUSED_LINEAR_CE_AVAILABLE and hidden_flat.is_cuda:
+                nvtx_push("triton_fused_linear_ce")
                 lm_loss = fused_linear_cross_entropy(
                     hidden_states=hidden_flat,
                     weight=self.unembedding.weight,
@@ -1088,6 +1119,7 @@ class GPT_FLASH(nn.Module):
                     total_n_non_ignore=n_non_ignore,
                     workspace_bytes=self.loss_workspace_bytes,
                 )
+                nvtx_pop()
             else:
                 logits = self.unembedding(x)
                 lm_loss = F.cross_entropy(
