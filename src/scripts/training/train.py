@@ -427,9 +427,11 @@ if __name__ == '__main__':
         PHASE_1_CONFIG = PRETRAINING_PHASE_CONFIG
         PHASE_2_CONFIG = PRETRAINING_PHASE_CONFIG
     else:
-        from ..configs.model_config import config, PHASE_1_CONFIG, PHASE_2_CONFIG
+        from ..configs.new_model_config import config, PRETRAINING_PHASE_CONFIG
         from ...models.model_improv import GPT_FLASH
         from ...models.model_adv import build_optimizer_param_groups
+        PHASE_1_CONFIG = PRETRAINING_PHASE_CONFIG
+        PHASE_2_CONFIG = PRETRAINING_PHASE_CONFIG
 
     profile_enabled = cli_args.profile or (os.environ.get("PROFILE_NSYS", "0").lower() in ("1", "true", "yes"))
 

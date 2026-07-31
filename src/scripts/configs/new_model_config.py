@@ -79,19 +79,91 @@ PRETRAINING_PHASE_CONFIG = PhaseConfig(
     val_steps=5000,
     eval_suite_interval=0,
     datasets=[
+        # ── Source Code (56%) ─────────────────────────────────
         DatasetEntry(
             name="starcoderdata-python",
             repo_id="bigcode/starcoderdata",
-            weight=50,
+            weight=20,
             format_fn="starcoder",
             data_dir="python",
         ),
         DatasetEntry(
+            name="starcoderdata-javascript",
+            repo_id="bigcode/starcoderdata",
+            weight=8,
+            format_fn="starcoder",
+            data_dir="javascript",
+        ),
+        DatasetEntry(
+            name="starcoderdata-java",
+            repo_id="bigcode/starcoderdata",
+            weight=7,
+            format_fn="starcoder",
+            data_dir="java",
+        ),
+        DatasetEntry(
+            name="starcoderdata-typescript",
+            repo_id="bigcode/starcoderdata",
+            weight=5,
+            format_fn="starcoder",
+            data_dir="typescript",
+        ),
+        DatasetEntry(
+            name="starcoderdata-cpp",
+            repo_id="bigcode/starcoderdata",
+            weight=6,
+            format_fn="starcoder",
+            data_dir="cpp",
+        ),
+        DatasetEntry(
+            name="starcoderdata-go",
+            repo_id="bigcode/starcoderdata",
+            weight=5,
+            format_fn="starcoder",
+            data_dir="go",
+        ),
+        DatasetEntry(
+            name="starcoderdata-rust",
+            repo_id="bigcode/starcoderdata",
+            weight=5,
+            format_fn="starcoder",
+            data_dir="rust",
+        ),
+        # ── Educational Code (9%) ─────────────────────────────
+        DatasetEntry(
+            name="tiny-codes",
+            repo_id="nampdn-ai/tiny-codes",
+            weight=9,
+            format_fn="tiny_codes",
+            max_epochs=2,
+        ),
+        # ── CS Knowledge (17%) ────────────────────────────────
+        DatasetEntry(
+            name="stackexchange-programming-cs",
+            repo_id="common-pile/stackexchange",
+            weight=12,
+            format_fn="stackexchange_programming_cs",
+        ),
+        DatasetEntry(
+            name="dclm-edu",
+            repo_id="HuggingFaceTB/dclm-edu",
+            weight=5,
+            format_fn="dclm_edu",
+        ),
+        # ── General Knowledge (18%) ───────────────────────────
+        DatasetEntry(
             name="fineweb-edu-dedup",
             repo_id="HuggingFaceTB/smollm-corpus",
-            weight=50,
+            weight=15,
             format_fn="default",
             config_name="fineweb-edu-dedup",
+        ),
+        DatasetEntry(
+            name="wikipedia-en",
+            repo_id="wikimedia/wikipedia",
+            weight=3,
+            format_fn="wikipedia",
+            config_name="20231101.en",
         ),
     ],
 )
