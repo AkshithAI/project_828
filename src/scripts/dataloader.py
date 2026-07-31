@@ -1180,7 +1180,7 @@ class ZeroStallDataLoader:
         mixer_dataset,
         batch_size: int,
         num_prefetch: int = 32,
-        tokenize_chunk_size: int = 64,
+        tokenize_chunk_size: int = 512,
     ):
         self.dataset = mixer_dataset
         self.batch_size = batch_size
@@ -1251,19 +1251,17 @@ class ZeroStallDataLoader:
                 token_buffer: list = []
                 text_batch: list = []
                 done = False
-                target_chunk = min(self.batch_size * 2, self.chunk_size)
 
                 while not done and not _stop.is_set():
-                    # ── Collect texts up to target_chunk ──
-                    while len(text_batch) < target_chunk:
+                    # ── Collect texts up to chunk_size for peak SIMD throughput ──
+                    while len(text_batch) < self.chunk_size:
                         try:
                             item = text_q.get(timeout=0.005)
                         except queue.Empty:
                             if _stop.is_set():
                                 done = True
                                 break
-                            # Flush partial batch immediately if queue is empty
-                            if text_batch:
+                            if text_batch and len(text_batch) >= 128:
                                 break
                             continue
                         if item is _sentinel:
@@ -1944,7 +1942,7 @@ def create_phase_dataloaders(
         mixer_dataset,
         batch_size=phase_config.micro_batch_size,
         num_prefetch=32,
-        tokenize_chunk_size=64,
+        tokenize_chunk_size=512,
     )
 
     # ── Validation ──
