@@ -96,6 +96,8 @@ def train_phase(
         step_start_time = time.perf_counter()
 
         for i, batch in enumerate(tqdm(train_data, desc=f"Phase {phase_num} Training")):
+            nvtx_push("batch_fetch")
+            nvtx_pop()  # batch already fetched by iterator; marks queue-wait time
             # Start CUDA Profiler at warmup step
             if profile and not profiling_started and optim_step >= profile_target_start:
                 print(f"\n[NSYS Profile] >>> Starting CUDA Profiler at optimizer step {optim_step} <<<")
@@ -188,6 +190,7 @@ def train_phase(
                 }
 
                 # ── Expert usage logging ──
+                nvtx_push("expert_usage_logging")
                 raw = _unwrap(model)
                 for layer_idx, layer in enumerate(raw.layers):
                     if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'get_wandb_metrics'):
@@ -199,6 +202,7 @@ def train_phase(
                                 for k, v in moe_metrics.items()
                             })
                             moe.reset_expert_counts()
+                nvtx_pop()
 
 
                 # ── Telemetry: routing entropy + weight update ratios (every step) ──
@@ -218,7 +222,9 @@ def train_phase(
                     metrics.update(attn_diag)
                 nvtx_pop()
 
+                nvtx_push("async_log_enqueue")
                 async_logger.log(metrics, step=grad_accumulation_steps * optim_step)
+                nvtx_pop()
                 accum_loss = 0.0
                 micro_count = 0
 
@@ -231,6 +237,7 @@ def train_phase(
 
                 if optim_step % val_interval == 0:
                     # ── Domain-specific validation ──
+                    nvtx_push("validation")
                     validate_domains(
                         model=model,
                         wandb_run=wandb_run,
@@ -240,7 +247,9 @@ def train_phase(
                         batch_size=16,
                         max_batches_per_domain=100,
                     )
+                    nvtx_pop()
                 if optim_step % 1000 == 0:
+                    nvtx_push("generation_tests")
                     raw = _unwrap(model)
                     print(f"\n--- GENERATION TESTS AT STEP {optim_step} ---")
                     # 1. Python (Source Code 20%)
@@ -309,7 +318,9 @@ def train_phase(
                         "step": optim_step,
                         "train_loss": avg_accum_loss,
                     }
+                    nvtx_pop()  # generation_tests
                 if optim_step % 500 == 0:
+                    nvtx_push("checkpoint_save")
                     dataloader_state = train_data.get_state()
 
                     # ── Async checkpoint save ──
@@ -327,9 +338,11 @@ def train_phase(
                         phase=phase_num,
                         prefetch_loader=train_data,
                     )
+                    nvtx_pop()  # checkpoint_save
 
                 # ── Eval Suite (comprehensive benchmarks) ──
                 if eval_suite_interval > 0 and optim_step % eval_suite_interval == 0:
+                    nvtx_push("eval_suite")
                     try:
                         from ..data.eval_suite import run_training_eval
                         raw = _unwrap(model)
@@ -343,6 +356,7 @@ def train_phase(
                     except Exception as eval_exc:
                         print(f"[EvalSuite] Error during eval: {eval_exc}")
                         model.train()
+                    nvtx_pop()  # eval_suite
 
                 step_start_time = time.perf_counter()
                 if optim_step >= phase_config.total_steps:

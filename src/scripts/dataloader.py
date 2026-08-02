@@ -14,6 +14,16 @@ from typing import Optional, Dict, Any, List, Callable, Tuple
 from dataclasses import dataclass, field, asdict
 
 
+# ── NVTX profiling helpers (thread-safe, works in background threads) ────────
+def _nvtx_push(name: str):
+    if torch.cuda.is_available():
+        torch.cuda.nvtx.range_push(name)
+
+def _nvtx_pop():
+    if torch.cuda.is_available():
+        torch.cuda.nvtx.range_pop()
+
+
 
 #  Format functions  — one per dataset layout
 
@@ -1084,12 +1094,14 @@ class PrefetchedDataLoader:
                     self.pause_event.wait()
                     # Use timeout so producer doesn't hang forever
                     # if consumer stops pulling from the queue
+                    _nvtx_push("prefetch_enqueue")
                     while not _stop.is_set():
                         try:
                             q.put(batch, timeout=1.0)
                             break
                         except queue.Full:
                             continue
+                    _nvtx_pop()
             except Exception as exc:
                 _error[0] = exc
             finally:
@@ -1121,228 +1133,6 @@ class PrefetchedDataLoader:
                 yield item
         finally:
             _stop.set()  
-
-
-# ── Zero-stall three-stage pipeline ─────────────────────────────────────────── 
-
-class ZeroStallDataLoader:
-    """
-    Zero-stall three-stage pipeline that eliminates GPU idle time by
-    decoupling network I/O, tokenization, and tensor packing into
-    concurrent stages.
-
-    Architecture::
-
-        [Text Producer Thread]  ───►  (Raw Text Queue)
-                                            │
-                                            ▼
-                         [Gigatoken Batch Encoder  ◄── Releases GIL,
-                          uses all CPU cores via     Rust rayon pool]
-                                            │
-                                            ▼
-                             (Pinned Tensor Queue)  ───►  [GPU Training Loop]
-
-    Stage 1 – Text Producer:
-        Runs the WeightedMixerDataset's text-only iterator in a daemon
-        thread, continuously fetching raw text from HuggingFace streams
-        and applying per-dataset format functions.  Network I/O releases
-        the GIL naturally.
-
-    Stage 2 – Gigatoken Batch Tokenizer:
-        Collects text chunks and batch-encodes them via gigatoken's
-        Rust/SIMD backend.  Because gigatoken RELEASES THE GIL, the
-        Rust rayon thread pool uses all CPU cores for parallel BPE
-        encoding while the text producer thread and GPU training loop
-        run concurrently — true multi-core parallelism.
-
-    Stage 3 – Tensor Packer:
-        Packs encoded tokens (with EOS document separators) into
-        fixed-size ``(batch_size, seq_len + 1)`` tensors in CUDA-pinned
-        host memory, enabling non-blocking DMA transfer to GPU via
-        ``batch.to(device, non_blocking=True)``.
-
-    State Tracking:
-        Documents processed, draw cycle position, and epoch counts are
-        tracked by the underlying WeightedMixerDataset.  On checkpoint
-        the state may be a few batches ahead of what the GPU has consumed
-        (same semantics as PrefetchedDataLoader).  On resume, at most a
-        few thousand tokens are re-processed — negligible at 60B+ scale.
-
-    Args:
-        mixer_dataset:       A WeightedMixerDataset instance.
-        batch_size:          Number of sequences per tensor batch.
-        num_prefetch:        Ready-to-use tensor batches buffered (default 8).
-        tokenize_chunk_size: Texts per gigatoken encode_batch call (default 512).
-    """
-
-    def __init__(
-        self,
-        mixer_dataset,
-        batch_size: int,
-        num_prefetch: int = 32,
-        tokenize_chunk_size: int = 512,
-    ):
-        self.dataset = mixer_dataset
-        self.batch_size = batch_size
-        self.num_prefetch = num_prefetch
-        self.chunk_size = tokenize_chunk_size
-        self.dataset.state.batch_size = batch_size
-
-        # Clear stale per-dataset token buffers from old checkpoints —
-        # ZeroStallDataLoader manages its own flat token buffer externally.
-        for ds_state in self.dataset.state.dataset_states.values():
-            ds_state.buffer_tokens = []
-
-        self.pause_event = threading.Event()
-        self.pause_event.set()
-
-        self._pin_memory = torch.cuda.is_available()
-
-    def pause_prefetch(self):
-        """Pause the background pipeline (e.g., during checkpoint CPU snapshot)."""
-        self.pause_event.clear()
-
-    def resume_prefetch(self):
-        """Resume the background pipeline."""
-        self.pause_event.set()
-
-    def get_state(self) -> Dict[str, Any]:
-        """Get the current state for checkpointing."""
-        return self.dataset.state.to_dict()
-
-    def __iter__(self):
-        text_q: queue.Queue = queue.Queue(maxsize=self.chunk_size * 4)
-        tensor_q: queue.Queue = queue.Queue(maxsize=self.num_prefetch)
-        _sentinel = object()
-        _errors: list = [None, None]   # [text_producer_error, tokenizer_error]
-        _stop = threading.Event()
-
-        seq_len = self.dataset.context_length
-        eos_id = tokenizer.eos_token_id
-        chunk_size = seq_len + 1
-        batch_tokens = self.batch_size * chunk_size
-
-        # ── Stage 1: Text Producer ──────────────────────────────
-        def _text_producer():
-            """Fetch raw text from HF streams in a background thread."""
-            try:
-                for text in self.dataset.__iter_texts__():
-                    if _stop.is_set():
-                        break
-                    self.pause_event.wait()
-                    while not _stop.is_set():
-                        try:
-                            text_q.put(text, timeout=0.1)
-                            break
-                        except queue.Full:
-                            continue
-            except Exception as exc:
-                _errors[0] = exc
-            finally:
-                try:
-                    text_q.put(_sentinel, timeout=5.0)
-                except queue.Full:
-                    pass
-
-        # ── Stage 2+3: Tokenize & Pack ──────────────────────────
-        def _tokenizer_packer():
-            """Batch tokenize via gigatoken (GIL released) and pack pinned tensors."""
-            try:
-                token_buffer: list = []
-                text_batch: list = []
-                done = False
-
-                while not done and not _stop.is_set():
-                    # ── Collect texts up to chunk_size for peak SIMD throughput ──
-                    while len(text_batch) < self.chunk_size:
-                        try:
-                            item = text_q.get(timeout=0.005)
-                        except queue.Empty:
-                            if _stop.is_set():
-                                done = True
-                                break
-                            if text_batch and len(text_batch) >= 128:
-                                break
-                            continue
-                        if item is _sentinel:
-                            done = True
-                            break
-                        text_batch.append(item)
-
-                    # ── Batch encode via gigatoken (RELEASES THE GIL) ──
-                    if text_batch:
-                        encodings = tokenizer.encode_batch(text_batch)
-                        for enc in encodings:
-                            ids = enc.ids if hasattr(enc, 'ids') else enc
-                            token_buffer.extend(ids)
-                            token_buffer.append(eos_id)
-                        text_batch.clear()
-
-                    # ── Pack complete batches into pinned tensors ──
-                    while len(token_buffer) >= batch_tokens:
-                        if _stop.is_set():
-                            return
-                        batch_slice = token_buffer[:batch_tokens]
-                        token_buffer = token_buffer[batch_tokens:]
-
-                        t = torch.tensor(batch_slice, dtype=torch.long)
-                        t = t.view(self.batch_size, chunk_size)
-                        if self._pin_memory:
-                            t = t.pin_memory()
-
-                        self.dataset.state.samples_yielded += self.batch_size
-                        self.dataset.state.batches_yielded += 1
-
-                        self.pause_event.wait()
-                        while not _stop.is_set():
-                            try:
-                                tensor_q.put(t, timeout=0.1)
-                                break
-                            except queue.Full:
-                                continue
-
-            except Exception as exc:
-                _errors[1] = exc
-            finally:
-                try:
-                    tensor_q.put(_sentinel, timeout=5.0)
-                except queue.Full:
-                    pass
-
-        # ── Launch pipeline ─────────────────────────────────────
-        t1 = threading.Thread(
-            target=_text_producer, daemon=True,
-            name="zero-stall-text-producer",
-        )
-        t2 = threading.Thread(
-            target=_tokenizer_packer, daemon=True,
-            name="zero-stall-tokenizer-packer",
-        )
-        t1.start()
-        t2.start()
-
-        try:
-            while True:
-                # Timeout-based get ensures KeyboardInterrupt is deliverable
-                try:
-                    item = tensor_q.get(timeout=2.0)
-                except queue.Empty:
-                    # Check if pipeline died without sending sentinel
-                    if not t2.is_alive() and tensor_q.empty():
-                        for err in _errors:
-                            if err is not None:
-                                raise err
-                        break
-                    continue
-                if item is _sentinel:
-                    for err in _errors:
-                        if err is not None:
-                            raise err
-                    break
-                yield item
-        finally:
-            _stop.set()
-
 
 
 # ── Weighted multi-dataset mixer with exact resumption ───────────────────────── 
@@ -1520,7 +1310,9 @@ class WeightedMixerDataset(IterableDataset):
             it = iterators[ds_idx]
 
             try:
+                _nvtx_push("hf_stream_fetch")
                 row = next(it)
+                _nvtx_pop()
             except StopIteration:
                 ds_state = self.state.dataset_states[name]
                 max_ep = self._max_epochs[ds_idx]
@@ -1558,9 +1350,11 @@ class WeightedMixerDataset(IterableDataset):
             if text is None:
                 continue
 
+            _nvtx_push("tokenize_doc")
             tokens = tokenizer.encode(text)  
             buffers[ds_idx].extend(tokens)
             buffers[ds_idx].append(tokenizer.eos_token_id)
+            _nvtx_pop()
 
             # Drain complete chunks
             chunks, buffers[ds_idx] = self._drain_buffer(buffers[ds_idx])
@@ -1571,87 +1365,6 @@ class WeightedMixerDataset(IterableDataset):
  
             self.state.dataset_states[name].buffer_tokens = buffers[ds_idx].copy()
 
-    # ── text-only iterator for ZeroStallDataLoader ─────────────
-
-    def __iter_texts__(self):
-        """Yield raw text strings without tokenizing.
-
-        Maintains the same deterministic round-robin draw order, format
-        function application, epoch tracking, and document counting as
-        :meth:`__iter__`.  Yields text strings instead of token chunks so
-        that :class:`ZeroStallDataLoader` can batch-tokenize externally via
-        gigatoken's GIL-releasing Rust encoder.
-        """
-        iterators: List[Optional[Any]] = [
-            iter(stream) for _, stream, _, _ in self.entries
-        ]
-        exhausted: List[bool] = [
-            self.state.dataset_states[name].epochs_completed >= self._max_epochs[i]
-            for i, (name, _, _, _) in enumerate(self.entries)
-        ]
-        if any(exhausted):
-            already = [self.entries[i][0] for i, e in enumerate(exhausted) if e]
-            print(f"[Mixer] Already exhausted on resume: {already}")
-
-        pos = self.state.draw_cycle_position
-
-        while True:
-            if all(exhausted):
-                break
-
-            ds_idx = self._draw_schedule[pos % self._cycle_len]
-            pos += 1
-            self.state.draw_cycle_position = pos
-
-            if exhausted[ds_idx]:
-                continue
-
-            name, _, _, fmt_fn = self.entries[ds_idx]
-            it = iterators[ds_idx]
-
-            try:
-                row = next(it)
-            except StopIteration:
-                ds_state = self.state.dataset_states[name]
-                max_ep = self._max_epochs[ds_idx]
-
-                if ds_state.epochs_completed + 1 < max_ep:
-                    # ── Restart this dataset for another epoch ──
-                    ds_state.epochs_completed += 1
-                    ds_state.documents_processed = 0
-                    ds_state.docs_per_shard = []
-                    ds_state.buffer_tokens = []
-
-                    print(f"[Mixer] Dataset '{name}' completed epoch "
-                          f"{ds_state.epochs_completed}/{max_ep}. Restarting...")
-
-                    new_stream = self._create_fresh_stream(ds_idx)
-                    if new_stream is not None:
-                        self.entries[ds_idx] = (
-                            name, new_stream, self.entries[ds_idx][2], fmt_fn,
-                        )
-                        iterators[ds_idx] = iter(new_stream)
-                    else:
-                        exhausted[ds_idx] = True
-                        print(f"[Mixer] Failed to restart '{name}'. "
-                              f"Marking as exhausted.")
-                else:
-                    ds_state.epochs_completed += 1
-                    exhausted[ds_idx] = True
-                    print(f"[Mixer] Dataset '{name}' exhausted after "
-                          f"{ds_state.epochs_completed} epoch(s) "
-                          f"(max_epochs={max_ep}), "
-                          f"{ds_state.documents_processed} documents "
-                          f"in final epoch.")
-                continue
-
-            self.state.dataset_states[name].documents_processed += 1
-
-            text = fmt_fn(row)
-            if text is None:
-                continue
-
-            yield text
 
 
 # ── Factory: build mixer from a PhaseConfig  (+ optional resume) ───────────────────────── 
@@ -1938,12 +1651,13 @@ def create_phase_dataloaders(
         mixer_state=train_state,
         context_length=context_length,
     )
-    train_loader = ZeroStallDataLoader(
+    _raw_loader = ResumableDataLoader(
         mixer_dataset,
         batch_size=phase_config.micro_batch_size,
-        num_prefetch=32,
-        tokenize_chunk_size=512,
+        pin_memory=True,
+        num_workers=0,
     )
+    train_loader = PrefetchedDataLoader(_raw_loader, num_prefetch=16)
 
     # ── Validation ──
     val_stream = load_dataset(

@@ -360,7 +360,14 @@ class RoutedExperts(nn.Module):
         Returns:
             Routed expert output [T, D].
         """
-        if self.use_liger and LIGER_FUSED_MOE_AVAILABLE and hidden_states.is_cuda:
+        if hidden_states.is_cuda:
+            if not LIGER_FUSED_MOE_AVAILABLE:
+                raise RuntimeError(
+                    "[RoutedExperts] CUDA device detected but liger-kernel is not installed. "
+                    "The reference Python expert loop launches ~2,300 kernels per forward pass "
+                    "causing severe GPU idle gaps (sawtooth pattern). "
+                    "Install with: pip install liger-kernel>=0.5.0"
+                )
             return LigerFusedMoEFunction.apply(
                 hidden_states,
                 self.gate_up_proj,
@@ -369,6 +376,7 @@ class RoutedExperts(nn.Module):
                 routing_weights,
             )
 
+        # CPU-only fallback for inference/testing
         return self._reference_forward(
             hidden_states,
             expert_indices,
