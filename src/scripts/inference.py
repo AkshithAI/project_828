@@ -1,8 +1,20 @@
-from ..models.model_flash_attn import GPT_FLASH
-from .tokenizer import tokenizer
-from .configs.model_config import config
-import torch
 import os
+import sys
+
+try:
+    from ..models.model_flash_attn import GPT_FLASH
+    from .tokenizer import tokenizer_v1 as tokenizer
+    from .configs.model_config import config
+except (ImportError, ValueError):
+    _cur_dir = os.path.dirname(os.path.abspath(__file__))
+    _project_root = os.path.abspath(os.path.join(_cur_dir, "..", ".."))
+    if _project_root not in sys.path:
+        sys.path.insert(0, _project_root)
+    from src.models.model_flash_attn import GPT_FLASH
+    from src.scripts.tokenizer import tokenizer
+    from src.scripts.configs.model_config import config
+
+import torch
 import torch.nn.functional as F
 import time
 from contextlib import nullcontext
@@ -434,7 +446,7 @@ if __name__ == '__main__':
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Device used : {device}")
     model = GPT_FLASH(config,device,inference=True)
-    model.load_state_dict(torch.load("/Users/apple/Documents/project-828/project_828/checkpoints/model_12471.pt",map_location="cpu"))
+    model.load_state_dict(torch.load("/Users/apple/Documents/project-828/project_828/checkpoints/model_00000.pt",map_location="cpu"))
     # Reset expert counts from training before inference
     for layer in model.layers:
         if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'reset_expert_counts'):
@@ -442,8 +454,9 @@ if __name__ == '__main__':
     
     print("  SINGLE SEQUENCE INFERENCE")
 
-    seed_txt = "def sliding_window_average(values, window_size):\n    \"\"\"Compute moving averages for a list of numbers.\"\"\"\n    if window_size <= 0:\n        raise ValueError('window_size must be positive')\n    if len(values) < window_size:\n        return []\n    window_sum = sum(values[:window_size])\n    averages = [window_sum / window_size]\n    for i in range(window_size, len(values)):\n        window_sum += values[i] - values[i - window_size]\n        averages.append(window_sum / window_size)\n    return"
-    generated_text = generate(model,seed_txt,device,max_tokens=250,temp=0.7,top_p=0.9,k=50,repetition_penalty=1.25)
+    seed_txt = "from collections import deque\n\ndef bfs(graph, start):\n    \"\"\"Breadth-first search returning visited nodes in order.\"\"\"\n    visited = set()\n    queue = deque([start])\n    result = []\n    while queue:"
+    
+    generated_text = generate(model, seed_txt, device, max_tokens=250, temp=0.7, top_p=0.9, k=50, repetition_penalty=1.15)
     print(generated_text)
     
     print("\n")

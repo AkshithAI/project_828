@@ -1,18 +1,21 @@
 import torch
-from ..tokenizer import tokenizer
+try:
+    from ..tokenizer import tokenizer_v1 as tokenizer
+except (ImportError, ValueError):
+    from src.scripts.tokenizer import tokenizer_v1 as tokenizer
 from dataclasses import dataclass, field
 from typing import List, Optional
 
 @dataclass
 class ModelConfig:
         # ── Model architecture ────────────────────────────────────
-        vocab_size : int = tokenizer.vocab_size   
+        vocab_size : int = tokenizer.vocab_size
         num_attn_heads : int = 12 
         num_key_value_heads : int = 6
         hidden_dim : int = 768  
         intermediate_size : int = 760
         ffn_dropout : float = 0.0
-        head_dim : float = hidden_dim // num_attn_heads 
+        head_dim : int = hidden_dim // num_attn_heads
         num_hidden_layers : int = 24 
         num_experts : int = 4
         num_experts_per_tok : int = 2 
@@ -20,10 +23,11 @@ class ModelConfig:
         route_scale : float = 1.0
         base : int = 10000
         initial_context_len : int = 2048
-        max_context_len : int = 2048  # Set during 2nd phase of pretraining (Dynamic context scaling using YaRN)
+        max_context_len : int = 2048
         ntk_alpha : float = 1.0
         ntk_beta : float = 32.0
         scaling_factor : float = 1.0
+
         # Training
         dropout : float = 0.0
         learning_rate : float = 3e-4
@@ -64,6 +68,19 @@ class PhaseConfig:
     total_steps: int = 34_300             
     scheduler_type: str = "wsd"           
     wsd_stable_frac: float = 0.76         
+
+    # --- Token-based schedule (optional, preferred for WSD) ---
+    # When ``total_tokens`` is set, the WSD scheduler is driven by cumulative
+    # non-padding tokens instead of optimizer steps, so context-length or
+    # batch-size changes do not distort warmup/stable/decay.
+    total_tokens: Optional[int] = None
+    warmup_tokens: Optional[int] = None
+    decay_start_tokens: Optional[int] = None
+
+    # --- Continuation warmup (optional) ---
+    # For extension/continuation runs, warmup rewarms from this LR up to peak_lr
+    # instead of ramping from zero. Leave None for standard from-scratch warmup.
+    start_lr: Optional[float] = None
 
     # --- Batch / accumulation ---
     micro_batch_size: int = 128

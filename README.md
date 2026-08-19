@@ -4,24 +4,31 @@
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
+[![Triton Kernels](https://img.shields.io/badge/Triton_Kernels-Enabled-orange.svg)](src/kernels/)
 [![DeepSpeed](https://img.shields.io/badge/DeepSpeed-Enabled-green.svg)](https://www.deepspeed.ai/)
 [![License](https://img.shields.io/badge/License-TBD-lightgrey.svg)](LICENSE)
 
-**Mixture-of-Experts Transformer with Advanced Training Pipeline**
+**Mixture-of-Experts Transformer with Custom Triton Kernels & Advanced Training Pipeline**
 
-A Mixture-of-Experts (MoE) transformer implementation featuring a custom GPT-style architecture with Grouped Query Attention, RoPE positional encoding, efficient expert routing, and distributed training support via DeepSpeed.
+A Mixture-of-Experts (MoE) transformer implementation featuring custom Triton CUDA kernels, Grouped Query Attention, RoPE positional encoding with YaRN extension, Gigatoken Rust/SIMD tokenization, Liger-Kernel integration, and distributed training support.
 
-[Features](#features) • [Architecture](#model-architecture) • [Quick Start](#quick-start) • [Training](#training) • [Results](#training-experiments--results)
+[Features](#features) • [Model Architecture](#model-architecture) • [Custom Triton Kernels](#custom-triton-kernels) • [Quick Start](#quick-start) • [Training](#training) • [Results](#training-experiments--results)
 
 ---
 
-- **Training Report** : (https://wandb.ai/akshithmarepally-akai/828_pretraining_h200/reports/Phase-1-Pretraining-H200:-Training-Dynamics-and-MoE-Routing--VmlldzoxNzQ4MTcwOA==)
+- **Training Report** : [Phase 1 Pretraining H200 W&B Report](https://wandb.ai/akshithmarepally-akai/828_pretraining_h200/reports/Phase-1-Pretraining-H200:-Training-Dynamics-and-MoE-Routing--VmlldzoxNzQ4MTcwOA==)
 </div>
 
 ## Table of Contents
 
 - [Features](#features)
 - [Model Architecture](#model-architecture)
+  - [Architecture Overview](#architecture-overview)
+  - [828M Model Configuration (Current Target)](#828m-model-configuration-current-target)
+  - [398.7M Model Configuration (Baseline / v1)](#3987m-model-configuration-baseline--v1)
+- [Custom Triton Kernels](#custom-triton-kernels)
+- [Gigatoken Rust/SIMD Tokenizer](#gigatoken-rustsimd-tokenizer)
+- [YaRN Context Extension](#yarn-context-extension)
 - [Dataset & Data Mix](#dataset--data-mix)
 - [Data Curation](#data-curation)
 - [Quick Start](#quick-start)
@@ -45,109 +52,155 @@ A Mixture-of-Experts (MoE) transformer implementation featuring a custom GPT-sty
 
 ## Features
 
-- **Mixture of Experts (MoE)** - 4 routed experts + 1 shared expert with auxiliary-loss-free load balancing
-- **Batched Sort-and-Slice Dispatch** - High-performance expert routing via argsort + searchsorted for contiguous memory access
-- **Grouped Query Attention (GQA)** - Efficient attention with 12 attention heads and 6 KV heads (2:1 ratio)
-- **Q/K Normalization** - RMSNorm applied to Query and Key projections for attention stability
-- **RoPE with YaRN Scaling** - Rotary Position Embeddings with NTK-aware interpolation for context extension
-- **SwiGLU Activation** - Gated activation function with clamping (`limit=7.0`) for numerical stability
-- **DeepSpeed Integration** - ZeRO optimization stages 1-3 for distributed training
-- **Flash Attention 2 Support** - Fully native integration with Flash Attention 2 for optimized memory efficiency
-- **Mixed Precision Training** - BFloat16 for optimal performance
-- **Comprehensive Logging** - Weights & Biases integration with per-layer expert utilization, per-domain validation metrics, and live eval reports
-- **Robust Training Pipeline** - Phase-aware training with async checkpointing, data prefetching, and recovery workflows
-- **Lab-Grade Evaluation Suite** - Comprehensive, datamix-aligned validation (MBPP, CRUXEval, Multilingual Completion, CS QA, Domain Perplexity)
-- **NeMo Curator Integration** - Robust data preprocessing pipeline with filtering, cleaning, and deduplication
-- **Best-Fit Bin Packing** - Segment-tree accelerated document packing with CLI, overflow splitting, and HF Hub upload
+- **828M MoE Model Architecture (New)** - 16 routed experts + 1 shared expert with top-3 routing (~828M total parameters, ~330M active per token).
+- **398.7M Baseline Architecture (v1)** - 4 routed experts + 1 shared expert with top-2 routing (398.7M total parameters, 286M active per token).
+- **Custom Triton CUDA Kernels** - High-performance custom Triton kernels in [`src/kernels/`](src/kernels/) for fused linear cross-entropy loss, fused add + RMSNorm, SwiGLU with soft-clamping, and Triton RoPE.
+- **Gigatoken Rust/SIMD Tokenization** - `microsoft/phi-2` tokenizer (~50,304 padded vocabulary) integrated with `gigatoken` Rust SIMD engine, releasing the Python GIL for 400x–1000x faster tokenization throughput.
+- **Liger-Kernel Acceleration** - Integration of LinkedIn's `liger-kernel` package for Triton-fused GPU ops and CUDA MoE dispatch.
+- **Grouped Query Attention (GQA)** - Efficient attention with 16 attention heads and 8 KV heads in 828M model (2:1 ratio) / 12 heads and 6 KV heads in 398M model.
+- **Document-Aware Packing** - Variable-length Flash Attention 2 (`cu_seqlens`) for block-diagonal document packing without cross-document attention leakage.
+- **Token-Based WSD Scheduler** - WSD (Warmup-Stable-Decay) learning rate scheduler driven by cumulative non-padding tokens (`total_tokens`).
+- **Auxiliary-Loss-Free Load Balancing** - Dynamic router bias adjustment for uniform expert routing without interfering with training loss.
+- **Compact YaRN Context Scaling** - Base context of 2048 tokens, extensible up to 8192 tokens using YaRN context extension (`scaling_factor=4.0`).
 
 ---
 
 ## Model Architecture
 
-### Overview
+### Architecture Overview
 
-- **Model Type**: GPT-style Decoder-only Transformer with Mixture of Experts
-- **Total Parameters**: ~398.7M (286M active per token)
-- **Context Length**: 2048 tokens (initial), extensible to 4096+ with YaRN scaling
-- **Vocabulary**: StarCoder2-15B tokenizer (~49K tokens)
-- **Precision**: BFloat16 mixed precision training
+Project 828 supports two primary model architecture configurations: the **828M MoE architecture** (current primary configuration in `new_model_config.py`) and the **398.7M MoE baseline architecture** (`model_config.py`).
+
+| Metric / Property | 828M MoE Model (Target) | 398.7M MoE Model (Baseline) |
+| :--- | :---: | :---: |
+| **Total Parameters** | **~828 Million** | **398.7 Million** |
+| **Active Parameters / Token** | **~330 Million** | **286 Million** |
+| **Routed Experts** | 16 | 4 |
+| **Active Experts / Token** | 3 (Top-3) | 2 (Top-2) |
+| **Shared Experts** | 1 | 1 |
+| **Hidden Dimension ($d_{\text{model}}$)** | 1024 | 768 |
+| **Intermediate Size ($d_{\text{ff}}$)** | 520 | 760 |
+| **Hidden Layers** | 24 | 24 |
+| **Attention Heads / KV Heads** | 16 / 8 (GQA 2:1) | 12 / 6 (GQA 2:1) |
+| **Head Dimension** | 64 | 64 |
+| **Vocabulary Size** | 50,304 (Phi-2 128-byte aligned) | 50,304 (Phi-2 128-byte aligned) |
+| **Tokenizer Engine** | Gigatoken Rust/SIMD (`microsoft/phi-2`) | Gigatoken Rust/SIMD (`microsoft/phi-2`) |
+| **Precision** | BFloat16 Mixed Precision | BFloat16 Mixed Precision |
 
 ---
 
-### Current Model Configuration
+### 828M Model Configuration (Current Target)
+
+The 828M model configuration defined in [`src/scripts/configs/new_model_config.py`](src/scripts/configs/new_model_config.py) utilizes 16 routed experts with top-3 token routing:
+
+```python
+# src/scripts/configs/new_model_config.py
+vocab_size: int = 50_304              # Phi-2 tokenizer padded to 128-byte boundary
+hidden_dim: int = 1024
+intermediate_size: int = 520
+num_hidden_layers: int = 24
+num_attn_heads: int = 16
+num_key_value_heads: int = 8          # 2:1 GQA ratio
+head_dim: int = 64
+num_experts: int = 16                 # Routed experts
+num_experts_per_tok: int = 3          # Active experts per token (top-k)
+use_liger_moe: bool = True            # CUDA MoE acceleration
+router_bias_update_rate: float = 2e-3
+base: int = 10000                     # RoPE base frequency
+initial_context_len: int = 2048
+max_context_len: int = 2048           # Extensible to 8192 via YaRN
+dtype = torch.bfloat16
+```
+
+**828M Parameter Breakdown**:
+- Embeddings: $50,304 \times 1024 \approx 51.5\text{M}$
+- Unembedding: $1024 \times 50,304 \approx 51.5\text{M}$
+- Attention per layer: $1024^2 + 2(1024 \times 512) + 1024^2 \approx 3.15\text{M}$
+- MoE per layer: $16 \text{ routed} \times (2 \times 520 \times 1024 + 520 \times 1024) + 1 \text{ shared} \times (2 \times 520 \times 1024 + 520 \times 1024) \approx 27.15\text{M}$
+- Layer Total ($24 \times (3.15\text{M} + 27.15\text{M})$): $\approx 727\text{M}$
+- **Grand Total**: **~828M parameters** (**~330M active per token**).
+
+---
+
+### 398.7M Model Configuration (Baseline / v1)
+
+The baseline 398.7M model configuration in [`src/scripts/configs/model_config.py`](src/scripts/configs/model_config.py):
 
 ```python
 # src/scripts/configs/model_config.py
-vocab_size: tokenizer.vocab_size    # ~49,152
-hidden_dim: 768
-intermediate_size: 760
-num_hidden_layers: 24
-num_attn_heads: 12
-num_key_value_heads: 6              # 2:1 GQA ratio
-head_dim: 64                        # hidden_dim / num_attn_heads
-num_experts: 4                      # Routed experts
-num_experts_per_tok: 2              # Active experts per token (top-k)
-update_param: 1e-3                  # Bias update rate for load balancing
-route_scale: 1.0                    # Expert routing scale
-base: 10000                         # RoPE base frequency
-initial_context_len: 2048
-max_context_len: 2048
-dtype: bfloat16                     # Mixed precision training
-ffn_dropout: 0.0
+vocab_size: int = 50_304              # Padded Phi-2 tokenizer
+hidden_dim: int = 768
+intermediate_size: int = 760
+num_hidden_layers: int = 24
+num_attn_heads: int = 12
+num_key_value_heads: int = 6          # 2:1 GQA ratio
+head_dim: int = 64
+num_experts: int = 4                  # Routed experts
+num_experts_per_tok: int = 2          # Active experts per token
+update_param: float = 2e-3
+base: int = 10000
+initial_context_len: int = 2048
+max_context_len: int = 2048
+dtype = torch.bfloat16
 ```
 
-**Parameter breakdown**: Embedding 37.7M + Unembedding 37.8M + 24×(Attention 1.8M + MoE 11.7M) + Norm 768 = **398.7M total**, **~286M active per token** (2 of 4 routed experts + shared expert).
+**398.7M Parameter Breakdown**: Embedding 37.7M + Unembedding 37.8M + 24×(Attention 1.8M + MoE 11.7M) + Norm = **398.7M total**, **~286M active per token**.
 
 ---
 
-### Architecture Details
+## Custom Triton Kernels
 
-#### Core Components
+Project 828 includes custom GPU kernels written in Triton under [`src/kernels/`](src/kernels/) to eliminate memory bottlenecks and accelerate training:
 
-**1. Attention Mechanism**
-- **Type**: Grouped Query Attention (GQA) with RoPE
-- **Attention Heads**: 12
-- **KV Heads**: 6 (2:1 ratio for efficiency)
-- **Q/K Normalization**: RMSNorm applied to Query and Key projections before RoPE
-- **Position Encoding**: Rotary Position Embeddings (RoPE) with YaRN scaling
-- **Special Feature**: Attention sinks (standard model) for improved long-context handling
+- **Fused Linear Cross-Entropy** ([`src/kernels/fused_linear_cross_entropy.py`](src/kernels/fused_linear_cross_entropy.py)): Combines the final linear LM projection layer with Cross-Entropy loss computation. Computes loss and gradients in a single chunked kernel pass without allocating the full $[B \times S, V]$ logits tensor in VRAM, saving gigabytes of memory at large sequence lengths.
+- **Fused Add + RMSNorm** ([`src/kernels/fused_add_rms_norm.py`](src/kernels/fused_add_rms_norm.py)): Fuses residual connection addition with Root Mean Square Layer Normalization into a single Triton kernel to reduce memory read/write passes.
+- **SwiGLU with Soft-Clamping** ([`src/kernels/swiglu.py`](src/kernels/swiglu.py)): Triton kernel for Swish-Gated Linear Units with soft-clamping (`limit=30.0` or `7.0`) to prevent activation explosions and ensure numerical stability during long training runs.
+- **Triton RoPE** ([`src/kernels/apply_rope.py`](src/kernels/apply_rope.py)): Custom kernel for applying Rotary Position Embeddings directly to Q and K projections.
 
-**2. Mixture of Experts (MoE)**
-- **Number of Experts**: 4 routed experts + 1 shared expert
-- **Active Experts**: 2 experts per token (top-k routing)
-- **Expert Architecture**: SwiGLU-based FFN with clamping for stability
-  ```
-  Expert(x) = W2(dropout(SwiGLU(W1(x), limit=7.0) * W3(x)))
-  ```
-- **SwiGLU Activation**: Includes clamping (`limit=7.0`) to prevent activation explosions
-- **Routing**: Sigmoid gating with Auxiliary-Loss-Free Load Balancing (no auxiliary loss required)
-- **Load Balancing**: Dynamic bias adjustment based on real-time token routing statistics
-- **Dispatch**: Batched sort-and-slice — argsort by expert ID + searchsorted for contiguous slices
+These custom kernels are combined with LinkedIn's `liger-kernel` for grouped GEMM expert routing in `model_adv.py`.
 
-**3. Feed-Forward Network**
-- **Hidden Dimension**: 768
-- **Intermediate Size**: 760
-- **Activation**: SwiGLU (Swish-Gated Linear Unit) with clamping for numerical stability
-- **Dropout**: 0.0
+---
 
-**4. Normalization**
-- **Type**: RMSNorm (Root Mean Square Layer Normalization)
-- **Epsilon**: 1e-8 (flash model) / 1e-5 (standard model)
-- **Applied**: Pre-normalization (before attention and FFN)
+## Gigatoken Rust/SIMD Tokenizer
 
-**5. Rotary Position Embeddings (RoPE)**
-- **Base Frequency**: `base: 10000`
-- **Scaling Method**: YaRN (Yet another RoPE extensioN method)
-- **Context Extension**: `initial_context_len: 2048`, `max_context_len: 2048` (extensible to 4096+)
-- **NTK Scaling Parameters**: `ntk_alpha: 1.0`, `ntk_beta: 32.0`, `scaling_factor: 1.0`
+Tokenization is accelerated using the [`gigatoken`](gigatoken/) Rust SIMD backend:
+
+- **Tokenizer Model**: `microsoft/phi-2` (code and technical domain optimized).
+- **Padded Vocabulary**: 50,304 tokens (padded to a 128-byte boundary for CUDA alignment).
+- **GIL-Free Parallelism**: Releases the Python Global Interpreter Lock (GIL) during encoding, allowing multi-threaded dataset batching alongside GPU training.
+- **Throughput**: ~1000x faster tokenization throughput compared to standard Python tokenizer wrappers.
+
+```python
+# src/scripts/tokenizer.py
+import gigatoken as gt
+from transformers import AutoTokenizer
+
+_hf_tokenizer = AutoTokenizer.from_pretrained("microsoft/phi-2", trust_remote_code=True)
+gt_tokenizer = gt.Tokenizer(_hf_tokenizer)
+tokenizer = gt_tokenizer.as_hf()
+```
+
+---
+
+## YaRN Context Extension
+
+The model natively trains with a 2048 base context length. Context extension to 8192 tokens is implemented via YaRN (Yet another RoPE extensioN) as configured in [`src/scripts/configs/yarn_extension_config.py`](src/scripts/configs/yarn_extension_config.py) and [`yarn_extension_plan.md`](yarn_extension_plan.md):
+
+- **Base Context Length**: 2048 tokens.
+- **Extended Context Length**: 8192 tokens (`max_context_len = 8192`).
+- **Scaling Factor**: `scaling_factor = 4.0` ($8192 / 2048$).
+- **Frequency Interpolation**: Modifies high-frequency and low-frequency RoPE components with attention-temperature correction ($m = 1 + 0.1\ln(4) \approx 1.1386$) to preserve short-context recall while expanding sequence capacity.
 
 ---
 
 ## Dataset & Data Mix
 
-### Phase 1 — Post-Growth (~60B tokens)
+> [!NOTE]
+> The dataset specification in [`src/scripts/configs/new_model_config.py`](src/scripts/configs/new_model_config.py) is currently a **placeholder** (TBD) for the 828M pretraining run. Below are the historical dataset mixes utilized during Phase 1 and Phase 2 pretraining.
 
-The training uses 18 datasets in a weighted mix:
+### Phase 1 — Baseline Pretraining (~60B tokens)
+
+Weighted mix across 18 datasets:
 
 | Dataset | Weight | Category |
 |:---|:---:|:---|
@@ -170,31 +223,20 @@ The training uses 18 datasets in a weighted mix:
 | `magicoder-oss-instruct` (3 epochs) | 5 | Code-Adjacent |
 | `openhermes-2.5` | 5 | Instruction |
 
-**Category breakdown**:
-```
-Source Code:         45%  (10 languages from starcoderdata)
-General Knowledge:   19%  (fineweb-edu + cosmopedia)
-Code-Adjacent:       17%  (stack-exchange + algebraic-stack + magicoder)
-Math/Reasoning:      14%  (openmath + numina)
-Instruction:          5%  (openhermes)
-```
+**Category Summary**: Source Code (45%), General Knowledge (19%), Code-Adjacent (17%), Math/Reasoning (14%), Instruction (5%).
+
+---
 
 ### Phase 2 — Code/Instruction (~18B tokens)
 
-Phase 2 focuses heavily on code generation, reasoning, and factual computer science knowledge with the following target datamix:
+Phase 2 focuses heavily on code generation, execution reasoning, and CS knowledge:
 
-| Phase 2 Category | Weight | Target Capability | Aligning Evaluation Benchmark |
-| :--- | :---: | :--- | :--- |
-| **Code Replay** | **35%** | Multi-language generation correctness (Python, JS, TS, C++, Go, Rust) | MBPP & MultiPL-E |
-| **Educational Code** | **15%** | Execution reasoning (predicting input/output of functions) | CRUXEval-O & CRUXEval-I |
-| **CS Knowledge** | **18%** | Multi-domain CS factuality (DSA, networks, databases, systems) | CS-QA Curated Benchmark |
-| **General Knowledge** | **32%** | High-quality prose and educational/factual texts | Held-out Domain Perplexity |
-
-### Tokenizer
-
-- **Source**: `bigcode/starcoder2-15b` (~49K vocabulary)
-- **Format**: Parquet/JSON with text content
-- **Preprocessing**: Document-level packing with EOS tokens, resumable dataloader with state checkpointing
+| Category | Weight | Target Capability |
+| :--- | :---: | :--- |
+| **Code Replay** | **35%** | Multi-language generation correctness |
+| **Educational Code** | **15%** | Execution reasoning (input/output prediction) |
+| **CS Knowledge** | **18%** | Multi-domain CS factuality (DSA, systems, networks) |
+| **General Knowledge** | **32%** | Factual educational prose |
 
 ---
 
@@ -253,9 +295,11 @@ python -m project_828.src.scripts.data.packing upload --repo_id username/packed-
 ### Prerequisites
 
 - Python 3.8+
+- PyTorch 2.0+ with CUDA support
 - CUDA-capable GPU (tested on RTX 4090/5090, H200)
 - 16GB+ GPU memory recommended
 - DeepSpeed (for multi-GPU training)
+- Rust toolchain (for building Gigatoken SIMD backend)
 
 ### Installation
 
@@ -265,21 +309,18 @@ git clone https://github.com/AkshithAI/project_828.git
 cd project_828
 
 # Install dependencies
-pip install -r requirements.txt
-
-# Optional: Install flash-attention for faster training
-pip install flash-attn --no-build-isolation
+bash init.sh
 ```
 
 ### Training
 
-#### Single GPU Training (Recommended for Development)
+#### Single GPU Training
 
 ```bash
-# Set your Weights & Biases credentials
+# Set Weights & Biases API Key
 export WANDB_API_KEY="your_wandb_key"
 
-# Start training
+# Run single GPU training
 python -m src.scripts.training.train
 ```
 
@@ -306,106 +347,84 @@ nvidia-smi topo -m
 export WANDB_API_KEY="your_wandb_key"
 export PYTHONPATH=$(pwd)
 
-# Run on 2 GPUs
-deepspeed --num_gpus=2 src/scripts/training/distributed_training.py \
-    --deepspeed \
-    --deepspeed_config src/scripts/configs/ds-config.json \
-    --batch_size 8
+# Launch distributed training on 2 GPUs
+./launch_distributed.sh
 ```
 
-#### Phase 1 Hyperparameters
-
-| Param | Value |
-|:---|:---|
-| Optimizer | AdamW (β₁=0.9, β₂=0.95, weight_decay=0.1, ε=1e-8) |
-| Peak LR | 3e-4 |
-| Min LR | 3e-5 |
-| Scheduler | WSD (Warmup → Stable → Cosine Decay) |
-| WSD stable fraction | 0.895 |
-| Warmup steps | 500 |
-| Total steps | 101,726 |
-| Micro batch size | 37 |
-| Grad accumulation | 8 steps |
-| Effective batch | 296 sequences (~606K tokens/step) |
-| Gradient clipping | 1.0 |
-| Precision | BF16 autocast |
-| Validation interval | every 2,000 steps |
+---
 
 ## Project Structure
 
 ```
 project_828/
 ├── src/
+│   ├── kernels/
+│   │   ├── apply_rope.py                  # Custom Triton RoPE kernel
+│   │   ├── fused_add_rms_norm.py          # Fused Add + RMSNorm Triton kernel
+│   │   ├── fused_linear_cross_entropy.py  # Fused Linear Cross-Entropy loss kernel
+│   │   ├── swiglu.py                      # SwiGLU Triton kernel with soft-clamping
+│   │   └── utils.py                       # Triton kernel helpers
 │   ├── models/
-│   │   ├── model_flash_attn.py     # Unified MoE GPT model with Flash Attention, Q/K Norm, and KV Cache
-│   │   └── weight_init.py          # Model weight initialization
+│   │   ├── model_adv.py                   # Primary 828M MoE model implementation
+│   │   ├── model_flash_attn.py            # Unified MoE model with Flash Attention & KV cache
+│   │   ├── model_improv.py               # Improved MoE model variant
+│   │   ├── new_full_training_plan.md      # Detailed 828M training specification
+│   │   └── weight_init.py                 # Weight initialization routines
 │   └── scripts/
-│       ├── tokenizer.py            # StarCoder2 tokenizer setup
-│       ├── dataloader.py           # Resumable data loading with state checkpointing
-│       ├── dist_dataloader.py      # Legacy distributed data loading
-│       ├── helper_funcs.py         # Utility functions (sync + async checkpointing, paths)
-│       ├── inference.py            # Autoregressive generation with KV cache + routing stats
+│       ├── dataloader.py                  # Zero-stall resumable data loader
+│       ├── dist_dataloader.py             # Distributed data loader
+│       ├── helper_funcs.py                # Async checkpointing & path utilities
+│       ├── inference.py                   # Autoregressive generation with KV cache
+│       ├── tokenizer.py                   # Phi-2 Gigatoken SIMD tokenizer setup
 │       ├── configs/
-│       │   ├── model_config.py     # Model, Phase, and Dataset configuration (e.g. eval_suite_interval)
-│       │   └── ds-config.json      # DeepSpeed configuration
+│       │   ├── ds-config.json             # DeepSpeed configuration
+│       │   ├── model_config.py            # 398M baseline model config & Phase 1/2 configs
+│       │   ├── new_model_config.py        # 828M target model config (placeholder datamix)
+│       │   └── yarn_extension_config.py   # 8K YaRN context extension config
 │       ├── training/
-│       │   ├── train.py            # Single GPU phase-based training loop
-│       │   ├── distributed_training.py  # DeepSpeed multi-GPU training
-│       │   ├── schedulers.py       # WSD + Cosine LR schedulers
-│       │   └── validate_domains.py # Per-domain validation suite
+│       │   ├── distributed_training.py     # DeepSpeed multi-GPU training entrypoint
+│       │   ├── train.py                   # Single-GPU phase-based training loop
+│       │   ├── schedulers.py              # Token-based WSD & Cosine schedulers
+│       │   ├── telemetry.py               # Async telemetry & routing logging
+│       │   └── validate_domains.py        # Per-domain validation suite
 │       └── data/
-│           ├── packing.py          # Best-fit bin packing pipeline
-│           ├── preprocess.py       # NeMo Curator data preprocessing
-│           ├── preprocess.json     # Preprocessing configuration
-│           ├── eval_suite.py       # Datamix-aligned comprehensive evaluation suite
-│           ├── eval_benchmarks.py  # Validation metrics and checkpoint evaluation runner
-│           └── README.md           # Data curation & packing documentation
-├── tests/
-│   ├── eval_suite_prompts.py       # Curated multi-language code and CS QA prompts
-│   ├── eval_runner.py              # Evaluator run harness
-│   ├── test_eval_suite.py          # CLI entry point for evaluation runs & checkpoint comparisons
-│   ├── test_phase2_knowledge.py    # Unit tests for CS QA and knowledge validation
-│   └── test_moe_batched_dispatch.py # MoE dispatch correctness tests
-├── checkpoints/
+│           ├── packing.py                 # Best-fit bin packing pipeline
+│           ├── preprocess.py              # NeMo Curator data preprocessing
+│           ├── eval_suite.py              # Benchmark evaluation suite
+│           └── README.md                  # Data curation documentation
+├── gigatoken/                             # Rust SIMD BPE tokenization engine
+├── tests/                                 # Unit & benchmark test suites
+├── assets/                                # Telemetry screenshots & figures
+├── check_flash_attn_requirements.py
+├── gigatoken.sh                           # Gigatoken build script
+├── init.sh                                # Environment init script
+├── launch_distributed.sh                  # DeepSpeed distributed launcher script
+├── yarn_extension_plan.md                 # Concise 8K YaRN context extension plan
 ├── requirements.txt
 └── README.md
 ```
 
+---
+
 ## Advanced Features
 
-### Flash Attention Support
+### Flash Attention 2 & Document-Aware Packing
 
-The repository utilizes the high-performance Flash Attention implementation (`GPT_FLASH` from `model_flash_attn.py`) unconditionally as its native architecture. This delivers a 40%+ speedup and substantial GPU memory savings during training and inference.
+The repository supports native Flash Attention 2 with document-aware variable-length sequence packing (`cu_seqlens`):
 
 ```python
-# Unconditional Native Instantiation
-model = GPT_FLASH(config, "cuda")
+# Document-aware varlen Flash Attention in model_adv.py
+out = flash_attn_varlen_func(
+    q_flat, k_flat, v_flat,
+    cu_seqlens_q=cu_seqlens,
+    cu_seqlens_k=cu_seqlens,
+    max_seqlen_q=max_seqlen,
+    max_seqlen_k=max_seqlen,
+    causal=True,
+)
 ```
 
-### Lab-Grade Evaluation Suite
-
-We have built a comprehensive evaluation engine (`eval_suite.py`) to systematically measure and log the model's performance on 5 diverse benchmarks tailored to the training mix:
-
-1. **MBPP Benchmark**: Autoregressive code generation evaluated against test suites in a Python sandbox.
-2. **CRUXEval**: Multi-turn code reasoning and input/output prediction.
-3. **Multilingual Code Completion**: Syntactic and structural code validation across Python, JS, TS, C++, Go, and Rust.
-4. **CS Knowledge QA**: Log-likelihood scoring of domain-specific computer science questions.
-5. **Domain Perplexity**: Cross-entropy perplexity tracking on held-out datamix shards.
-
-The evaluation runner runs automatically at custom checkpoint intervals (`eval_suite_interval` in config) or via CLI for manual evaluation:
-
-```bash
-# Standalone evaluation of a checkpoint on GPU
-python -m tests.test_eval_suite \
-    --checkpoint checkpoints/model_101002.pt \
-    --device cuda \
-    --bench mbpp cruxeval multiple code_completion cs_qa domain_ppl
-
-# Quick CPU-based dry-run/smoke test
-python -m tests.test_eval_suite \
-    --checkpoint checkpoints/model_06767.pt \
-    --device cpu --quick
-```
+Unrelated documents packed into a single sequence attend block-diagonally, avoiding cross-document token leakage while retaining maximum hardware throughput.
 
 ### Key-Value (KV) Cache for Inference
 
@@ -419,43 +438,10 @@ The model implements an efficient **KV Cache mechanism** that significantly boos
 
 **Implementation Details:**
 ```python
-# In Attention class (model_flash_attn.py)
-self.register_buffer("cache_k", torch.zeros(
-        1, config.initial_context_len, config.num_key_value_heads, config.head_dim, device = device , dtype = config.dtype), persistent=False
-)
-self.register_buffer("cache_v", torch.zeros(
-        1, config.initial_context_len, config.num_key_value_heads, config.head_dim, device = device , dtype = config.dtype), persistent=False
-)
-
-# During forward pass with inference=True:
-if self.inference:
-    self.cache_k[:, start_pos:end_pos, :, :] = K
-    self.cache_v[:, start_pos:end_pos, :, :] = V
-    K = self.cache_k[:, :end_pos, :, :]
-    V = self.cache_v[:, :end_pos, :, :]
-```
-
-**Performance Benefits:**
-- **Time Complexity**: Reduces from O(n²) to O(n) per token generation (where n is sequence length)
-- **Speed Boost**: ~10-50x faster inference compared to full recomputation
-- **Memory Trade-off**: Uses additional memory proportional to `initial_context_len × num_kv_heads × head_dim`
-
-**Usage:**
-```python
-# Enable KV cache by setting inference=True when creating the model
+# Generate tokens with KV cache enabled
 model = GPT_FLASH(config, device, inference=True)
-
-# Generate tokens with positional tracking
-start_pos = 0
-model(initial_tokens, start_pos)  # Prefill cache
-start_pos = len(initial_tokens)
-for _ in range(max_new_tokens):
-    logits = model(next_token.view(1, 1), start_pos)
-    start_pos += 1
-    # ... sample next token
+logits = model(input_ids, start_pos=0)
 ```
-
-**Note**: KV cache is automatically used when `inference=True` is passed to the model constructor. During training, the cache is bypassed for efficiency.
 
 ### Auxiliary-Loss-Free Load Balancing for MoE
 
@@ -521,37 +507,27 @@ Dataloader checkpoints include full mixer state: per-dataset document counts, to
 ### Single GPU Performance
 | GPU | Speed | Memory | Recommendation |
 |-----|-------|--------|----------------|
-| RTX 4090 | ~12 iter/sec | ~12GB | Recommended for development |
+| RTX 4090 | ~12 iter/sec | ~12GB | Development |
 | RTX 5090 | ~14 iter/sec | ~11GB | Recommended |
-| H200 | ~110K tokens/sec | — | Primary training GPU |
+| H100 | ~110K tokens/sec | — | Primary Training GPU |
 
 ### Multi-GPU Performance
-| Configuration | Topology | Speed | Recommendation |
+| Configuration | Interconnect | Speed | Recommendation |
 |--------------|----------|-------|----------------|
 | 2x RTX 4090 | PIX | ~20 iter/sec | Good speedup |
 | 2x RTX 4090 | NVLink | ~22 iter/sec | Strong speedup |
-| 2x RTX 4090 | NODE | 0.01 iter/sec | Use 1 GPU instead |
+| 2x RTX 4090 | NODE | 0.01 iter/sec | Topology bottleneck — use 1 GPU |
 
 **Key Takeaway:** Multi-GPU only helps with good P2P topology (PIX/PXB/NVLink). With NODE topology, single GPU is ~1200x faster!
 
 ## Monitoring Training
 
-### Key Metrics to Watch
-
-1. **Training Loss**: Should decrease smoothly
-2. **Validation Loss**: Should track training loss closely
-3. **Gradient Norm**: Should stay below 5.0 (clipped at 1.0)
-4. **Learning Rate**: Should follow WSD schedule
-5. **Per-Domain Validation**: Check relative domain losses for data mix balance
-6. **Expert Utilization**: Near 25% per expert (for 4 experts)
-
-### Red Flags
-- Loss becomes NaN → reduce learning rate
-- Loss increases for >5K steps → check data pipeline
-- Grad norm consistently >10 → gradient explosion, reduce learning rate
-- Val loss >> train loss → possible overfitting, add regularization
-- Expert utilization <10% for any expert → check update_param setting
-- Multi-GPU < 1 iter/sec → likely topology bottleneck, use single GPU
+Key W&B metrics logged during training runs:
+1. **Training Loss**: Smooth convergence trend.
+2. **Validation Loss**: Monitored per-domain (Source Code, General Knowledge, Math, Instruction).
+3. **Gradient Norm**: Clipped at 1.0 (alert if consistently > 5.0).
+4. **Expert Utilization**: Balanced allocation across experts (target ~25% per expert for 4 experts, ~6.25% for 16 experts).
+5. **Learning Rate**: WSD token-driven schedule tracking.
 
 ---
 
@@ -737,69 +713,37 @@ def swiglu(x, alpha: float = 1.702, limit: float = 7.0):
 
 ## Known Issues & Solutions
 
-### Training Instability
-- **Fixed**: Loss logging bug (incorrect gradient accumulation scaling)
-- **Fixed**: Data pipeline context length mismatch
-- **Fixed**: Dtype mismatch in attention output
-
-### Memory Issues
-- Use ZeRO Stage 2 or 3 for distributed training
-- Reduce batch size if OOM
-- Enable Flash Attention for 40% memory reduction
-
-### Distributed Training Issues
-
-**NCCL Timeout Errors**: Poor GPU P2P topology (NODE/SYS). Use single GPU training instead.
-
-**Multi-GPU Slower Than Single GPU**: Check topology with `nvidia-smi topo -m`. If NODE/SYS, use single GPU.
+- **Padded Vocab Invariant**: `vocab_size` must equal `50_304` (128-byte aligned Phi-2 vocabulary). Token IDs are verified $< 50,304$.
+- **GPU P2P Interconnect Bottlenecks**: Avoid running multi-GPU training over `NODE` or `SYS` PCIe topologys due to NCCL latency. Verify topology with `nvidia-smi topo -m`.
+- **Soft-Clamping Parity**: SwiGLU activation bounding (`limit=30.0` or `7.0`) prevents activation explosions in deep MoE layers.
 
 ---
 
-## Model Unified Architecture (`model_flash_attn.py`)
-
-The repository has transitioned to a single, unified, high-efficiency architecture:
-
-- **Flash Attention 2**: Native hardware-accelerated attention support.
-- **Q/K Normalization**: Attention stability via pre-attention Query/Key RMSNorm scaling.
-- **KV Cache for Inference**: Fast autoregressive text generation.
-- **Batched Expert Dispatch**: High-performance contiguous memory sort-and-slice MoE dispatch.
-- **Auxiliary-Loss-Free Load Balancing**: Load balancing via dynamic router bias adjustment.
-
 ## Hardware Requirements
 
-### Minimum (Single GPU)
+### Minimum Development Setup
 - 1x RTX 4090 (24GB VRAM)
-- 32GB RAM
-- 100GB storage
+- 32GB System RAM
+- 100GB Storage
 
-### Recommended (Training at Scale)
-- 1x H200 (primary training GPU)
-- 64GB+ RAM
+### Production Training Setup
+- 1x H200 / H100 GPU (or multi-GPU node with NVLink / PIX interconnects)
+- 64GB+ System RAM
 - 500GB NVMe SSD
 
-### Cloud Provider Tips
-- **Vast.ai:** Filter for "NVLink" in search
-- **Always check topology first:** `nvidia-smi topo -m`
-- If NODE topology: prefer hardware with PIX, PXB, or NVLink interconnects
-- Look for "PCIe 4.0 x16" with modern CPUs (AMD EPYC 7xxx series)
+---
 
 ## Troubleshooting Guide
 
-### Before Starting Multi-GPU Training
-
-1. **Check GPU topology:**
+1. **Verify GPU Topology**:
    ```bash
    nvidia-smi topo -m
    ```
-  - PIX/PXB/NVLink → suitable for multi-GPU training
-  - NODE/SYS → use single GPU instead
-
-2. **Test single GPU first:**
+2. **Run Single GPU Dry Run**:
    ```bash
    python -m src.scripts.training.train
    ```
-
-3. **Verify NCCL:**
+3. **Verify Flash Attention & Triton Kernels**:
    ```bash
    python -c "import torch; print(torch.cuda.nccl.version())"
    ```
@@ -847,6 +791,6 @@ For questions or issues, please open an issue on GitHub or contact [@AkshithAI](
 
 *MoE Transformer Architecture — 398.7M params, 286M active per token*
 
-**Note**: This is a research project. The ~400M model is proving out the training pipeline and architecture. The 800M model is the target configuration for production.
+**Note**: This is a research project. The ~400M model is proving out the training pipeline and architecture. The 828M model is the target configuration for production.
 
 </div>

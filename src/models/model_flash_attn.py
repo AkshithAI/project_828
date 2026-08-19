@@ -135,12 +135,8 @@ class Gate(nn.Module):
         self.num_experts = config.num_experts
         self.router = nn.Linear(config.hidden_dim, config.num_experts, bias = False, device = device, dtype = config.dtype)
         self.register_buffer("bias", torch.zeros(config.num_experts, dtype=torch.float32, device=device))
-
-        # Telemetry: cached sigmoid routing probs from the last forward pass
         self.last_routing_probs: torch.Tensor | None = None
 
-        # Per-layer scaling: deeper layers get more aggressive bias correction
-        # Scale ranges from 1.0 (layer 0) to 1.5 (deepest layer)
         num_layers = config.num_hidden_layers
         layer_scale = 1.0 + 0.5 * (layer_idx / max(num_layers - 1, 1))
         self.effective_update = config.update_param * layer_scale
@@ -157,7 +153,6 @@ class Gate(nn.Module):
         scores = self.router(x)
         scores = torch.sigmoid(scores)
         original_scores = scores
-        # Cache routing probs for telemetry (no grad, no graph)
         self.last_routing_probs = original_scores.detach()
         biased_scores = scores + self.bias.detach().to(scores.dtype)
         indices = torch.topk(biased_scores, self.topk, dim=-1)[1]
@@ -446,7 +441,6 @@ class Attention(nn.Module):
         self.head_dim = config.head_dim
         self.inference = inference
         self.max_cache_len = config.max_context_len
-        self.attn_logit_cap = config.attn_logit_cap
        
         self.wq = nn.Linear(
             config.hidden_dim, config.num_attn_heads * config.head_dim, device = device, dtype = config.dtype
@@ -527,44 +521,16 @@ class Attention(nn.Module):
 
             Q = Q.transpose(1, 2)  # (B, H, S, D)
 
-            # GQA expansion
-            groups = self.n_heads // self.n_kv_heads
-            if groups > 1:
-                K = K[:, :, None, :, :].expand(-1, -1, groups, -1, -1)
-                K = K.reshape(batch_size, self.n_heads, -1, self.head_dim)
-                V = V[:, :, None, :, :].expand(-1, -1, groups, -1, -1)
-                V = V.reshape(batch_size, self.n_heads, -1, self.head_dim)
+            is_causal = (seq_len > 1 and attn_mask is None)
 
-            # Scaled dot-product attention logits
-            scale = 1.0 / math.sqrt(self.head_dim)
-            attn_logits = (Q @ K.transpose(-2, -1)) * scale
+            attn_out = F.scaled_dot_product_attention(
+                Q, K, V,
+                attn_mask=attn_mask,
+                is_causal=is_causal,
+                enable_gqa=(self.n_heads != self.n_kv_heads),
+            )
 
-            # Soft-capping (matches training's flash_attn softcap behaviour)
-            cap = self.attn_logit_cap
-            if cap > 0:
-                attn_logits = cap * torch.tanh(attn_logits / cap)
-
-            # Causal mask for prefill (seq_len > 1) when no explicit mask given
-            if seq_len > 1 and attn_mask is None:
-                causal = torch.triu(
-                    torch.ones(seq_len, attn_logits.shape[-1],
-                               dtype=torch.bool, device=x.device),
-                    diagonal=end_pos - seq_len + 1,
-                )
-                attn_logits.masked_fill_(
-                    causal.unsqueeze(0).unsqueeze(0), float('-inf')
-                )
-            elif attn_mask is not None:
-                # Padding mask from batched inference (generate_batch)
-                attn_logits = attn_logits + attn_mask
-
-            # Compute softmax in float32 for numerical stability, then
-            # nan_to_num handles fully-masked padding rows (all -inf → NaN)
-            # so they produce zero attention output (clean residual pass-through).
-            attn_weights = F.softmax(attn_logits.float(), dim=-1).nan_to_num(0.0)
-            attn_out = attn_weights.to(V.dtype) @ V
-
-            attn_out = attn_out.transpose(1,2)
+            attn_out = attn_out.transpose(1, 2)
         else:
             # ── Training: FlashAttention with native softcap ──
             attn_out = flash_attn_func(

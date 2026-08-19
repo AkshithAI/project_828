@@ -1623,13 +1623,117 @@ def load_phase_datasets(
     return mixer
 
 
+# ── Mixed-length curriculum support (YaRN extension / Run B) ─────────────────
+#
+# The context-extension curriculum needs the *distribution* of batch context
+# lengths to shift over time (e.g. 75% 2K → mostly 4K → mostly 8K), measured by
+# non-padding tokens. Rather than mixing lengths *within* a batch (which would
+# require padding + block masks), we keep every batch a single length and vary
+# *which* length across batches. Each bucket owns its own mixer + resumption
+# state, so exact-resume guarantees are preserved per bucket.
+
+
+class ContextLengthSampler:
+    """Selects the next batch's context length from a token-fraction schedule.
+
+    A ``context_length_sampler`` callback for :func:`create_phase_dataloaders`.
+    Given target *token* fractions per bucket (e.g. ``{2048: 0.1, 4096: 0.2,
+    8192: 0.7}``), it draws buckets so that, in expectation, the fraction of
+    non-padding tokens from each bucket matches the schedule. Because longer
+    sequences contribute more tokens per batch, the batch-selection probability
+    is the token-fraction divided by the context length (then renormalized).
+
+    The schedule can be advanced over training via :meth:`set_fractions`, which
+    an extension training loop calls at curriculum stage boundaries.
+    """
+
+    def __init__(self, token_fractions: Dict[int, float], seed: int = 1234):
+        self._rng = _random_module.Random(seed)
+        self.set_fractions(token_fractions)
+
+    def set_fractions(self, token_fractions: Dict[int, float]) -> None:
+        total = sum(token_fractions.values())
+        if total <= 0:
+            raise ValueError("token_fractions must sum to a positive value")
+        # Convert token-fractions → batch-selection probabilities by dividing by
+        # context length (tokens-per-seq ∝ ctx), then renormalize.
+        self.buckets = sorted(token_fractions.keys())
+        raw = {ctx: (token_fractions[ctx] / total) / ctx for ctx in self.buckets}
+        norm = sum(raw.values())
+        self.batch_probs = {ctx: raw[ctx] / norm for ctx in self.buckets}
+
+    def sample(self) -> int:
+        """Return the context length for the next batch."""
+        r = self._rng.random()
+        cumulative = 0.0
+        for ctx in self.buckets:
+            cumulative += self.batch_probs[ctx]
+            if r <= cumulative:
+                return ctx
+        return self.buckets[-1]
+
+
+class MixedLengthLoader:
+    """Interleaves several fixed-length prefetched loaders by a sampler.
+
+    Presents the same interface the training loop expects (iterable of batches,
+    ``get_state()``, ``pause_prefetch``/``resume_prefetch``). Each underlying
+    bucket loader yields single-length batches; :class:`ContextLengthSampler`
+    decides which bucket each next batch is pulled from.
+    """
+
+    def __init__(
+        self,
+        bucket_loaders: Dict[int, 'PrefetchedDataLoader'],
+        sampler: ContextLengthSampler,
+    ):
+        self.bucket_loaders = bucket_loaders
+        self.sampler = sampler
+
+    def get_state(self) -> Dict[str, Any]:
+        # Namespaced per-bucket state so resume restores every mixer.
+        return {
+            "mixed_length": True,
+            "buckets": {
+                str(ctx): loader.get_state()
+                for ctx, loader in self.bucket_loaders.items()
+            },
+        }
+
+    def pause_prefetch(self):
+        for loader in self.bucket_loaders.values():
+            loader.pause_prefetch()
+
+    def resume_prefetch(self):
+        for loader in self.bucket_loaders.values():
+            loader.resume_prefetch()
+
+    def __iter__(self):
+        iterators = {ctx: iter(loader) for ctx, loader in self.bucket_loaders.items()}
+        while True:
+            ctx = self.sampler.sample()
+            try:
+                yield next(iterators[ctx])
+            except StopIteration:
+                # A bucket exhausted; restart it and continue the curriculum.
+                iterators[ctx] = iter(self.bucket_loaders[ctx])
+                try:
+                    yield next(iterators[ctx])
+                except StopIteration:
+                    # Empty bucket — drop it to avoid a busy loop.
+                    del iterators[ctx]
+                    if not iterators:
+                        return
+
+
 def create_phase_dataloaders(
     phase_config: PhaseConfig,
     train_state: Optional[Dict[str, Any]] = None,
     val_repo_id: str = "HuggingFaceFW/fineweb-edu",
     batch_size_val: int = 16,
     context_length: int = 2048,
-) -> Tuple['ResumableDataLoader', DataLoader]:
+    context_length_sampler: Optional['ContextLengthSampler'] = None,
+) -> Tuple[Any, DataLoader]:
     """
     Factory for phase-aware training: builds a ``WeightedMixerDataset`` for
     training and a simple streaming ``ResumableDataset`` for validation.
@@ -1639,25 +1743,55 @@ def create_phase_dataloaders(
         train_state:    Saved mixer state dict (or None).
         val_repo_id:    HF repo for validation data.
         batch_size_val: Batch size for validation loader.
-        context_length: Token context length.
+        context_length: Token context length (used when no sampler is given).
+        context_length_sampler: Optional :class:`ContextLengthSampler` for the
+            mixed-length curriculum (YaRN extension). When provided, one mixer is
+            built per bucket length in ``sampler.buckets`` and batches are drawn
+            per the sampler's token-fraction schedule. When ``None`` (default,
+            the main run), a single fixed-length mixer is built and behavior is
+            unchanged.
 
     Returns:
         ``(train_loader, val_loader)``
     """
 
-    # ── Train mixer ──
-    mixer_dataset = load_phase_datasets(
-        phase_config,
-        mixer_state=train_state,
-        context_length=context_length,
-    )
-    _raw_loader = ResumableDataLoader(
-        mixer_dataset,
-        batch_size=phase_config.micro_batch_size,
-        pin_memory=True,
-        num_workers=0,
-    )
-    train_loader = PrefetchedDataLoader(_raw_loader, num_prefetch=16)
+    # ── Train mixer(s) ──
+    if context_length_sampler is not None:
+        # Mixed-length curriculum: one prefetched mixer per bucket length. Each
+        # bucket restores from its namespaced slice of the saved state.
+        saved_buckets = {}
+        if train_state and train_state.get("mixed_length"):
+            saved_buckets = train_state.get("buckets", {})
+
+        bucket_loaders: Dict[int, PrefetchedDataLoader] = {}
+        for ctx in context_length_sampler.buckets:
+            bucket_state = saved_buckets.get(str(ctx))
+            bucket_mixer = load_phase_datasets(
+                phase_config,
+                mixer_state=bucket_state,
+                context_length=ctx,
+            )
+            _bucket_raw = ResumableDataLoader(
+                bucket_mixer,
+                batch_size=phase_config.micro_batch_size,
+                pin_memory=True,
+                num_workers=0,
+            )
+            bucket_loaders[ctx] = PrefetchedDataLoader(_bucket_raw, num_prefetch=16)
+        train_loader: Any = MixedLengthLoader(bucket_loaders, context_length_sampler)
+    else:
+        mixer_dataset = load_phase_datasets(
+            phase_config,
+            mixer_state=train_state,
+            context_length=context_length,
+        )
+        _raw_loader = ResumableDataLoader(
+            mixer_dataset,
+            batch_size=phase_config.micro_batch_size,
+            pin_memory=True,
+            num_workers=0,
+        )
+        train_loader = PrefetchedDataLoader(_raw_loader, num_prefetch=16)
 
     # ── Validation ──
     val_stream = load_dataset(

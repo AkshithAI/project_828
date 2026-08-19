@@ -45,3 +45,6 @@ try:
     type(tokenizer).vocab_size = property(lambda self: _padded_vocab_size)
 except Exception:
     tokenizer.vocab_size = _padded_vocab_size
+
+tokenizer_v1 = AutoTokenizer.from_pretrained("bigcode/starcoder2-15b", trust_remote_code=True)
+tokenizer_v1.pad_token = "<fim_pad>"

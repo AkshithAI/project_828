@@ -67,6 +67,10 @@ def train_phase(
 
     criterion = nn.CrossEntropyLoss(ignore_index=eos_id)
 
+    # If the scheduler is token-based, drive it by cumulative non-padding tokens
+    # rather than optimizer steps 
+    scheduler_is_token_based = getattr(scheduler, "token_based", False)
+
     # Estimate model FLOPs per forward pass 
     n_params = sum(p.numel() for p in _unwrap(model).parameters())
     flops_per_token = 6 * n_params  
@@ -112,10 +116,17 @@ def train_phase(
             targets = batch[:, 1:].contiguous()
             nvtx_pop()
 
+            # Retain full [T, E] routing probabilities only on the microbatch that
+            # feeds validation-interval telemetry, so entropy can be computed
+            # without pinning the large tensor on every step.
+            collect_routing = ((optim_step + 1) % val_interval == 0) and (
+                micro_count == grad_accumulation_steps - 1
+            )
+
             nvtx_push("forward_and_loss")
             with autocast(device_type="cuda", dtype=torch.bfloat16):
                 try:
-                    res = model(inputs, labels=targets)
+                    res = model(inputs, labels=targets, collect_routing_telemetry=collect_routing)
                 except TypeError:
                     res = model(inputs)
                 
@@ -135,6 +146,17 @@ def train_phase(
             micro_count += 1
             last_inputs = inputs.detach()  # Keep reference for telemetry
 
+            # Accumulate non-padding tokens for the token-based LR schedule.
+            # Keep the running count on-device (a GPU tensor) and defer the single
+            # .item() sync to the optimizer-step boundary, so we don't force a
+            # device-to-host sync on every microbatch.
+            if scheduler_is_token_based:
+                step_tokens_tensor = (targets != eos_id).sum()
+                if micro_count == 1:
+                    accum_tokens_gpu = step_tokens_tensor
+                else:
+                    accum_tokens_gpu = accum_tokens_gpu + step_tokens_tensor
+
             if micro_count == grad_accumulation_steps:
                 optim_step += 1
 
@@ -144,12 +166,34 @@ def train_phase(
                 )
                 nvtx_pop()
 
-                nvtx_push("optimizer_step")
-                optimizer.step()
-                nvtx_pop()
+                # Guard against non-finite gradients (BF16 autocast has no
+                # GradScaler to skip steps for us). If grads blew up, skip both
+                # the optimizer update AND the MoE routing-bias commit so the
+                # bias does not drift out of sync with unchanged parameters.
+                step_applied = bool(torch.isfinite(grad_norm))
+
+                if step_applied:
+                    nvtx_push("optimizer_step")
+                    optimizer.step()
+                    nvtx_pop()
+
+                    # Commit load-balancing bias updates only after a successful
+                    # optimizer step, keeping routing bias aligned with the
+                    # parameters that actually changed.
+                    _unwrap(model).commit_moe_bias_updates()
+                else:
+                    print(
+                        f"[WARN] Non-finite grad_norm at optim_step {optim_step}; "
+                        f"skipping optimizer step and MoE bias commit."
+                    )
 
                 nvtx_push("scheduler_step")
-                scheduler.step()
+                if scheduler_is_token_based:
+                    # Single device-to-host sync per optimizer step (not per
+                    # microbatch) to read the accumulated non-padding token count.
+                    scheduler.step_tokens(int(accum_tokens_gpu.item()))
+                else:
+                    scheduler.step()
                 optimizer.zero_grad()
                 nvtx_pop()
 

@@ -1,11 +1,11 @@
+import math
 import torch
-from ..tokenizer import tokenizer
 from dataclasses import dataclass
 from .model_config import PhaseConfig
 
 @dataclass
 class ModelConfig:
-    vocab_size: int = tokenizer.vocab_size
+    vocab_size: int = 50_304  # Phi-2 tokenizer padded to 128-byte boundary
     num_attn_heads: int = 16
     num_key_value_heads: int = 8
     hidden_dim: int = 1024
@@ -22,14 +22,13 @@ class ModelConfig:
     update_param: float = 2e-3
     router_bias_max: float = 1.0
     moe_aux_loss_weight: float = 1e-3
-    initializer_std: float = 0.02
-    router_initializer_std: float = 0.01
 
     loss_workspace_bytes: int = 512 * 1024 * 1024
 
+    # RoPE — native 2K for base pretraining (YaRN is a separate post-training stage)
     base: int = 10000
     initial_context_len: int = 2048
-    max_context_len: int = 4096
+    max_context_len: int = 2048
     ntk_alpha: float = 1.0
     ntk_beta: float = 32.0
     scaling_factor: float = 1.0
@@ -58,6 +57,20 @@ class ModelConfig:
     initialize_low_precision_from_fp32: bool = True
     zero_padding_embedding: bool = True
     initialization_seed: int = 1234
+
+    def __post_init__(self):
+        if self.vocab_size != 50_304:
+            raise ValueError(
+                f"GPT_FLASH requires vocab_size=50_304 (128-aligned), "
+                f"got {self.vocab_size}"
+            )
+        if self.max_context_len > self.initial_context_len:
+            expected_scale = self.max_context_len / self.initial_context_len
+            if not math.isclose(self.scaling_factor, expected_scale):
+                raise ValueError(
+                    f"scaling_factor={self.scaling_factor} does not match "
+                    f"max_context_len/initial_context_len = {expected_scale}"
+                )
 
 
 
