@@ -465,14 +465,11 @@ class Attention(nn.Module):
         self.inference = inference
         self.max_cache_len = config.max_context_len
 
-        self.wq = nn.Linear(
-            config.hidden_dim, config.num_attn_heads * config.head_dim, device = device, dtype = config.dtype, bias=False
-        )
-        self.wk = nn.Linear(
-            config.hidden_dim,config.num_key_value_heads * config.head_dim , device = device, dtype = config.dtype, bias=False
-        )
-        self.wv = nn.Linear(
-            config.hidden_dim,config.num_key_value_heads * config.head_dim , device = device, dtype = config.dtype, bias=False
+        self.q_dim = config.num_attn_heads * config.head_dim
+        self.kv_dim = config.num_key_value_heads * config.head_dim
+
+        self.w_qkv = nn.Linear(
+            config.hidden_dim, self.q_dim + 2 * self.kv_dim, device=device, dtype=config.dtype, bias=False
         )
         self.wo = nn.Linear(
             config.num_attn_heads * config.head_dim, config.hidden_dim, device = device, dtype = config.dtype, bias=False
@@ -497,8 +494,8 @@ class Attention(nn.Module):
     def reset_cache(self, batch_size: int = 1) -> None:
         """Allocate (or reallocate) KV cache for the given batch size."""
         if self.inference:
-            device = self.wq.weight.device
-            dtype = self.wq.weight.dtype
+            device = self.w_qkv.weight.device
+            dtype = self.w_qkv.weight.dtype
             self.cache_k = torch.zeros(
                 batch_size, self.n_kv_heads, self.max_cache_len, self.head_dim,
                 device=device, dtype=dtype,
@@ -527,7 +524,8 @@ class Attention(nn.Module):
                 f"Increase max_context_len in ModelConfig."
             )
 
-        Q,K,V = self.wq(x),self.wk(x),self.wv(x)
+        qkv = self.w_qkv(x)
+        Q, K, V = torch.split(qkv, [self.q_dim, self.kv_dim, self.kv_dim], dim=-1)
         
         Q = Q.view(batch_size,seq_len,self.n_heads,self.head_dim)
         K = K.view(batch_size,seq_len,self.n_kv_heads,self.head_dim)

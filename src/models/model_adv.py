@@ -23,6 +23,11 @@ try:
 except ImportError:
     flash_attn_func = None
 
+try:
+    from flash_attn import flash_attn_varlen_func
+except ImportError:
+    flash_attn_varlen_func = None
+
 
 try:
     from liger_kernel.ops.fused_moe import LigerFusedMoEFunction
@@ -233,11 +238,17 @@ class Gate(nn.Module):
         )
         self.last_routing_probs = None
 
-    def forward(self, x: torch.Tensor,) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,]:
+    def forward(self, x: torch.Tensor, retain_full_probs: bool = False,) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
             x:
                 Flattened hidden states [T, D].
+            retain_full_probs:
+                When True, stash the full ``[T, E]`` routing-probability tensor on
+                ``last_routing_probs`` for expensive validation-interval telemetry.
+                When False (the default hot path) only compact per-expert
+                statistics are kept, avoiding a large FP32 tensor being pinned
+                until the next forward pass (~192 MiB at 128K tokens × 24 layers).
 
         Returns:
             routing_weights:
@@ -273,7 +284,10 @@ class Gate(nn.Module):
                 self.load_accum.add_(current_load.float())
                 self.last_load.copy_(current_load.float())
                 self.last_mean_scores.copy_(mean_probability.detach())
-                self.last_routing_probs = scores.detach()
+                if retain_full_probs:
+                    self.last_routing_probs = scores.detach()
+                else:
+                    self.last_routing_probs = None
 
         return routing_weights, expert_indices, current_load, auxiliary_loss
 
@@ -289,10 +303,6 @@ class Gate(nn.Module):
 
         if dist.is_available() and dist.is_initialized():
             dist.all_reduce(load, op=dist.ReduceOp.SUM)
-
-        if torch.sum(load) == 0:
-            self.load_accum.zero_()
-            return
 
         mean_load = load.mean()
 
@@ -360,13 +370,11 @@ class RoutedExperts(nn.Module):
         Returns:
             Routed expert output [T, D].
         """
-        if hidden_states.is_cuda:
+        if hidden_states.is_cuda and self.use_liger:
             if not LIGER_FUSED_MOE_AVAILABLE:
                 raise RuntimeError(
-                    "[RoutedExperts] CUDA device detected but liger-kernel is not installed. "
-                    "The reference Python expert loop launches ~2,300 kernels per forward pass "
-                    "causing severe GPU idle gaps (sawtooth pattern). "
-                    "Install with: pip install liger-kernel>=0.5.0"
+                    "[RoutedExperts] CUDA device detected and use_liger_moe=True but "
+                    "liger-kernel is not installed."
                 )
             return LigerFusedMoEFunction.apply(
                 hidden_states,
@@ -376,7 +384,7 @@ class RoutedExperts(nn.Module):
                 routing_weights,
             )
 
-        # CPU-only fallback for inference/testing
+        # Reference path: CPU inference/testing, or CUDA with use_liger_moe=False.
         return self._reference_forward(
             hidden_states,
             expert_indices,
@@ -465,13 +473,15 @@ class MoE(nn.Module):
         self.shared_expert = MLPBlock(config,device=device,)
 
         self.register_buffer("expert_counts", torch.zeros(self.num_experts,dtype=torch.long,device=device,), persistent=False,)
-        self.total_assignments = 0
+        self.total_tokens = 0
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, retain_full_probs: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
         original_shape = x.shape
         x_flat = x.reshape(-1, self.hidden_dim)
 
-        routing_weights, expert_indices, current_load, auxiliary_loss = self.gate(x_flat)
+        routing_weights, expert_indices, current_load, auxiliary_loss = self.gate(
+            x_flat, retain_full_probs=retain_full_probs,
+        )
 
         routed_output = self.routed_experts(
             hidden_states=x_flat, expert_indices=expert_indices, routing_weights=routing_weights,
@@ -483,13 +493,34 @@ class MoE(nn.Module):
         if self.training:
             with torch.no_grad():
                 self.expert_counts.add_(current_load.to(self.expert_counts.dtype))
-                self.total_assignments += (x_flat.shape[0] * self.top_k)
+                self.total_tokens += x_flat.shape[0]
         return output.view(original_shape), auxiliary_loss
+
+    @torch.no_grad()
+    def get_wandb_metrics(self) -> Dict[str, float]:
+        """Per-expert utilization + load-balance health for W&B.
+
+        Returns fractional load per expert (share of the ``top_k`` assignment
+        budget) plus a load-balance score in ``[0, 1]`` where 1.0 is perfectly
+        uniform routing. Safe to call only when ``total_tokens > 0``.
+        """
+        total_assignments = max(self.total_tokens * self.top_k, 1)
+        counts = self.expert_counts.float()
+        fractions = counts / total_assignments
+
+        metrics: Dict[str, float] = {}
+        for expert_id in range(self.num_experts):
+            metrics[f"expert_{expert_id}"] = fractions[expert_id].item()
+
+        uniform = 1.0 / self.num_experts
+        max_frac = fractions.max().item()
+        metrics["load_balance_score"] = max(0.0, 1.0 - (max_frac - uniform) / (1.0 - uniform))
+        return metrics
 
     @torch.no_grad()
     def reset_expert_counts(self):
         self.expert_counts.zero_()
-        self.total_assignments = 0
+        self.total_tokens = 0
 
     @torch.no_grad()
     def commit_bias_update(self):
@@ -694,6 +725,7 @@ class Attention(nn.Module):
 
         self.inference = inference
         self.max_cache_len = config.max_context_len
+        self.attn_dropout = getattr(config, "dropout", 0.0)
 
         if self.n_heads % self.n_kv_heads != 0:
             raise ValueError(
@@ -701,19 +733,12 @@ class Attention(nn.Module):
                 "num_key_value_heads"
             )
 
-        self.wq = nn.Linear(
-            config.hidden_dim, config.num_attn_heads * config.head_dim, device=device,
-            dtype=config.dtype, bias=False,
-        )
+        self.q_dim = config.num_attn_heads * config.head_dim
+        self.kv_dim = config.num_key_value_heads * config.head_dim
 
-        self.wk = nn.Linear(
-            config.hidden_dim, config.num_key_value_heads * config.head_dim, device=device,
-            dtype=config.dtype, bias=False,
-        )
-
-        self.wv = nn.Linear(
-            config.hidden_dim, config.num_key_value_heads * config.head_dim, device=device,
-            dtype=config.dtype, bias=False,
+        self.w_qkv = nn.Linear(
+            config.hidden_dim, self.q_dim + 2 * self.kv_dim,
+            device=device, dtype=config.dtype, bias=False,
         )
 
         self.wo = nn.Linear(
@@ -747,8 +772,8 @@ class Attention(nn.Module):
         if not self.inference:
             return
 
-        device = self.wq.weight.device
-        dtype = self.wq.weight.dtype
+        device = self.w_qkv.weight.device
+        dtype = self.w_qkv.weight.dtype
 
         self.cache_k = torch.empty(batch_size, self.n_kv_heads, self.max_cache_len, self.head_dim, device=device, dtype=dtype)
         self.cache_v = torch.empty(batch_size, self.n_kv_heads, self.max_cache_len, self.head_dim, device=device, dtype=dtype)
@@ -778,17 +803,45 @@ class Attention(nn.Module):
         k: torch.Tensor,
         v: torch.Tensor,
         attn_mask: Optional[torch.Tensor],
+        cu_seqlens: Optional[torch.Tensor] = None,
+        max_seqlen: Optional[int] = None,
     ) -> torch.Tensor:
 
+        dropout_p = self.attn_dropout if self.training else 0.0
+
+        # ── Document-aware packing (variable-length FlashAttention) ──
+        if cu_seqlens is not None:
+            if flash_attn_varlen_func is None:
+                raise RuntimeError(
+                    "cu_seqlens was provided for document-aware packing but "
+                    "flash_attn_varlen_func is unavailable. Install flash-attn "
+                    "(>=2.x) or pass a block-diagonal attn_mask instead."
+                )
+            batch_size, seq_len = q.shape[0], q.shape[1]
+            q_flat = q.reshape(-1, q.shape[-2], q.shape[-1])
+            k_flat = k.reshape(-1, k.shape[-2], k.shape[-1])
+            v_flat = v.reshape(-1, v.shape[-2], v.shape[-1])
+            eff_max = max_seqlen if max_seqlen is not None else seq_len
+            out = flash_attn_varlen_func(
+                q_flat, k_flat, v_flat,
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
+                max_seqlen_q=eff_max,
+                max_seqlen_k=eff_max,
+                dropout_p=dropout_p,
+                causal=True,
+            )
+            return out.reshape(batch_size, seq_len, out.shape[-2], out.shape[-1])
+
         if flash_attn_func is not None and attn_mask is None:
-            return flash_attn_func(q,k,v,causal=True)
+            return flash_attn_func(q, k, v, dropout_p=dropout_p, causal=True)
 
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
         output = F.scaled_dot_product_attention(
-            q,k,v,attn_mask=attn_mask,is_causal=(attn_mask is None),enable_gqa=(self.n_heads != self.n_kv_heads),
+            q,k,v,attn_mask=attn_mask,dropout_p=dropout_p,is_causal=(attn_mask is None),enable_gqa=(self.n_heads != self.n_kv_heads),
         )
 
         return output.transpose(1, 2)
@@ -845,6 +898,8 @@ class Attention(nn.Module):
         start_pos: int = 0,
         position_ids: Optional[torch.Tensor] = None,
         attn_mask: Optional[torch.Tensor] = None,
+        cu_seqlens: Optional[torch.Tensor] = None,
+        max_seqlen: Optional[int] = None,
     ) -> torch.Tensor:
         batch_size, seq_len, _ = x.shape
         end_pos = start_pos + seq_len
@@ -859,9 +914,8 @@ class Attention(nn.Module):
                     f"max_cache_len={self.max_cache_len}"
                 )
 
-        q = self.wq(x)
-        k = self.wk(x)
-        v = self.wv(x)
+        qkv = self.w_qkv(x)
+        q, k, v = torch.split(qkv, [self.q_dim, self.kv_dim, self.kv_dim], dim=-1)
 
         q = q.view(batch_size, seq_len, self.n_heads, self.head_dim)
         k = k.view(batch_size, seq_len, self.n_kv_heads, self.head_dim)
@@ -878,7 +932,7 @@ class Attention(nn.Module):
             )
         else:
             attention_output = self._training_attention(
-                q, k, v, attn_mask=attn_mask,
+                q, k, v, attn_mask=attn_mask, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen,
             )
 
         attention_output = attention_output.reshape(batch_size, seq_len, self.n_heads * self.head_dim)
@@ -917,12 +971,15 @@ class TransformerDecoderBLK(nn.Module):
         start_pos=0,
         position_ids=None,
         attn_mask=None,
+        retain_full_probs=False,
+        cu_seqlens=None,
+        max_seqlen=None,
     ):
-        attention_output = self.attention(self.norm1(x),cos, sin, start_pos, position_ids, attn_mask)
+        attention_output = self.attention(
+            self.norm1(x), cos, sin, start_pos, position_ids, attn_mask,
+            cu_seqlens=cu_seqlens, max_seqlen=max_seqlen,
+        )
 
-        # Fuse residual add + RMSNorm into a single Triton kernel on CUDA.
-        # Falls back to the unfused PyTorch path on CPU or when the kernel
-        # is not available.
         if FUSED_ADD_RMS_NORM_AVAILABLE and x.is_cuda:
             normed, x = FusedAddRMSNormFunction.apply(
                 attention_output, x, self.norm2.scale, self.norm2.eps,
@@ -931,7 +988,7 @@ class TransformerDecoderBLK(nn.Module):
             x = x + attention_output
             normed = self.norm2(x)
 
-        mlp_output, auxiliary_loss = self.mlp(normed)
+        mlp_output, auxiliary_loss = self.mlp(normed, retain_full_probs=retain_full_probs)
         x = x + mlp_output
 
         return x, auxiliary_loss
@@ -1097,7 +1154,17 @@ class GPT_FLASH(nn.Module):
         position_ids: Optional[torch.Tensor] = None,
         attn_mask: Optional[torch.Tensor] = None,
         return_logits: bool = False,
+        collect_routing_telemetry: bool = False,
+        cu_seqlens: Optional[torch.Tensor] = None,
+        max_seqlen: Optional[int] = None,
     ):
+        if input_ids.numel() > 0:
+            torch._assert(input_ids.min() >= 0, "Negative token ID")
+            torch._assert(
+                input_ids.max() < self.config.vocab_size,
+                "Token ID exceeds padded vocabulary (50_304)",
+            )
+
         x = self.embeddings(input_ids)
 
         total_auxiliary_loss = x.new_zeros((), dtype=torch.float32)
@@ -1105,6 +1172,8 @@ class GPT_FLASH(nn.Module):
         for layer in self.layers:
             x, layer_auxiliary_loss = layer(
                 x, self.cos, self.sin, start_pos, position_ids, attn_mask,
+                retain_full_probs=collect_routing_telemetry,
+                cu_seqlens=cu_seqlens, max_seqlen=max_seqlen,
             )
             total_auxiliary_loss = total_auxiliary_loss + layer_auxiliary_loss.float()
 

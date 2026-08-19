@@ -4,6 +4,7 @@
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
+[![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-project--828--gpt--base-yellow.svg)](https://huggingface.co/AkshithAI/project-828-gpt-base)
 [![Triton Kernels](https://img.shields.io/badge/Triton_Kernels-Enabled-orange.svg)](src/kernels/)
 [![DeepSpeed](https://img.shields.io/badge/DeepSpeed-Enabled-green.svg)](https://www.deepspeed.ai/)
 [![License](https://img.shields.io/badge/License-TBD-lightgrey.svg)](LICENSE)
@@ -12,10 +13,11 @@
 
 A Mixture-of-Experts (MoE) transformer implementation featuring custom Triton CUDA kernels, Grouped Query Attention, RoPE positional encoding with YaRN extension, Gigatoken Rust/SIMD tokenization, Liger-Kernel integration, and distributed training support.
 
-[Features](#features) • [Model Architecture](#model-architecture) • [Custom Triton Kernels](#custom-triton-kernels) • [Quick Start](#quick-start) • [Training](#training) • [Results](#training-experiments--results)
+[Features](#features) • [Model Architecture](#model-architecture) • [🤗 HF Model Release](#3987m-model-configuration-baseline--v1--hugging-face-release) • [Custom Triton Kernels](#custom-triton-kernels) • [Quick Start](#quick-start) • [Training](#training) • [Results](#training-experiments--results)
 
 ---
 
+- **Model Release (400M Base)**: [🤗 Hugging Face - `AkshithAI/project-828-gpt-base`](https://huggingface.co/AkshithAI/project-828-gpt-base)
 - **Training Report** : [Phase 1 Pretraining H200 W&B Report](https://wandb.ai/akshithmarepally-akai/828_pretraining_h200/reports/Phase-1-Pretraining-H200:-Training-Dynamics-and-MoE-Routing--VmlldzoxNzQ4MTcwOA==)
 </div>
 
@@ -25,7 +27,7 @@ A Mixture-of-Experts (MoE) transformer implementation featuring custom Triton CU
 - [Model Architecture](#model-architecture)
   - [Architecture Overview](#architecture-overview)
   - [828M Model Configuration (Current Target)](#828m-model-configuration-current-target)
-  - [398.7M Model Configuration (Baseline / v1)](#3987m-model-configuration-baseline--v1)
+  - [398.7M Model Configuration (Baseline / v1) & Hugging Face Release](#3987m-model-configuration-baseline--v1--hugging-face-release)
 - [Custom Triton Kernels](#custom-triton-kernels)
 - [Gigatoken Rust/SIMD Tokenizer](#gigatoken-rustsimd-tokenizer)
 - [YaRN Context Extension](#yarn-context-extension)
@@ -122,7 +124,9 @@ dtype = torch.bfloat16
 
 ---
 
-### 398.7M Model Configuration (Baseline / v1)
+### 398.7M Model Configuration (Baseline / v1) & Hugging Face Release
+
+The 398.7M (~400M) baseline model is published and available on Hugging Face: **[`AkshithAI/project-828-gpt-base`](https://huggingface.co/AkshithAI/project-828-gpt-base)**.
 
 The baseline 398.7M model configuration in [`src/scripts/configs/model_config.py`](src/scripts/configs/model_config.py):
 
@@ -145,6 +149,40 @@ dtype = torch.bfloat16
 ```
 
 **398.7M Parameter Breakdown**: Embedding 37.7M + Unembedding 37.8M + 24×(Attention 1.8M + MoE 11.7M) + Norm = **398.7M total**, **~286M active per token**.
+
+#### Quickstart with Hugging Face `transformers`
+
+You can directly load and run inference on the model using `transformers`:
+
+```python
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+model_id = "AkshithAI/project-828-gpt-base"
+
+# Load tokenizer and custom MoE model from Hugging Face Hub
+tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+model = AutoModelForCausalLM.from_pretrained(
+    model_id,
+    trust_remote_code=True,
+    torch_dtype=torch.bfloat16,
+    device_map="auto"
+)
+
+prompt = "from collections import deque\n\ndef bfs(graph, start):\n    \"\"\"Breadth-first search returning visited nodes in order.\"\"\"\n    visited = set()\n    queue = deque([start])\n    result = []\n    while queue:"
+inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+
+outputs = model.generate(
+    **inputs,
+    max_new_tokens=128,
+    temperature=0.7,
+    top_p=0.9,
+    do_sample=True,
+    pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id
+)
+
+print(tokenizer.decode(outputs[0], skip_special_tokens=True))
+```
 
 ---
 
