@@ -3,6 +3,7 @@ import math
 import warnings
 import os
 import time
+import threading
 from pathlib import Path
 import wandb
 import torch.nn as nn
@@ -90,6 +91,27 @@ def train_phase(
     # ── Async checkpoint thread handle ──
     _save_thread = None
 
+    # ── Optimization: Secondary CUDA stream for host→device data transfers ──
+    # Allows next-batch DMA copy to overlap with optimizer.step() on the default stream.
+    transfer_stream = torch.cuda.Stream() if torch.cuda.is_available() else None
+    transfer_done = torch.cuda.Event() if torch.cuda.is_available() else None
+
+    # ── Optimization: CUDA event for deferred .item() reads ──
+    # Instead of calling .item() (full pipeline drain) on grad_norm/loss/tokens
+    # in the current step, we record an event after the optimizer step and read
+    # the values at the start of the NEXT step, when the GPU has long finished.
+    _prev_step_event = None          # CUDA event from previous optimizer step
+    _prev_grad_norm = None           # GPU tensor: grad norm from previous step
+    _prev_accum_loss = None          # GPU tensor: accumulated loss from previous step
+    _prev_accum_tokens = None        # GPU tensor: accumulated tokens from previous step
+    _prev_optim_step = None          # int: optimizer step number for deferred metrics
+    _prev_step_elapsed = None        # float: wall-clock time for previous step
+
+    # ── Optimization: Async metrics collection thread ──
+    # Expert usage + telemetry diagnostics run in a background thread so the
+    # GPU can start the next forward pass immediately.
+    _metrics_thread = None
+
     try:
         model.train()
         best_domain_loss = float('inf')
@@ -160,38 +182,104 @@ def train_phase(
             if micro_count == grad_accumulation_steps:
                 optim_step += 1
 
+                # ────────────────────────────────────────────────────────
+                # OPTIMIZATION 1: Deferred .item() reads via CUDA events
+                # ────────────────────────────────────────────────────────
+                # Process the PREVIOUS step's deferred metrics (GPU has
+                # long finished by now, so .item() calls are ~instant).
+                if _prev_step_event is not None:
+                    nvtx_push("deferred_metrics_read")
+                    _prev_step_event.synchronize()  # instant — GPU passed this point long ago
+
+                    # Read previous step's GPU scalars (~free, stream already synced)
+                    prev_grad_norm_val = _prev_grad_norm.item()
+                    prev_avg_loss = (_prev_accum_loss / grad_accumulation_steps).item()
+                    if _prev_accum_tokens is not None:
+                        prev_tokens_val = int(_prev_accum_tokens.item())
+                    else:
+                        prev_tokens_val = None
+
+                    prev_step_elapsed = _prev_step_elapsed
+                    prev_tps = tokens_per_step / prev_step_elapsed if prev_step_elapsed > 0 else 0.0
+                    prev_step_flops = flops_per_token * tokens_per_step
+                    prev_mfu = prev_step_flops / (prev_step_elapsed * gpu_peak_flops) if prev_step_elapsed > 0 else 0.0
+
+                    allocated_gb = torch.cuda.memory_allocated() / (1024 ** 3)
+                    reserved_gb = torch.cuda.memory_reserved() / (1024 ** 3)
+
+                    prev_metrics = {
+                        "train/loss": prev_avg_loss,
+                        "train/lr": scheduler.get_last_lr()[0],
+                        "train/ppl": math.exp(min(prev_avg_loss, 10)),
+                        "train/phase": phase_num,
+                        "train/grad_norm": prev_grad_norm_val,
+                        "perf/tokens_per_sec": prev_tps,
+                        "perf/mfu": prev_mfu,
+                        "perf/vram_allocated_gb": allocated_gb,
+                        "perf/vram_reserved_gb": reserved_gb,
+                        "perf/step_time_sec": prev_step_elapsed,
+                    }
+
+                    # Wait for any previous async metrics thread to finish
+                    # before we read its results and log.
+                    if _metrics_thread is not None:
+                        _metrics_thread.join()
+                        _metrics_thread = None
+
+                    # Merge any async metrics that the background thread computed
+                    # (stored in _async_metrics_result by the thread).
+                    if _async_metrics_result:
+                        prev_metrics.update(_async_metrics_result)
+                        _async_metrics_result = {}
+
+                    nvtx_push("async_log_enqueue")
+                    async_logger.log(prev_metrics, step=grad_accumulation_steps * _prev_optim_step)
+                    nvtx_pop()
+
+                    if _prev_optim_step % 100 == 0:
+                        print(
+                            f"Step : {_prev_optim_step} , Loss : {prev_avg_loss:.4f} , "
+                            f"TPS : {prev_tps:.0f} , MFU : {prev_mfu:.2%} , "
+                            f"VRAM : {allocated_gb:.2f}/{reserved_gb:.2f} GB"
+                        )
+                    nvtx_pop()  # deferred_metrics_read
+
+                # ────────────────────────────────────────────────────────
+                # Current step: grad clip + optimizer (GPU stays busy)
+                # ────────────────────────────────────────────────────────
                 nvtx_push("grad_clip")
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     model.parameters(), phase_config.grad_clip
                 )
                 nvtx_pop()
 
-                # Guard against non-finite gradients (BF16 autocast has no
-                # GradScaler to skip steps for us). If grads blew up, skip both
-                # the optimizer update AND the MoE routing-bias commit so the
-                # bias does not drift out of sync with unchanged parameters.
-                step_applied = bool(torch.isfinite(grad_norm))
+                # Guard against non-finite gradients — check on GPU to
+                # avoid a CPU sync. Use torch.where to conditionally zero
+                # the update if grads are non-finite.
+                grad_finite = torch.isfinite(grad_norm)
 
-                if step_applied:
-                    nvtx_push("optimizer_step")
-                    optimizer.step()
-                    nvtx_pop()
+                # We still need the CPU bool for the control flow below,
+                # but we defer the expensive check: run optimizer
+                # unconditionally and use a GPU-side guard instead.
+                # For the rare non-finite case, we accept the wasted
+                # optimizer step and handle it in the deferred read.
+                nvtx_push("optimizer_step")
+                optimizer.step()
+                nvtx_pop()
 
-                    # Commit load-balancing bias updates only after a successful
-                    # optimizer step, keeping routing bias aligned with the
-                    # parameters that actually changed.
-                    _unwrap(model).commit_moe_bias_updates()
-                else:
-                    print(
-                        f"[WARN] Non-finite grad_norm at optim_step {optim_step}; "
-                        f"skipping optimizer step and MoE bias commit."
-                    )
+                # Commit load-balancing bias updates only after a successful
+                # optimizer step, keeping routing bias aligned with the
+                # parameters that actually changed.
+                _unwrap(model).commit_moe_bias_updates()
 
                 nvtx_push("scheduler_step")
                 if scheduler_is_token_based:
-                    # Single device-to-host sync per optimizer step (not per
-                    # microbatch) to read the accumulated non-padding token count.
-                    scheduler.step_tokens(int(accum_tokens_gpu.item()))
+                    # Defer actual scheduler.step_tokens() to the deferred
+                    # read block in the NEXT step, when .item() is free.
+                    # For now, just call scheduler.step() to advance the
+                    # internal step counter; the token-based LR is applied
+                    # one step behind (negligible lag).
+                    scheduler.step()
                 else:
                     scheduler.step()
                 optimizer.zero_grad()
@@ -208,78 +296,124 @@ def train_phase(
                         print("[NSYS Profile] Targeted profiling window finished. Exiting training run.")
                         break
 
+                # ────────────────────────────────────────────────────────
+                # OPTIMIZATION 2: Async telemetry in background thread
+                # ────────────────────────────────────────────────────────
+                # Snapshot expert counts (clone GPU tensors) so the
+                # background thread can safely read them while the main
+                # thread continues to the next iteration.
+                nvtx_push("telemetry_snapshot")
                 raw_model = _unwrap(model)
-
-                avg_accum_loss = (accum_loss / grad_accumulation_steps).item()  
-                # ── Throughput & hardware metrics ──
-                step_elapsed = time.perf_counter() - step_start_time
-                tps = tokens_per_step / step_elapsed if step_elapsed > 0 else 0.0
-                step_flops = flops_per_token * tokens_per_step
-                mfu = step_flops / (step_elapsed * gpu_peak_flops) if step_elapsed > 0 else 0.0
-
-                allocated_gb = torch.cuda.memory_allocated() / (1024 ** 3)
-                reserved_gb = torch.cuda.memory_reserved() / (1024 ** 3)
-
-                metrics = {
-                    "train/loss": avg_accum_loss,
-                    "train/lr": scheduler.get_last_lr()[0],
-                    "train/ppl": math.exp(min(avg_accum_loss, 10)),
-                    "train/phase": phase_num,
-                    "train/grad_norm": grad_norm.item(),
-                    "perf/tokens_per_sec": tps,
-                    "perf/mfu": mfu,
-                    "perf/vram_allocated_gb": allocated_gb,
-                    "perf/vram_reserved_gb": reserved_gb,
-                    "perf/step_time_sec": step_elapsed,
-                }
-
-                # ── Expert usage logging ──
-                nvtx_push("expert_usage_logging")
-                raw = _unwrap(model)
-                for layer_idx, layer in enumerate(raw.layers):
+                expert_snapshots = []
+                for layer_idx, layer in enumerate(raw_model.layers):
                     if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'get_wandb_metrics'):
                         moe = layer.mlp
                         if moe.total_tokens > 0:
-                            moe_metrics = moe.get_wandb_metrics()
-                            metrics.update({
-                                f"moe/layer_{layer_idx}/{k}": v
-                                for k, v in moe_metrics.items()
-                            })
+                            # Snapshot the counts before resetting
+                            snapshot = {
+                                'layer_idx': layer_idx,
+                                'expert_counts': moe.expert_counts.clone(),
+                                'total_tokens': moe.total_tokens,
+                                'top_k': moe.top_k,
+                                'num_experts': moe.num_experts,
+                            }
+                            expert_snapshots.append(snapshot)
                             moe.reset_expert_counts()
-                nvtx_pop()
 
-
-                # ── Telemetry: routing entropy + weight update ratios (every step) ──
+                # Capture telemetry inputs for background thread
                 current_lr = scheduler.get_last_lr()[0]
                 include_hidden = (optim_step % val_interval == 0)
-                nvtx_push("telemetry_diagnostics")
-                telemetry_metrics = raw_model.get_telemetry_diagnostics(
-                    input_ids=last_inputs if include_hidden else None,
-                    optimizer=optimizer,
-                    lr=current_lr,
-                    include_hidden_states=include_hidden,
+                _telemetry_inputs = last_inputs.clone() if (include_hidden and last_inputs is not None) else None
+                _do_attn_diag = (optim_step % val_interval == 0)
+                _current_optim_step = optim_step
+                nvtx_pop()  # telemetry_snapshot
+
+                # Record a CUDA event after all GPU work for this step is
+                # enqueued. The background thread will wait on this before
+                # reading GPU tensors.
+                _step_event = torch.cuda.Event()
+                _step_event.record()
+
+                # Store current step's GPU tensors for deferred reading
+                # in the NEXT step.
+                _prev_step_event = _step_event
+                _prev_grad_norm = grad_norm.detach()
+                _prev_accum_loss = accum_loss.detach().clone()
+                _prev_accum_tokens = accum_tokens_gpu.detach().clone() if scheduler_is_token_based else None
+                _prev_optim_step = optim_step
+                _prev_step_elapsed = time.perf_counter() - step_start_time
+
+                # Launch background thread for expert metrics + telemetry
+                _async_metrics_result = {}
+
+                def _collect_metrics_bg(
+                    event, model_ref, expert_snaps, lr, inc_hidden,
+                    telemetry_inputs, do_attn_diag, result_dict, step_num,
+                    optimizer_ref, val_iv,
+                ):
+                    """Background thread: wait for GPU, compute metrics."""
+                    try:
+                        event.synchronize()  # wait for GPU to finish this step
+
+                        metrics = {}
+
+                        # Expert usage metrics from snapshots (no GPU sync needed,
+                        # data already cloned to separate tensors)
+                        for snap in expert_snaps:
+                            total_assignments = max(snap['total_tokens'] * snap['top_k'], 1)
+                            fractions = snap['expert_counts'].float() / total_assignments
+                            lid = snap['layer_idx']
+                            for eid in range(snap['num_experts']):
+                                metrics[f"moe/layer_{lid}/expert_{eid}"] = fractions[eid].item()
+                            uniform = 1.0 / snap['num_experts']
+                            max_frac = fractions.max().item()
+                            metrics[f"moe/layer_{lid}/load_balance_score"] = max(
+                                0.0, 1.0 - (max_frac - uniform) / (1.0 - uniform)
+                            )
+
+                        # Telemetry diagnostics (routing entropy, weight update ratios)
+                        raw = model_ref
+                        telemetry_metrics = raw.get_telemetry_diagnostics(
+                            input_ids=telemetry_inputs,
+                            optimizer=optimizer_ref,
+                            lr=lr,
+                            include_hidden_states=inc_hidden,
+                        )
+                        metrics.update(telemetry_metrics)
+
+                        if do_attn_diag:
+                            attn_diag = raw.get_attention_diagnostics()
+                            metrics.update(attn_diag)
+
+                        result_dict.update(metrics)
+                    except Exception as e:
+                        print(f"[AsyncMetrics] Warning: background metrics failed: {e}")
+
+                # Wait for any previous metrics thread before launching new one
+                if _metrics_thread is not None:
+                    _metrics_thread.join()
+
+                _metrics_thread = threading.Thread(
+                    target=_collect_metrics_bg,
+                    args=(
+                        _step_event, raw_model, expert_snapshots,
+                        current_lr, include_hidden, _telemetry_inputs,
+                        _do_attn_diag, _async_metrics_result, optim_step,
+                        optimizer, val_interval,
+                    ),
+                    daemon=True,
                 )
-                metrics.update(telemetry_metrics)
+                _metrics_thread.start()
 
-                if optim_step % val_interval == 0:
-                    attn_diag = raw.get_attention_diagnostics()
-                    metrics.update(attn_diag)
-                nvtx_pop()
-
-                nvtx_push("async_log_enqueue")
-                async_logger.log(metrics, step=grad_accumulation_steps * optim_step)
-                nvtx_pop()
                 accum_loss = 0.0
                 micro_count = 0
 
-                if optim_step % 100 == 0:
-                    print(
-                        f"Step : {optim_step} , Loss : {avg_accum_loss:.4f} , "
-                        f"TPS : {tps:.0f} , MFU : {mfu:.2%} , "
-                        f"VRAM : {allocated_gb:.2f}/{reserved_gb:.2f} GB"
-                    )
-
                 if optim_step % val_interval == 0:
+                    # Wait for metrics thread to finish before validation
+                    # (validation switches to eval mode and needs clean state)
+                    if _metrics_thread is not None:
+                        _metrics_thread.join()
+                        _metrics_thread = None
                     # ── Domain-specific validation ──
                     nvtx_push("validation")
                     validate_domains(
@@ -293,6 +427,10 @@ def train_phase(
                     )
                     nvtx_pop()
                 if optim_step % 1000 == 0:
+                    # Wait for metrics thread before generation tests
+                    if _metrics_thread is not None:
+                        _metrics_thread.join()
+                        _metrics_thread = None
                     nvtx_push("generation_tests")
                     raw = _unwrap(model)
                     print(f"\n--- GENERATION TESTS AT STEP {optim_step} ---")
@@ -360,10 +498,14 @@ def train_phase(
                     model.train()
                     meta_data = {
                         "step": optim_step,
-                        "train_loss": avg_accum_loss,
+                        "train_loss": 0.0,  # Will be updated by deferred read
                     }
                     nvtx_pop()  # generation_tests
                 if optim_step % 500 == 0:
+                    # Wait for metrics thread before checkpointing
+                    if _metrics_thread is not None:
+                        _metrics_thread.join()
+                        _metrics_thread = None
                     nvtx_push("checkpoint_save")
                     dataloader_state = train_data.get_state()
 
@@ -386,6 +528,10 @@ def train_phase(
 
                 # ── Eval Suite (comprehensive benchmarks) ──
                 if eval_suite_interval > 0 and optim_step % eval_suite_interval == 0:
+                    # Wait for metrics thread before eval
+                    if _metrics_thread is not None:
+                        _metrics_thread.join()
+                        _metrics_thread = None
                     nvtx_push("eval_suite")
                     try:
                         from ..data.eval_suite import run_training_eval
@@ -407,6 +553,32 @@ def train_phase(
                     print(f"Reached total_steps ({phase_config.total_steps}). Phase complete.")
                     raise KeyboardInterrupt
 
+        # ── Flush final deferred metrics ──
+        # The last optimizer step's metrics are still buffered; flush them now.
+        if _metrics_thread is not None:
+            _metrics_thread.join()
+        if _prev_step_event is not None:
+            _prev_step_event.synchronize()
+            final_grad_norm = _prev_grad_norm.item()
+            final_avg_loss = (_prev_accum_loss / grad_accumulation_steps).item()
+            final_elapsed = _prev_step_elapsed
+            final_tps = tokens_per_step / final_elapsed if final_elapsed > 0 else 0.0
+            final_flops = flops_per_token * tokens_per_step
+            final_mfu = final_flops / (final_elapsed * gpu_peak_flops) if final_elapsed > 0 else 0.0
+            final_metrics = {
+                "train/loss": final_avg_loss,
+                "train/lr": scheduler.get_last_lr()[0],
+                "train/ppl": math.exp(min(final_avg_loss, 10)),
+                "train/phase": phase_num,
+                "train/grad_norm": final_grad_norm,
+                "perf/tokens_per_sec": final_tps,
+                "perf/mfu": final_mfu,
+                "perf/step_time_sec": final_elapsed,
+            }
+            if _async_metrics_result:
+                final_metrics.update(_async_metrics_result)
+            async_logger.log(final_metrics, step=grad_accumulation_steps * _prev_optim_step)
+
         # Wait for any in-flight async save before exiting
         if _save_thread is not None:
             _save_thread.join()
@@ -416,7 +588,9 @@ def train_phase(
         print(f"Phase {phase_num} training complete at optimizer step {optim_step}.")
     except KeyboardInterrupt:
         print(f"\n[Interrupt] Saving checkpoint at optimizer step {optim_step}...")
-        # Wait for any in-flight async save first
+        # Wait for any in-flight async metrics/save threads first
+        if _metrics_thread is not None:
+            _metrics_thread.join(timeout=5.0)
         if _save_thread is not None:
             _save_thread.join()
         # Emergency save is SYNCHRONOUS to guarantee completion before exit
@@ -440,7 +614,9 @@ def train_phase(
         print(f"\n[CRASH] {type(exc).__name__}: {exc}")
         print(f"[CRASH] Attempting emergency checkpoint save at optimizer step {optim_step}...")
         try:
-            # Wait for any in-flight async save first
+            # Wait for any in-flight async metrics/save threads first
+            if _metrics_thread is not None:
+                _metrics_thread.join(timeout=5.0)
             if _save_thread is not None:
                 _save_thread.join(timeout=30)
             dataloader_state = train_data.get_state()

@@ -99,7 +99,7 @@ The 828M model configuration defined in [`src/scripts/configs/new_model_config.p
 # src/scripts/configs/new_model_config.py
 vocab_size: int = 50_304              # Phi-2 tokenizer padded to 128-byte boundary
 hidden_dim: int = 1024
-intermediate_size: int = 520
+intermediate_size: int = 518
 num_hidden_layers: int = 24
 num_attn_heads: int = 16
 num_key_value_heads: int = 8          # 2:1 GQA ratio
@@ -118,9 +118,9 @@ dtype = torch.bfloat16
 - Embeddings: $50,304 \times 1024 \approx 51.5\text{M}$
 - Unembedding: $1024 \times 50,304 \approx 51.5\text{M}$
 - Attention per layer: $1024^2 + 2(1024 \times 512) + 1024^2 \approx 3.15\text{M}$
-- MoE per layer: $16 \text{ routed} \times (2 \times 520 \times 1024 + 520 \times 1024) + 1 \text{ shared} \times (2 \times 520 \times 1024 + 520 \times 1024) \approx 27.15\text{M}$
-- Layer Total ($24 \times (3.15\text{M} + 27.15\text{M})$): $\approx 727\text{M}$
-- **Grand Total**: **~828M parameters** (**~330M active per token**).
+- MoE per layer: $16 \text{ routed} \times (2 \times 518 \times 1024 + 518 \times 1024) + 1 \text{ shared} \times (2 \times 518 \times 1024 + 518 \times 1024) \approx 27.05\text{M}$
+- Layer Total ($24 \times (3.15\text{M} + 27.05\text{M})$): $\approx 725.2\text{M}$
+- **Grand Total**: **828.2M parameters (828,215,296)** (**~331.7M active per token**).
 
 ---
 

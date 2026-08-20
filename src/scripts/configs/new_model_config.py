@@ -9,7 +9,7 @@ class ModelConfig:
     num_attn_heads: int = 16
     num_key_value_heads: int = 8
     hidden_dim: int = 1024
-    intermediate_size: int = 520
+    intermediate_size: int = 518
     head_dim: int = 64
     num_hidden_layers: int = 24
 
