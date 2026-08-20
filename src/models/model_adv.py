@@ -473,7 +473,7 @@ class MoE(nn.Module):
         self.shared_expert = MLPBlock(config,device=device,)
 
         self.register_buffer("expert_counts", torch.zeros(self.num_experts,dtype=torch.long,device=device,), persistent=False,)
-        self.register_buffer("total_tokens", torch.zeros((), dtype=torch.long, device=device), persistent=False)
+        self.total_tokens = 0
 
     def forward(self, x: torch.Tensor, retain_full_probs: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
         original_shape = x.shape
@@ -493,7 +493,7 @@ class MoE(nn.Module):
         if self.training:
             with torch.no_grad():
                 self.expert_counts.add_(current_load.to(self.expert_counts.dtype))
-                self.total_tokens.add_(x_flat.shape[0])
+                self.total_tokens += x_flat.shape[0]
         return output.view(original_shape), auxiliary_loss
 
     @torch.no_grad()
@@ -504,8 +504,7 @@ class MoE(nn.Module):
         budget) plus a load-balance score in ``[0, 1]`` where 1.0 is perfectly
         uniform routing. Safe to call only when ``total_tokens > 0``.
         """
-        total_tokens_val = int(self.total_tokens.item())
-        total_assignments = max(total_tokens_val * self.top_k, 1)
+        total_assignments = max(self.total_tokens * self.top_k, 1)
         counts = self.expert_counts.float()
         fractions = counts / total_assignments
 
@@ -521,7 +520,7 @@ class MoE(nn.Module):
     @torch.no_grad()
     def reset_expert_counts(self):
         self.expert_counts.zero_()
-        self.total_tokens.zero_()
+        self.total_tokens = 0
 
     @torch.no_grad()
     def commit_bias_update(self):

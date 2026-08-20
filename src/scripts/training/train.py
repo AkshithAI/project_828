@@ -299,13 +299,12 @@ def train_phase(
                 for layer_idx, layer in enumerate(raw_model.layers):
                     if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'get_wandb_metrics'):
                         moe = layer.mlp
-                        total_tok_val = int(moe.total_tokens.item()) if isinstance(moe.total_tokens, torch.Tensor) else int(moe.total_tokens)
-                        if total_tok_val > 0:
+                        if moe.total_tokens > 0:
                             # Snapshot the counts before resetting
                             snapshot = {
                                 'layer_idx': layer_idx,
                                 'expert_counts': moe.expert_counts.clone(),
-                                'total_tokens': total_tok_val,
+                                'total_tokens': moe.total_tokens,
                                 'top_k': moe.top_k,
                                 'num_experts': moe.num_experts,
                             }
