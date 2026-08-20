@@ -188,7 +188,9 @@ def train_phase(
                 # ────────────────────────────────────────────────────────
                 nvtx_push("grad_clip")
                 grad_norm = torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), phase_config.grad_clip
+                    model.parameters(),
+                    phase_config.grad_clip,
+                    foreach=True if torch.cuda.is_available() else None,
                 )
                 nvtx_pop()
 
@@ -717,6 +719,7 @@ if __name__ == '__main__':
         lr=config.learning_rate,
         betas=(0.9, 0.95),
         eps=1e-8,
+        fused=torch.cuda.is_available(),
     )
     scheduler = create_phase_scheduler(optimizer, phase_config)
 
@@ -773,6 +776,7 @@ if __name__ == '__main__':
             betas=(0.9, 0.95),
             weight_decay=0.1,
             eps=1e-8,
+            fused=torch.cuda.is_available(),
         )
 
         scheduler = create_phase_scheduler(optimizer, phase_config)

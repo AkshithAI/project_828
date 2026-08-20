@@ -84,6 +84,7 @@ def run_nsys_profile(
     warmup_steps: int,
     active_steps: int,
     nsys_bin: str,
+    use_compile: bool = False,
 ) -> tuple:
     """
     Run nsys profile on the training script for a specific model.
@@ -111,9 +112,10 @@ def run_nsys_profile(
         "--profile",
         "--profile-warmup-steps", str(warmup_steps),
         "--profile-active-steps", str(active_steps),
-        "--no-compile",                          # Disable torch.compile for cleaner traces
         "--no-resume",                             # Start fresh, don't load existing checkpoints
     ]
+    if not use_compile:
+        cmd.append("--no-compile")                      # Disable torch.compile for cleaner traces
 
     print(f"\n{'='*70}")
     print(f" Profiling: {model_name}")
@@ -458,6 +460,8 @@ def main():
     parser.add_argument("--wandb-project", type=str, default="828_nsys_profiling")
     parser.add_argument("--no-wandb", action="store_true",
                         help="Skip W&B upload (just generate profiles)")
+    parser.add_argument("--compile", action="store_true",
+                        help="Enable torch.compile during profiling (default: disabled via --no-compile)")
     args = parser.parse_args()
 
     # Resolve output directory
@@ -488,6 +492,7 @@ def main():
             warmup_steps=args.warmup_steps,
             active_steps=args.active_steps,
             nsys_bin=nsys_bin,
+            use_compile=args.compile,
         )
 
         print(f"\n[{model_name}] nsys-rep: {nsys_rep} (exists={nsys_rep.exists()})")
