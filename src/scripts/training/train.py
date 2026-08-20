@@ -183,10 +183,40 @@ def train_phase(
                 optim_step += 1
 
                 # ────────────────────────────────────────────────────────
-                # OPTIMIZATION 1: Deferred .item() reads via CUDA events
+                # GPU work FIRST: launch grad_clip + optimizer immediately
+                # so the GPU stays busy while CPU does deferred reads.
                 # ────────────────────────────────────────────────────────
-                # Process the PREVIOUS step's deferred metrics (GPU has
-                # long finished by now, so .item() calls are ~instant).
+                nvtx_push("grad_clip")
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), phase_config.grad_clip
+                )
+                nvtx_pop()
+
+                # Guard against non-finite gradients — check on GPU to
+                # avoid a CPU sync.
+                grad_finite = torch.isfinite(grad_norm)
+
+                nvtx_push("optimizer_step")
+                optimizer.step()
+                nvtx_pop()
+
+                # Commit load-balancing bias updates only after a successful
+                # optimizer step, keeping routing bias aligned with the
+                # parameters that actually changed.
+                _unwrap(model).commit_moe_bias_updates()
+
+                nvtx_push("scheduler_step")
+                if scheduler_is_token_based:
+                    scheduler.step()
+                else:
+                    scheduler.step()
+                optimizer.zero_grad()
+                nvtx_pop()
+
+                # ────────────────────────────────────────────────────────
+                # DEFERRED .item() reads — runs while GPU processes the
+                # optimizer kernels we just launched above.
+                # ────────────────────────────────────────────────────────
                 if _prev_step_event is not None:
                     nvtx_push("deferred_metrics_read")
                     _prev_step_event.synchronize()  # instant — GPU passed this point long ago
@@ -243,47 +273,6 @@ def train_phase(
                             f"VRAM : {allocated_gb:.2f}/{reserved_gb:.2f} GB"
                         )
                     nvtx_pop()  # deferred_metrics_read
-
-                # ────────────────────────────────────────────────────────
-                # Current step: grad clip + optimizer (GPU stays busy)
-                # ────────────────────────────────────────────────────────
-                nvtx_push("grad_clip")
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), phase_config.grad_clip
-                )
-                nvtx_pop()
-
-                # Guard against non-finite gradients — check on GPU to
-                # avoid a CPU sync. Use torch.where to conditionally zero
-                # the update if grads are non-finite.
-                grad_finite = torch.isfinite(grad_norm)
-
-                # We still need the CPU bool for the control flow below,
-                # but we defer the expensive check: run optimizer
-                # unconditionally and use a GPU-side guard instead.
-                # For the rare non-finite case, we accept the wasted
-                # optimizer step and handle it in the deferred read.
-                nvtx_push("optimizer_step")
-                optimizer.step()
-                nvtx_pop()
-
-                # Commit load-balancing bias updates only after a successful
-                # optimizer step, keeping routing bias aligned with the
-                # parameters that actually changed.
-                _unwrap(model).commit_moe_bias_updates()
-
-                nvtx_push("scheduler_step")
-                if scheduler_is_token_based:
-                    # Defer actual scheduler.step_tokens() to the deferred
-                    # read block in the NEXT step, when .item() is free.
-                    # For now, just call scheduler.step() to advance the
-                    # internal step counter; the token-based LR is applied
-                    # one step behind (negligible lag).
-                    scheduler.step()
-                else:
-                    scheduler.step()
-                optimizer.zero_grad()
-                nvtx_pop()
 
                 # Stop CUDA Profiler after profile active steps
                 if profile and profiling_started and not profiling_stopped and optim_step >= profile_target_stop:
@@ -357,16 +346,19 @@ def train_phase(
 
                         metrics = {}
 
-                        # Expert usage metrics from snapshots (no GPU sync needed,
-                        # data already cloned to separate tensors)
+                        # Expert usage metrics from snapshots — use bulk
+                        # .cpu().tolist() instead of per-expert .item() to
+                        # avoid hundreds of individual GPU→CPU syncs.
                         for snap in expert_snaps:
                             total_assignments = max(snap['total_tokens'] * snap['top_k'], 1)
                             fractions = snap['expert_counts'].float() / total_assignments
                             lid = snap['layer_idx']
-                            for eid in range(snap['num_experts']):
-                                metrics[f"moe/layer_{lid}/expert_{eid}"] = fractions[eid].item()
+                            # Single bulk transfer: GPU tensor → CPU list
+                            frac_list = fractions.cpu().tolist()
+                            for eid, frac_val in enumerate(frac_list):
+                                metrics[f"moe/layer_{lid}/expert_{eid}"] = frac_val
+                            max_frac = max(frac_list)
                             uniform = 1.0 / snap['num_experts']
-                            max_frac = fractions.max().item()
                             metrics[f"moe/layer_{lid}/load_balance_score"] = max(
                                 0.0, 1.0 - (max_frac - uniform) / (1.0 - uniform)
                             )

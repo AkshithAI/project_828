@@ -113,10 +113,13 @@ def compute_routing_telemetry(model: nn.Module) -> Dict[str, float]:
             prob_dist = probs_float / probs_float.sum(dim=-1, keepdim=True).clamp(min=1e-12)
             # Shannon entropy: H = -sum(p_i * log(p_i))
             ent = -(prob_dist * prob_dist.clamp(min=1e-12).log()).sum(dim=-1)  # (N,)
-            mean_ent = ent.mean().item()
-            ent_ratio = mean_ent / max_entropy if max_entropy > 0 else 0.0
+            mean_ent = ent.mean()  # keep as tensor
 
-            metrics[f"telemetry/routing_entropy/layer_{i}"] = mean_ent
+            # Bulk transfer: single .item() instead of keeping on GPU
+            mean_ent_val = mean_ent.item()
+            ent_ratio = mean_ent_val / max_entropy if max_entropy > 0 else 0.0
+
+            metrics[f"telemetry/routing_entropy/layer_{i}"] = mean_ent_val
             metrics[f"telemetry/routing_entropy_ratio/layer_{i}"] = ent_ratio
             entropy_ratios.append(ent_ratio)
 
@@ -126,8 +129,10 @@ def compute_routing_telemetry(model: nn.Module) -> Dict[str, float]:
         cos_matrix = W_norm @ W_norm.T  # (E, E)
         # Mask diagonal (self-similarity = 1.0 always)
         mask = ~torch.eye(W.shape[0], dtype=torch.bool, device=W.device)
-        mean_cos = cos_matrix[mask].mean().item()
-        max_cos = cos_matrix[mask].max().item()
+        off_diag = cos_matrix[mask]
+        # Bulk transfer: 2 values at once via a stacked tensor
+        cos_stats = torch.stack([off_diag.mean(), off_diag.max()]).cpu().tolist()
+        mean_cos, max_cos = cos_stats[0], cos_stats[1]
 
         metrics[f"telemetry/router_cos_sim/layer_{i}"] = mean_cos
         metrics[f"telemetry/router_cos_sim_max/layer_{i}"] = max_cos
