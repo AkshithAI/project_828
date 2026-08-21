@@ -1,4 +1,5 @@
 import math
+import os
 from typing import Dict, Optional, Tuple
 
 import torch
@@ -22,6 +23,8 @@ try:
     from flash_attn import flash_attn_func
 except ImportError:
     flash_attn_func = None
+
+_VALIDATE_TOKEN_IDS = os.environ.get("VALIDATE_TOKEN_IDS", "0").lower() in ("1", "true", "yes")
 
 try:
     from flash_attn import flash_attn_varlen_func
@@ -72,18 +75,19 @@ except ImportError:
 
 
 try:
-    from ..kernels.fused_add_rms_norm import FusedAddRMSNormFunction
+    from ..kernels.fused_add_rms_norm import FusedAddRMSNormFunction, FusedRMSNormFunction
     FUSED_ADD_RMS_NORM_AVAILABLE = True
 except ImportError:
     try:
-        from src.kernels.fused_add_rms_norm import FusedAddRMSNormFunction
+        from src.kernels.fused_add_rms_norm import FusedAddRMSNormFunction, FusedRMSNormFunction
         FUSED_ADD_RMS_NORM_AVAILABLE = True
     except ImportError:
         try:
-            from kernels.fused_add_rms_norm import FusedAddRMSNormFunction
+            from kernels.fused_add_rms_norm import FusedAddRMSNormFunction, FusedRMSNormFunction
             FUSED_ADD_RMS_NORM_AVAILABLE = True
         except ImportError:
             FusedAddRMSNormFunction = None
+            FusedRMSNormFunction = None
             FUSED_ADD_RMS_NORM_AVAILABLE = False
 
 
@@ -107,10 +111,9 @@ class RMS_Norm(nn.Module):
         self.scale = nn.Parameter(torch.ones(num_features, device=device, dtype=torch.float32))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if FUSED_ADD_RMS_NORM_AVAILABLE and x.is_cuda:
-            zeros = torch.zeros_like(x)
+        if FusedRMSNormFunction is not None and x.is_cuda:
             nvtx_push("triton_rms_norm")
-            y, _ = FusedAddRMSNormFunction.apply(x, zeros, self.scale, self.eps)
+            y = FusedRMSNormFunction.apply(x, self.scale, self.eps)
             nvtx_pop()
             return y
         t, dtype = x.float(), x.dtype
@@ -227,15 +230,6 @@ class Gate(nn.Module):
             torch.zeros(self.num_experts, dtype=torch.float32, device=device,),
         )
 
-        self.register_buffer(
-            "last_mean_scores",
-            torch.zeros(self.num_experts, dtype=torch.float32, device=device,), persistent=False,
-        )
-
-        self.register_buffer(
-            "last_load",
-            torch.zeros(self.num_experts, dtype=torch.float32, device=device,), persistent=False,
-        )
         self.last_routing_probs = None
 
     def forward(self, x: torch.Tensor, retain_full_probs: bool = False,) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -282,8 +276,6 @@ class Gate(nn.Module):
         if self.training:
             with torch.no_grad():
                 self.load_accum.add_(current_load.float())
-                self.last_load.copy_(current_load.float())
-                self.last_mean_scores.copy_(mean_probability.detach())
                 if retain_full_probs:
                     self.last_routing_probs = scores.detach()
                 else:
@@ -319,8 +311,6 @@ class Gate(nn.Module):
     @torch.no_grad()
     def reset_load_statistics(self):
         self.load_accum.zero_()
-        self.last_load.zero_()
-        self.last_mean_scores.zero_()
     
 
 class RoutedExperts(nn.Module):
@@ -1158,7 +1148,9 @@ class GPT_FLASH(nn.Module):
         cu_seqlens: Optional[torch.Tensor] = None,
         max_seqlen: Optional[int] = None,
     ):
-        if input_ids.numel() > 0:
+        # NOTE: torch._assert on GPU tensors (min/max reductions) forces a
+        # device sync at the top of every microbatch. Only enable for debugging.
+        if _VALIDATE_TOKEN_IDS and input_ids.numel() > 0:
             torch._assert(input_ids.min() >= 0, "Negative token ID")
             torch._assert(
                 input_ids.max() < self.config.vocab_size,

@@ -256,6 +256,88 @@ class FusedAddRMSNormFunction(torch.autograd.Function):
     return dX, dR, dW, None
 
 
+# ── Plain RMSNorm (no residual add) ──────────────────────────────────
+# Standalone call sites (pre-attention norm, QK-norm, final norm) don't
+# need the residual sum output. The add-variant forces callers to allocate
+# a zeros_like(X) residual just to be discarded — pure wasted bandwidth.
+
+@triton.autotune(configs=_FWD_CONFIGS, key=["N"])
+@triton.jit
+def _rms_norm_fwd(
+    X_ptr,
+    X_row_stride,
+    W_ptr,
+    W_row_stride,
+    Rstd_ptr,
+    Rstd_row_stride,
+    Y_ptr,
+    Y_row_stride,
+    eps,
+    N,
+    BLOCK_SIZE: tl.constexpr
+):
+  row_pid = tl.program_id(axis=0)
+  col_offs = tl.arange(0, BLOCK_SIZE)
+  mask = col_offs < N
+
+  X_ptr += row_pid * X_row_stride
+  Y_ptr += row_pid * Y_row_stride
+  Rstd_ptr += row_pid * Rstd_row_stride
+
+  x = tl.load(X_ptr + col_offs, mask=mask, other=0.)
+  x_fp32 = x.to(tl.float32)
+
+  sq_mean = tl.sum(x_fp32 * x_fp32, axis=0) / N
+  rstd = tl.math.rsqrt(sq_mean + eps)
+  tl.store(Rstd_ptr, rstd)
+
+  w = tl.load(W_ptr + col_offs, mask=mask, other=0.).to(tl.float32)
+  Y = ((x_fp32 * rstd) * w).to(x.dtype)
+  tl.store(Y_ptr + col_offs, Y, mask=mask)
+
+
+def rms_norm_forward(X, W, eps):
+  shape = X.shape
+  X = X.view(-1, shape[-1])
+  M, N = X.shape
+
+  Y = torch.empty((M, N), dtype=X.dtype, device=X.device)
+  Rstd = torch.empty((M,), dtype=torch.float32, device=X.device)
+
+  _rms_norm_fwd[(M,)](
+      X,
+      X.stride(0),
+      W,
+      W.stride(0),
+      Rstd,
+      Rstd.stride(0),
+      Y,
+      Y.stride(0),
+      eps,
+      N,
+  )
+
+  return Y.view(*shape), Rstd
+
+
+class FusedRMSNormFunction(torch.autograd.Function):
+  @staticmethod
+  @ensure_contiguous
+  def forward(ctx, X, W, eps):
+    Y, RSTD = rms_norm_forward(X, W, eps)
+    # Reuse the add-variant backward: it reconstructs xhat = S * rstd, so
+    # passing the input as "S" yields exactly the plain-RMSNorm gradients.
+    ctx.save_for_backward(X, W, RSTD)
+    return Y
+
+  @staticmethod
+  @ensure_contiguous
+  def backward(ctx, dY):
+    X, W, RSTD = ctx.saved_tensors
+    dX, _, dW = fused_add_rms_norm_backward(dY, None, X, W, RSTD)
+    return dX, dW, None
+
+
 # ------ Testing script --------
 class PyTorchFusedAddRMSNorm(nn.Module):
     def __init__(self, num_features, eps=1e-6):
