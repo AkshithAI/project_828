@@ -133,9 +133,27 @@ def train_phase(
                 profiling_started = True
 
             nvtx_push("data_to_device")
-            batch = batch.to(config.device, non_blocking=True).long()
-            inputs = batch[:, :-1].contiguous()
-            targets = batch[:, 1:].contiguous()
+            # ── Optimization: H2D copy on a dedicated transfer stream ──
+            # The copy engine (CE) executes the DMA concurrently with the
+            # previous microbatch's backward kernels still draining on the
+            # default stream. The compute stream waits on `transfer_done`
+            # before consuming, so correctness is preserved by construction.
+            #
+            # NOTE: this ONLY overlaps if `batch` is page-locked (pinned).
+            # A pageable source makes cudaMemcpyAsync behave synchronously
+            # AND respect stream order — the host blocks here until every
+            # previously queued kernel finishes (nsys shows this as a long
+            # red cudaMemcpyAsync in the CUDA API row while the GPU-side
+            # copy itself takes only ~8µs). Pin defensively as a fallback;
+            # a no-op if the upstream pin_memory=True path already worked.
+            if torch.cuda.is_available() and not batch.is_pinned():
+                batch = batch.pin_memory()
+            with torch.cuda.stream(transfer_stream):
+                gpu_batch = batch.to(config.device, non_blocking=True).long()
+                transfer_done.record(transfer_stream)
+            torch.cuda.current_stream(config.device).wait_event(transfer_done)
+            inputs = gpu_batch[:, :-1].contiguous()
+            targets = gpu_batch[:, 1:].contiguous()
             nvtx_pop()
 
             # Retain full [T, E] routing probabilities only on the microbatch that
