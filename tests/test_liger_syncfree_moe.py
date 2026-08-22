@@ -21,15 +21,25 @@ import torch
 _mock = types.ModuleType("flash_attn")
 sys.modules.setdefault("flash_attn", _mock)
 
-# ── Stub triton ONLY for module import; removed before real use ──────
-_triton_stub = types.ModuleType("triton")
-_triton_stub.jit = lambda *a, **k: (lambda f: f) if a and callable(a[0]) else (lambda f: f)
-_triton_stub.autotune = lambda configs, key: (lambda f: f)
-_triton_stub.Config = MagicMock()
-_triton_stub.next_power_of_2 = lambda n: 1 << (n - 1).bit_length()
-_triton_stub.cdiv = lambda a, b: -(-a // b)
-sys.modules["triton"] = _triton_stub
-sys.modules["triton.language"] = MagicMock()
+# ── Stub triton ONLY when genuinely unavailable (CPU/Mac dev boxes) ──
+# On GPU machines the REAL triton must stay untouched: liger_kernel's
+# ops/__init__ runs a version check against triton.__version__, which a
+# bare stub breaks ("module 'triton' has no attribute '__version__'").
+try:
+    import triton  # noqa: F401
+    _TRITON_REAL = True
+except ImportError:
+    _TRITON_REAL = False
+
+if not _TRITON_REAL:
+    _triton_stub = types.ModuleType("triton")
+    _triton_stub.jit = lambda *a, **k: (lambda f: f) if a and callable(a[0]) else (lambda f: f)
+    _triton_stub.autotune = lambda configs, key: (lambda f: f)
+    _triton_stub.Config = MagicMock()
+    _triton_stub.next_power_of_2 = lambda n: 1 << (n - 1).bit_length()
+    _triton_stub.cdiv = lambda a, b: -(-a // b)
+    sys.modules["triton"] = _triton_stub
+    sys.modules["triton.language"] = MagicMock()
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
@@ -46,9 +56,10 @@ try:
 except ImportError:
     _HAS_LIGER = False
 
-# Undo the triton stub so transformers / other libs see the truth.
-sys.modules.pop("triton", None)
-sys.modules.pop("triton.language", None)
+# Undo the triton stub (only ever ours) so other libs see the truth.
+if not _TRITON_REAL:
+    sys.modules.pop("triton", None)
+    sys.modules.pop("triton.language", None)
 
 requires_liger_cuda = pytest.mark.skipif(
     not (_HAS_LIGER and torch.cuda.is_available()),

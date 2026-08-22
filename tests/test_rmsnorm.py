@@ -430,5 +430,68 @@ class TestDeviceConsistency:
         )
 
 
+# ── SECTION 9: Triton FusedRMSNormFunction (standalone, no residual) ──────────
+
+class TestFusedRMSNormTriton:
+    """
+    The plain (no-residual-add) Triton RMSNorm used on standalone call sites.
+    Validates forward output and input/weight gradients against the PyTorch
+    reference. Reuses the add-variant backward internally, so both paths
+    must agree.
+    """
+
+    @requires_cuda
+    def test_forward_matches_reference(self):
+        from src.kernels.fused_add_rms_norm import FusedRMSNormFunction
+
+        torch.manual_seed(0)
+        eps = 1e-8
+        for shape in [(256, 1024), (4, 128, 1024), (4, 128, 16, 64)]:
+            x = torch.randn(*shape, device="cuda", dtype=torch.bfloat16)
+            w = torch.randn(shape[-1], device="cuda", dtype=torch.float32)
+
+            y_tri = FusedRMSNormFunction.apply(x, w, eps)
+
+            t = x.float()
+            y_ref = ((t * torch.rsqrt(t ** 2 .mean(dim=-1, keepdim=True) + eps)) * w).to(x.dtype)
+
+            torch.testing.assert_close(
+                y_tri.float(), y_ref.float(), atol=2e-2, rtol=2e-2,
+                msg=f"Forward mismatch for shape {shape}",
+            )
+
+    @requires_cuda
+    def test_backward_matches_reference(self):
+        from src.kernels.fused_add_rms_norm import FusedRMSNormFunction
+
+        torch.manual_seed(1)
+        eps = 1e-8
+        D = 1024
+        x_ref = torch.randn(512, D, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        w_ref = torch.randn(D, device="cuda", dtype=torch.float32, requires_grad=True)
+
+        # Triton path
+        x_tri = x_ref.detach().clone().requires_grad_(True)
+        w_tri = w_ref.detach().clone().requires_grad_(True)
+        dy = torch.randn(512, D, device="cuda", dtype=torch.bfloat16)
+
+        y_tri = FusedRMSNormFunction.apply(x_tri, w_tri, eps)
+        y_tri.backward(dy)
+
+        # Reference path
+        t = x_ref.float()
+        y_ref = ((t * torch.rsqrt((t ** 2).mean(dim=-1, keepdim=True) + eps)) * w_ref).to(x_ref.dtype)
+        y_ref.backward(dy)
+
+        torch.testing.assert_close(
+            x_tri.grad.float(), x_ref.grad.float(), atol=2e-2, rtol=2e-2,
+            msg="Input gradient mismatch",
+        )
+        torch.testing.assert_close(
+            w_tri.grad.float(), w_ref.grad.float(), atol=2e-2, rtol=2e-2,
+            msg="Weight gradient mismatch",
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short", "-x"])

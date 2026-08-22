@@ -370,26 +370,19 @@ class RoutedExperts(nn.Module):
             )
         )
 
+    # NOTE: deliberately excluded from torch.compile. Dynamo tries to
+    # inline-trace autograd.Function.apply as a higher-order op, and liger's
+    # forward (custom Triton kernel launches + our sync-free routing metadata)
+    # is not traceable — it hard-fails inside dynamo's bytecode transform
+    # instead of graph-breaking. A clean graph boundary here keeps the rest
+    # of the model compiled while the MoE block runs eagerly.
+    @torch.compiler.disable(recursive=True)
     def forward(
         self,
         hidden_states: torch.Tensor,
         expert_indices: torch.Tensor,
         routing_weights: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Args:
-            hidden_states:
-                [T, D]
-
-            expert_indices:
-                [T, K]
-
-            routing_weights:
-                [T, K]
-
-        Returns:
-            Routed expert output [T, D].
-        """
         if hidden_states.is_cuda and self.use_liger:
             if not LIGER_FUSED_MOE_AVAILABLE:
                 raise RuntimeError(
