@@ -37,6 +37,51 @@ def nvtx_pop():
         torch.cuda.nvtx.range_pop()
 
 
+class _SyncHunt:
+    """Diagnostic: records every synchronizing CUDA op with its source location.
+
+    Enabled for the first N microbatches via SYNC_HUNT_MICROBATCHES=N.
+    Uses torch.cuda.set_sync_debug_mode("warn") and captures the resulting
+    warnings so hidden .item()/.cpu()-style pipeline drains inside
+    forward/backward can be attributed to exact file:line call sites.
+
+    Scope note: step-boundary syncs (deferred metric reads, event waits) are
+    known and intentional — this hunt only wraps forward_and_loss + backward,
+    where ANY sync is a bug in a GPU-bound training loop.
+    """
+
+    def __init__(self):
+        self.records = []
+        self._ctx = None
+
+    def __enter__(self):
+        self._ctx = warnings.catch_warnings(record=True)
+        self.records = self._ctx.__enter__()
+        warnings.simplefilter("always")
+        torch.cuda.set_sync_debug_mode("warn")
+        return self
+
+    def __exit__(self, *exc):
+        torch.cuda.set_sync_debug_mode("default")
+        self._ctx.__exit__(*exc)
+        return False
+
+    def report(self):
+        from collections import Counter
+
+        locs = Counter()
+        for w in self.records:
+            if "synchronizing" in str(w.message).lower():
+                locs[f"{w.filename}:{w.lineno}"] += 1
+        total = sum(locs.values())
+        print(f"\n{'=' * 70}")
+        print(f"SYNC HUNT RESULTS — {total} hidden syncing ops caught in this microbatch")
+        print(f"{'=' * 70}")
+        for loc, count in locs.most_common(40):
+            print(f"{count:5d}x  {loc}")
+        print("=" * 70 + "\n")
+
+
 def train_phase(
     model, optimizer, scheduler,
     train_data, wandb_run, phase_config,
@@ -84,6 +129,12 @@ def train_phase(
     profile_target_stop = profile_target_start + profile_active_steps
     if profile:
         print(f"[NSYS Profile] Profiling enabled: Warmup until step {profile_target_start}, profile {profile_active_steps} steps until step {profile_target_stop}.")
+
+    # ── Sync-hunt diagnostic (SYNC_HUNT_MICROBATCHES=N) ──
+    _sync_hunt_target = int(os.environ.get("SYNC_HUNT_MICROBATCHES", "0"))
+    _sync_hunt_done = 0
+    if _sync_hunt_target > 0:
+        print(f"[SyncHunt] Scanning the first {_sync_hunt_target} microbatches for hidden CUDA syncs...")
 
     # ── Async telemetry logger (non-blocking background thread) ──
     async_logger = AsyncTelemetryLogger(wandb_run)
@@ -163,13 +214,18 @@ def train_phase(
                 micro_count == grad_accumulation_steps - 1
             )
 
+            _hunt = None
+            if _sync_hunt_done < _sync_hunt_target:
+                _hunt = _SyncHunt()
+                _hunt.__enter__()
+
             nvtx_push("forward_and_loss")
             with autocast(device_type="cuda", dtype=torch.bfloat16):
                 try:
                     res = model(inputs, labels=targets, collect_routing_telemetry=collect_routing)
                 except TypeError:
                     res = model(inputs)
-                
+
                 first, aux_loss = res
                 if first.dim() == 0:
                     loss = first
@@ -181,6 +237,13 @@ def train_phase(
             total_loss = loss + aux_loss
             (total_loss / grad_accumulation_steps).backward()
             nvtx_pop()
+
+            if _hunt is not None:
+                _hunt.__exit__(None, None, None)
+                _sync_hunt_done += 1
+                _hunt.report()
+                if _sync_hunt_done == _sync_hunt_target:
+                    print("[SyncHunt] Scan complete — unset SYNC_HUNT_MICROBATCHES for normal training.")
 
             accum_loss = accum_loss + loss.detach()  
             micro_count += 1
