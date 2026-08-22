@@ -1,5 +1,8 @@
 from transformers import AutoTokenizer
-import gigatoken as gt
+try:
+    import gigatoken as gt
+except ImportError:
+    gt = None  # optional accelerator — graceful fallback to HF AutoTokenizer below
 
 # ── Gigatoken-Accelerated Tokenizer ──────────────────────────────────────────
 #
