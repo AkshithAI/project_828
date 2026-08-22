@@ -40,9 +40,6 @@ except ImportError:
     LigerFusedMoEFunction = None
     LIGER_FUSED_MOE_AVAILABLE = False
 
-# Remove the per-layer .item() pipeline drain inside liger's MoE routing
-# metadata (24 hidden syncs per microbatch at 24 layers). See
-# src/kernels/liger_moe_syncfree.py for the mechanism.
 SYNC_FREE_MOE_ROUTING = False
 if LIGER_FUSED_MOE_AVAILABLE:
     try:
@@ -370,12 +367,6 @@ class RoutedExperts(nn.Module):
             )
         )
 
-    # NOTE: deliberately excluded from torch.compile. Dynamo tries to
-    # inline-trace autograd.Function.apply as a higher-order op, and liger's
-    # forward (custom Triton kernel launches + our sync-free routing metadata)
-    # is not traceable — it hard-fails inside dynamo's bytecode transform
-    # instead of graph-breaking. A clean graph boundary here keeps the rest
-    # of the model compiled while the MoE block runs eagerly.
     @torch.compiler.disable(recursive=True)
     def forward(
         self,

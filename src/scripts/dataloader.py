@@ -480,6 +480,51 @@ FORMAT_FNS: Dict[str, Callable[[Dict[str, Any]], Optional[str]]] = {
 # ── State containers ─────────────────────────
 
 
+def compute_cu_seqlens(batch: torch.Tensor, eos_id: int) -> Tuple[torch.Tensor, int]:
+    """Derive FlashAttention varlen metadata from a packed token batch.
+
+    The mixer concatenates documents with an EOS separator after each one,
+    so document boundaries inside every row are exactly the EOS positions.
+    This scans a ``(B, S)`` id batch for those positions and builds the
+    cumulative-sequence-lengths tensor that ``flash_attn_varlen_func``
+    needs to mask cross-document attention.
+
+    Args:
+        batch:   ``(B, S)`` int64 token ids. Call this BEFORE moving the
+                 batch to GPU — ``nonzero()`` synchronizes, and doing it on
+                 CPU keeps the hot loop clean; the returned cu_seqlens is
+                 tiny (int32) and transfers asynchronously with the batch.
+        eos_id:  tokenizer EOS id (document separator).
+
+    Returns:
+        (cu_seqlens, max_seqlen):
+            cu_seqlens: ``(num_docs * B + 1,)`` int32 tensor on the same
+            device as *batch*, monotonically increasing, first entry 0,
+            last entry B*S.
+            max_seqlen: longest document length in the batch (host int).
+    """
+    if batch.dim() != 2:
+        raise ValueError(f"expected (B, S) batch, got {tuple(batch.shape)}")
+    B, S = batch.shape
+    device = batch.device
+
+    # Document ends: flat position just past each EOS token.
+    rows, cols = torch.nonzero(batch == eos_id, as_tuple=True)
+    ends = rows * S + (cols + 1)
+
+    # Dedupe (consecutive EOS tokens would create empty sequences) and sort.
+    ends = torch.unique(ends)
+
+    zeros = torch.zeros(1, dtype=torch.int64, device=device)
+    cu = torch.cat([zeros, ends])
+    total = B * S
+    if cu.numel() == 0 or int(cu[-1]) != total:
+        cu = torch.cat([cu, torch.tensor([total], dtype=torch.int64, device=device)])
+
+    max_seqlen = int((cu[1:] - cu[:-1]).max().item()) if cu.numel() > 1 else S
+    return cu.to(torch.int32), max_seqlen
+
+
 @dataclass
 class DataLoaderState:
     """

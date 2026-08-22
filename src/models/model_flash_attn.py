@@ -532,11 +532,8 @@ class Attention(nn.Module):
 
             attn_out = attn_out.transpose(1, 2)
         else:
-            # ── Training: FlashAttention with native softcap ──
-            attn_out = flash_attn_func(
-                Q, K, V, causal=True,
-                softcap=self.attn_logit_cap if self.attn_logit_cap > 0 else 0.0,
-            )
+            # ── Training: FlashAttention ──
+            attn_out = flash_attn_func(Q, K, V, causal=True)
         attn_out = attn_out.reshape(batch_size,seq_len,-1)
         attn_out = self.wo(attn_out)
 
