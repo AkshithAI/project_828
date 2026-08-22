@@ -40,6 +40,22 @@ except ImportError:
     LigerFusedMoEFunction = None
     LIGER_FUSED_MOE_AVAILABLE = False
 
+# Remove the per-layer .item() pipeline drain inside liger's MoE routing
+# metadata (24 hidden syncs per microbatch at 24 layers). See
+# src/kernels/liger_moe_syncfree.py for the mechanism.
+SYNC_FREE_MOE_ROUTING = False
+if LIGER_FUSED_MOE_AVAILABLE:
+    try:
+        from ..kernels.liger_moe_syncfree import apply_sync_free_routing_metadata
+        SYNC_FREE_MOE_ROUTING = apply_sync_free_routing_metadata()
+    except ImportError:
+        try:
+            from src.kernels.liger_moe_syncfree import apply_sync_free_routing_metadata
+            SYNC_FREE_MOE_ROUTING = apply_sync_free_routing_metadata()
+        except ImportError:
+            from kernels.liger_moe_syncfree import apply_sync_free_routing_metadata
+            SYNC_FREE_MOE_ROUTING = apply_sync_free_routing_metadata()
+
 
 try:
     from ..kernels.fused_linear_cross_entropy import fused_linear_cross_entropy
@@ -267,7 +283,21 @@ class Gate(nn.Module):
         routing_weights = routing_weights / routing_weights.sum(dim=-1,keepdim=True).clamp_min(1e-9)
         routing_weights = (routing_weights * self.route_scale).to(x.dtype)
 
-        current_load = torch.bincount(expert_indices.reshape(-1), minlength=self.num_experts)
+        # NOTE: torch.bincount is FORBIDDEN here — on CUDA it sizes its output
+        # from max(input)+1, forcing an internal .max() + host read even when
+        # `minlength` is given (= 2 hidden pipeline drains per layer per
+        # microbatch). Scatter-add histogram has a statically-known output
+        # size and is fully async.
+        flat_expert_ids = expert_indices.reshape(-1)
+        current_load = torch.zeros(
+            self.num_experts,
+            dtype=torch.long,
+            device=x.device,
+        ).scatter_add_(
+            0,
+            flat_expert_ids,
+            torch.ones_like(flat_expert_ids),
+        )
         num_tokens = x.shape[0]
         load_fraction = (current_load.float() / max(num_tokens * self.top_k, 1))
         mean_probability = scores.mean(dim=0)
