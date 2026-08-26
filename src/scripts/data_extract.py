@@ -23,7 +23,6 @@ Known accepted behaviour:
     overshoot) — deliberate, per pipeline owner.
 """
 
-import gc
 import json
 import os
 import re
@@ -296,6 +295,136 @@ class SEQEXTRACTER:
             if num_tok_per_bucket[ctx] >= token_budget[ctx]:
                 bucket_exhausted[ctx] = True
 
+    def _extract_single(self, ds_entry, total_weight: float,
+                        temp_dir: str, source_split: Optional[str],
+                        max_rows: Optional[int], upload: bool,
+                        hf_namespace: str) -> None:
+        """Extract one dataset. Runs in a subprocess for memory isolation."""
+        fmt_fn = FORMAT_FNS.get(ds_entry.yarn_fmt_fn or "default")
+        if fmt_fn is None:
+            raise KeyError(
+                f"yarn_fmt_fn={ds_entry.yarn_fmt_fn!r} has no format "
+                f"function; available: {sorted(FORMAT_FNS)}"
+            )
+
+        weight_frac = ds_entry.weight / total_weight
+        token_budget = {ctx: self.buckets[ctx] * weight_frac
+                        for ctx in CTX_BUCKETS}
+        num_tok_per_bucket = {ctx: 0 for ctx in CTX_BUCKETS}
+        bucket_buffers: Dict[int, List[str]] = {ctx: [] for ctx in CTX_BUCKETS}
+        bucket_exhausted = {ctx: False for ctx in CTX_BUCKETS}
+        shard_idx_per_bucket = {ctx: 0 for ctx in CTX_BUCKETS}
+        schema = pa.schema([("text", pa.string())])
+
+        stats = {"seen": 0, "rejected": 0, "tokenized": 0,
+                 "out_of_range": 0, "_i": 0}
+
+        def _write_shard(ctx: int) -> None:
+            if not bucket_buffers[ctx]:
+                return
+            path = os.path.join(
+                temp_dir,
+                f"{ds_entry.name}-ctx{ctx}-{shard_idx_per_bucket[ctx]:05d}.parquet",
+            )
+            pq.write_table(
+                pa.Table.from_pydict({"text": bucket_buffers[ctx]},
+                                     schema=schema),
+                path, compression="snappy",
+            )
+            bucket_buffers[ctx].clear()
+            shard_idx_per_bucket[ctx] += 1
+
+        resolved_split = (source_split or ds_entry.split or "train").lower()
+        data_stream = load_dataset(
+            ds_entry.repo_id,
+            name=ds_entry.config_name,
+            data_dir=ds_entry.data_dir,
+            split=resolved_split,
+            streaming=ds_entry.streaming,
+        )
+        # Shuffle only for datasets with known ordering issues
+        # (e.g. stackexchange is sorted alphabetically by site).
+        # DO NOT shuffle large-row datasets like dclm-edu — the shuffle
+        # buffer pre-fills 1k rows and each web page can be MBs, causing OOM.
+        _NEEDS_SHUFFLE = {"stackexchange_programming_cs"}
+        if (ds_entry.yarn_fmt_fn in _NEEDS_SHUFFLE
+                and hasattr(data_stream, 'shuffle')):
+            data_stream = data_stream.shuffle(seed=42, buffer_size=1_000)
+
+        print(f"[extract] {ds_entry.name} (fmt={ds_entry.yarn_fmt_fn}, "
+              f"budgets={ {k: f'{v/1e6:.0f}M' for k, v in token_budget.items()} })")
+        pending: List[str] = []
+
+        def _flush_pending() -> None:
+            if not pending:
+                return
+            self._flush_token_batch(
+                list(pending), stats, num_tok_per_bucket,
+                token_budget, bucket_buffers, bucket_exhausted)
+            pending.clear()
+
+        for row in data_stream:
+            stats["seen"] += 1
+            if max_rows is not None and stats["seen"] > max_rows:
+                print(f"[dry-run] row cap {max_rows} reached")
+                break
+
+            # ── Phase 1: cheap per-row ops ──
+            try:
+                text = fmt_fn(row)
+            except Exception:
+                stats["rejected"] += 1
+                continue
+            if text is None or not (MIN_CHARS <= len(text) <= MAX_CHARS):
+                stats["rejected"] += 1
+                continue
+            pending.append(text)
+
+            # ── Phase 2: batched tokenization ──
+            if len(pending) >= self.batch_size:
+                _flush_pending()
+
+            if all(bucket_exhausted.values()):
+                break
+
+            if stats["seen"] % (self.batch_size * self.log_every) == 0:
+                pct = {c: f"{num_tok_per_bucket[c] / max(token_budget[c], 1):.0%}"
+                       for c in CTX_BUCKETS}
+                print(f"  rows={stats['seen']:,} rej={stats['rejected']:,} "
+                      f"tok={stats['tokenized']:,} oor={stats['out_of_range']:,} "
+                      f"budget={pct}")
+
+        _flush_pending()
+
+        # ── final shards + budget enforcement on leftovers ──
+        for ctx in CTX_BUCKETS:
+            if num_tok_per_bucket[ctx] >= token_budget[ctx]:
+                bucket_exhausted[ctx] = True
+            _write_shard(ctx)
+
+        print(f"[done] {ds_entry.name}: {stats}")
+        state = {"done": True, "stats": {
+            k: v for k, v in stats.items() if not k.startswith("_")}}
+        self._save_state(ds_entry.name, state)
+
+        if upload:
+            api = HfApi()
+            for ctx in CTX_BUCKETS:
+                if shard_idx_per_bucket[ctx] == 0:
+                    continue
+                target_repo_id = f"{hf_namespace}/{ds_entry.name}-ctx-{ctx}"
+                api.create_repo(repo_id=target_repo_id,
+                                repo_type="dataset", exist_ok=True)
+                print(f"[upload] {shard_idx_per_bucket[ctx]} shards "
+                      f"-> {target_repo_id}")
+                api.upload_folder(
+                    folder_path=temp_dir,
+                    repo_id=target_repo_id,
+                    repo_type="dataset",
+                    path_in_repo="data",
+                    allow_patterns=f"{ds_entry.name}-ctx{ctx}-*.parquet",
+                )
+
     # ── main ──────────────────────────────────────────────────────
 
     def extractor(self,
@@ -307,12 +436,20 @@ class SEQEXTRACTER:
         ):
         """Run extraction for every dataset in the phase config.
 
+        Each dataset runs in a **subprocess** to guarantee full memory
+        reclamation between datasets. On constrained machines (8 GB),
+        HF ``load_dataset`` accumulates module-level caches that
+        ``gc.collect()`` cannot free.
+
         Args:
             temp_dir:   shard staging dir (unique tmpdir per run by default).
             shard_size: docs per intermediate shard.
             max_rows:   DEBUG cap on rows per dataset (dry-run).
             upload:     set False for dry runs (shards stay on disk).
         """
+        import multiprocessing as mp
+        ctx = mp.get_context("fork")
+
         api = HfApi()
         hf_namespace = api.whoami()["name"] if upload else "dryrun"
         owned_temp = temp_dir is None
@@ -328,129 +465,19 @@ class SEQEXTRACTER:
                     print(f"[skip] {ds_entry.name}: already complete")
                     continue
 
-                fmt_fn = FORMAT_FNS.get(ds_entry.yarn_fmt_fn or "default")
-                if fmt_fn is None:
-                    raise KeyError(
-                        f"yarn_fmt_fn={ds_entry.yarn_fmt_fn!r} has no format "
-                        f"function; available: {sorted(FORMAT_FNS)}"
-                    )
-
-                weight_frac = ds_entry.weight / total_weight
-                token_budget = {ctx: self.buckets[ctx] * weight_frac
-                                for ctx in CTX_BUCKETS}
-                num_tok_per_bucket = {ctx: 0 for ctx in CTX_BUCKETS}
-                bucket_buffers: Dict[int, List[str]] = {ctx: [] for ctx in CTX_BUCKETS}
-                bucket_exhausted = {ctx: False for ctx in CTX_BUCKETS}
-                shard_idx_per_bucket = {ctx: 0 for ctx in CTX_BUCKETS}
-                schema = pa.schema([("text", pa.string())])
-
-                stats = {"seen": 0, "rejected": 0, "tokenized": 0,
-                         "out_of_range": 0, "_i": 0}
-
-                def _write_shard(ctx: int) -> None:
-                    if not bucket_buffers[ctx]:
-                        return
-                    path = os.path.join(
-                        temp_dir,
-                        f"{ds_entry.name}-ctx{ctx}-{shard_idx_per_bucket[ctx]:05d}.parquet",
-                    )
-                    pq.write_table(
-                        pa.Table.from_pydict({"text": bucket_buffers[ctx]},
-                                             schema=schema),
-                        path, compression="snappy",
-                    )
-                    bucket_buffers[ctx].clear()
-                    shard_idx_per_bucket[ctx] += 1
-
-                resolved_split = (source_split or ds_entry.split or "train").lower()
-                data_stream = load_dataset(
-                    ds_entry.repo_id,
-                    name=ds_entry.config_name,
-                    data_dir=ds_entry.data_dir,
-                    split=resolved_split,
-                    streaming=ds_entry.streaming,
+                # Run in a child process for memory isolation.
+                p = ctx.Process(
+                    target=self._extract_single,
+                    args=(ds_entry, total_weight, temp_dir,
+                          source_split, max_rows, upload, hf_namespace),
                 )
-                # Shuffle streaming datasets to avoid site-clustering effects
-                # (e.g. stackexchange sorted alphabetically by site).
-                if ds_entry.streaming and hasattr(data_stream, 'shuffle'):
-                    data_stream = data_stream.shuffle(seed=42, buffer_size=1_000)
+                p.start()
+                p.join()
 
-                print(f"[extract] {ds_entry.name} (fmt={ds_entry.yarn_fmt_fn}, "
-                      f"budgets={ {k: f'{v/1e6:.0f}M' for k, v in token_budget.items()} })")
-                pending: List[str] = []
-
-                def _flush_pending() -> None:
-                    if not pending:
-                        return
-                    self._flush_token_batch(
-                        list(pending), stats, num_tok_per_bucket,
-                        token_budget, bucket_buffers, bucket_exhausted)
-                    pending.clear()
-
-                for row in data_stream:
-                    stats["seen"] += 1
-                    if max_rows is not None and stats["seen"] > max_rows:
-                        print(f"[dry-run] row cap {max_rows} reached")
-                        break
-
-                    # ── Phase 1: cheap per-row ops ──
-                    try:
-                        text = fmt_fn(row)
-                    except Exception:
-                        stats["rejected"] += 1
-                        continue
-                    if text is None or not (MIN_CHARS <= len(text) <= MAX_CHARS):
-                        stats["rejected"] += 1
-                        continue
-                    pending.append(text)
-
-                    # ── Phase 2: batched tokenization ──
-                    if len(pending) >= self.batch_size:
-                        _flush_pending()
-
-                    if all(bucket_exhausted.values()):
-                        break
-
-                    if stats["seen"] % (self.batch_size * self.log_every) == 0:
-                        pct = {c: f"{num_tok_per_bucket[c] / max(token_budget[c], 1):.0%}"
-                               for c in CTX_BUCKETS}
-                        print(f"  rows={stats['seen']:,} rej={stats['rejected']:,} "
-                              f"tok={stats['tokenized']:,} oor={stats['out_of_range']:,} "
-                              f"budget={pct}")
-
-                _flush_pending()
-
-                # ── final shards + budget enforcement on leftovers ──
-                for ctx in CTX_BUCKETS:
-                    if num_tok_per_bucket[ctx] >= token_budget[ctx]:
-                        bucket_exhausted[ctx] = True
-                    _write_shard(ctx)
-
-                print(f"[done] {ds_entry.name}: {stats}")
-                state.update({"done": True, "stats": {
-                    k: v for k, v in stats.items() if not k.startswith("_")}})
-                self._save_state(ds_entry.name, state)
-
-                if upload:
-                    for ctx in CTX_BUCKETS:
-                        if shard_idx_per_bucket[ctx] == 0:
-                            continue
-                        target_repo_id = f"{hf_namespace}/{ds_entry.name}-ctx-{ctx}"
-                        api.create_repo(repo_id=target_repo_id,
-                                        repo_type="dataset", exist_ok=True)
-                        print(f"[upload] {shard_idx_per_bucket[ctx]} shards "
-                              f"-> {target_repo_id}")
-                        api.upload_folder(
-                            folder_path=temp_dir,
-                            repo_id=target_repo_id,
-                            repo_type="dataset",
-                            path_in_repo="data",
-                            allow_patterns=f"{ds_entry.name}-ctx{ctx}-*.parquet",
-                        )
-
-                # ── free memory before next dataset ──
-                del data_stream, bucket_buffers, pending
-                gc.collect()
+                if p.exitcode != 0:
+                    print(f"[ERROR] {ds_entry.name} exited with code "
+                          f"{p.exitcode} — skipping")
+                    continue
         finally:
             if owned_temp:
                 shutil.rmtree(temp_dir, ignore_errors=True)
@@ -458,6 +485,7 @@ class SEQEXTRACTER:
 
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser(description="YaRN long-sequence extractor")
     parser.add_argument("--max-rows", type=int, default=None,
                         help="DEBUG row cap per dataset (dry-run)")
@@ -469,3 +497,4 @@ if __name__ == "__main__":
     extractor.extractor(temp_dir=args.temp_dir,
                         max_rows=args.max_rows,
                         upload=not args.no_upload)
+
