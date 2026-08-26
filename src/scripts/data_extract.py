@@ -372,7 +372,7 @@ class SEQEXTRACTER:
                 # Shuffle streaming datasets to avoid site-clustering effects
                 # (e.g. stackexchange sorted alphabetically by site).
                 if ds_entry.streaming and hasattr(data_stream, 'shuffle'):
-                    data_stream = data_stream.shuffle(seed=42, buffer_size=10_000)
+                    data_stream = data_stream.shuffle(seed=42, buffer_size=1_000)
 
                 print(f"[extract] {ds_entry.name} (fmt={ds_entry.yarn_fmt_fn}, "
                       f"budgets={ {k: f'{v/1e6:.0f}M' for k, v in token_budget.items()} })")

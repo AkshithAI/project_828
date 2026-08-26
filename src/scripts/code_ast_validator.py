@@ -23,6 +23,7 @@ silent degradation would defeat the quality contract).
 """
 
 import re
+import warnings
 from typing import Dict, List, Optional, Tuple
 
 # ── StarCoder2 text gates ────────────────────────────────────────────
@@ -217,7 +218,9 @@ def _python_syntax_and_defs(text: str) -> Tuple[bool, List[str]]:
     import ast
     failures: List[str] = []
     try:
-        tree = ast.parse(text)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(text)
     except SyntaxError as e:
         return False, [f"python_syntax_error:{e.lineno}"]
     defs = sum(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
@@ -308,7 +311,9 @@ def has_syntax_error(text: str, lang: str) -> bool:
     if lang == "python":
         import ast
         try:
-            ast.parse(text)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", SyntaxWarning)
+                ast.parse(text)
             return False
         except SyntaxError:
             return True
