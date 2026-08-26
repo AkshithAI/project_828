@@ -21,3 +21,11 @@ liger-kernel>=0.5.0
 # Data packing dependencies
 # numba
 # polars
+tree-sitter>=0.22
+tree-sitter-javascript
+tree-sitter-typescript
+tree-sitter-java
+tree-sitter-c
+tree-sitter-cpp
+tree-sitter-go
+tree-sitter-rust

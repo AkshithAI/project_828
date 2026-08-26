@@ -508,9 +508,15 @@ def compute_cu_seqlens(batch: torch.Tensor, eos_id: int) -> Tuple[torch.Tensor, 
     B, S = batch.shape
     device = batch.device
 
-    # Document ends: flat position just past each EOS token.
+    # Document ends: flat position just past each EOS token.  Add every row
+    # boundary as well: a batch row is an independent packed stream even when
+    # its final document has no EOS (for example after fixed-length chunking).
+    # Without these ends, FlashAttention would allow the last document in row N
+    # to attend to the first document in row N+1 after flattening.
     rows, cols = torch.nonzero(batch == eos_id, as_tuple=True)
-    ends = rows * S + (cols + 1)
+    eos_ends = rows * S + (cols + 1)
+    row_ends = torch.arange(1, B + 1, dtype=torch.int64, device=device) * S
+    ends = torch.cat([eos_ends, row_ends])
 
     # Dedupe (consecutive EOS tokens would create empty sequences) and sort.
     ends = torch.unique(ends)
@@ -523,6 +529,36 @@ def compute_cu_seqlens(batch: torch.Tensor, eos_id: int) -> Tuple[torch.Tensor, 
 
     max_seqlen = int((cu[1:] - cu[:-1]).max().item()) if cu.numel() > 1 else S
     return cu.to(torch.int32), max_seqlen
+
+
+def compute_packed_attention_metadata(
+    batch: torch.Tensor,
+    eos_id: int,
+) -> Tuple[torch.Tensor, torch.Tensor, int]:
+    """Build FlashAttention boundaries and RoPE positions for packed rows.
+
+    Each document begins at RoPE position zero. This matches the block-diagonal
+    attention mask represented by ``cu_seqlens``: documents cannot attend to
+    each other and therefore must not inherit an unrelated document's absolute
+    position. Call this on the CPU token batch before the asynchronous H2D
+    transfer; the two returned tensors are small relative to the token batch.
+
+    Returns:
+        ``(cu_seqlens, position_ids, max_seqlen)`` where ``position_ids`` has
+        the same ``(B, S)`` shape as ``batch`` and is ``torch.long``.
+    """
+    cu_seqlens, max_seqlen = compute_cu_seqlens(batch, eos_id)
+    B, S = batch.shape
+    total = B * S
+
+    # Vectorized segmented arange: mark each dolcument start, propagate the
+    # latest start to the right, then subtract it from the flattened index.
+    starts = torch.zeros(total, dtype=torch.long, device=batch.device)
+    starts[cu_seqlens[:-1].to(torch.long)] = cu_seqlens[:-1].to(torch.long)
+    latest_start = torch.cummax(starts, dim=0).values
+    flat_positions = torch.arange(total, dtype=torch.long, device=batch.device) - latest_start
+
+    return cu_seqlens, flat_positions.view(B, S), max_seqlen
 
 
 @dataclass

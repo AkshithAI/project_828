@@ -10,7 +10,7 @@ import torch.nn as nn
 from tqdm import tqdm
 from torch.amp import autocast
 from ..tokenizer import tokenizer
-from ..dataloader import create_phase_dataloaders
+from ..dataloader import create_phase_dataloaders, compute_packed_attention_metadata
 from ..helper_funcs import (
     get_base_dir, save_checkpoint, save_checkpoint_async,
     load_checkpoint, get_gpu_peak_flops, get_training_logger,
@@ -184,6 +184,15 @@ def train_phase(
                 profiling_started = True
 
             nvtx_push("data_to_device")
+            # The mixer packs several documents in each fixed-length row.  Build
+            # block-diagonal FlashAttention metadata before moving the batch to
+            # the GPU, then reset RoPE positions at every document boundary.
+            # Metadata must describe ``inputs`` (the shifted batch), not the
+            # unshifted row, because the model never sees its final token.
+            packed_inputs = batch[:, :-1].contiguous()
+            cu_seqlens_cpu, position_ids_cpu, max_seqlen = compute_packed_attention_metadata(
+                packed_inputs, eos_id,
+            )
             # ── Optimization: H2D copy on a dedicated transfer stream ──
             # The copy engine (CE) executes the DMA concurrently with the
             # previous microbatch's backward kernels still draining on the
@@ -201,6 +210,8 @@ def train_phase(
                 batch = batch.pin_memory()
             with torch.cuda.stream(transfer_stream):
                 gpu_batch = batch.to(config.device, non_blocking=True).long()
+                cu_seqlens = cu_seqlens_cpu.to(config.device, non_blocking=True)
+                position_ids = position_ids_cpu.to(config.device, non_blocking=True)
                 transfer_done.record(transfer_stream)
             torch.cuda.current_stream(config.device).wait_event(transfer_done)
             inputs = gpu_batch[:, :-1].contiguous()
@@ -222,9 +233,24 @@ def train_phase(
             nvtx_push("forward_and_loss")
             with autocast(device_type="cuda", dtype=torch.bfloat16):
                 try:
-                    res = model(inputs, labels=targets, collect_routing_telemetry=collect_routing)
+                    res = model(
+                        inputs,
+                        labels=targets,
+                        collect_routing_telemetry=collect_routing,
+                        position_ids=position_ids,
+                        cu_seqlens=cu_seqlens,
+                        max_seqlen=max_seqlen,
+                    )
                 except TypeError:
-                    res = model(inputs)
+                    # model_improv is a logits-only compatibility model.  It
+                    # still needs the packing metadata even though it does not
+                    # accept the model_adv loss/telemetry arguments.
+                    res = model(
+                        inputs,
+                        position_ids=position_ids,
+                        cu_seqlens=cu_seqlens,
+                        max_seqlen=max_seqlen,
+                    )
 
                 first, aux_loss = res
                 if first.dim() == 0:

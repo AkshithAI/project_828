@@ -45,7 +45,8 @@ class DatasetEntry:
     name: str                          
     repo_id: str                       
     weight: int                        
-    format_fn: str = "default"         
+    format_fn: str = "default"
+    yarn_fmt_fn: Optional[str] = None         
     config_name: Optional[str] = None  
     data_dir: Optional[str] = None     
     split: str = "train"               
@@ -396,6 +397,124 @@ PHASE_2_CONFIG = PhaseConfig(
     ],
 )
 
+
+PHASE_3_CONFIG = PhaseConfig(
+    phase_name="yarn_extension",
+    phase_num=3,
+    peak_lr=5e-5,
+    min_lr=3e-6,
+    warmup_steps=2000,
+    total_steps=28_000,
+    scheduler_type="wsd",
+    wsd_stable_frac=0.76,
+    micro_batch_size=16,
+    grad_accum_steps=4,
+    grad_clip=1.0,
+    val_interval=2000,
+    val_steps=500,
+    eval_suite_interval=5000,
+    datasets=[
+        # ── Source Code (45%) ─────────────────────────────────
+        DatasetEntry(
+            name="starcoderdata-python",
+            repo_id="bigcode/starcoderdata",
+            weight=14,
+            yarn_fmt_fn="starcoder_python",
+            data_dir="python",
+        ),
+        DatasetEntry(
+            name="starcoderdata-javascript",
+            repo_id="bigcode/starcoderdata",
+            weight=5,
+            yarn_fmt_fn="starcoder_javascript",
+            data_dir="javascript",
+        ),
+        DatasetEntry(
+            name="starcoderdata-java",
+            repo_id="bigcode/starcoderdata",
+            weight=5,
+            yarn_fmt_fn="starcoder_java",
+            data_dir="java",
+        ),
+        DatasetEntry(
+            name="starcoderdata-typescript",
+            repo_id="bigcode/starcoderdata",
+            weight=5,
+            yarn_fmt_fn="starcoder_typescript",
+            data_dir="typescript",
+        ),
+        DatasetEntry(
+            name="starcoderdata-cpp",
+            repo_id="bigcode/starcoderdata",
+            weight=5,
+            yarn_fmt_fn="starcoder_cpp",
+            data_dir="cpp",
+        ),
+        DatasetEntry(
+            name="starcoderdata-c",
+            repo_id="bigcode/starcoderdata",
+            weight=4,
+            yarn_fmt_fn="starcoder_c",
+            data_dir="c",
+        ),
+        DatasetEntry(
+            name="starcoderdata-go",
+            repo_id="bigcode/starcoderdata",
+            weight=7,
+            yarn_fmt_fn="starcoder_go",
+            data_dir="go",
+        ),
+        DatasetEntry(
+            name="starcoderdata-rust",
+            repo_id="bigcode/starcoderdata",
+            weight=5,
+            yarn_fmt_fn="starcoder_rust",
+            data_dir="rust",
+        ),
+        # ── Educational Code (9%) — Teach code reasoning ─────
+        DatasetEntry(
+            name="tiny-codes",
+            repo_id="nampdn-ai/tiny-codes",
+            weight=3,
+            yarn_fmt_fn="tiny_codes",
+            max_epochs=2,
+        ),
+        # ── CS Knowledge (17%) ────────────────────────────────
+        DatasetEntry(
+            name="stackexchange-programming-cs",
+            repo_id="common-pile/stackexchange",
+            weight=10,
+            yarn_fmt_fn="stackexchange_programming_cs",
+        ),
+        DatasetEntry(
+            name="dclm-edu",
+            repo_id="HuggingFaceTB/dclm-edu",
+            weight=5,
+            yarn_fmt_fn="dclm_edu",
+        ),
+        # ── General Knowledge (18%) ───────────────────────────
+        DatasetEntry(
+            name="fineweb-edu-dedup",
+            repo_id="HuggingFaceTB/smollm-corpus",
+            weight=15,
+            yarn_fmt_fn="fineweb_dedup",
+            config_name="fineweb-edu-dedup",
+        ),
+        DatasetEntry(
+            name="fineweb-finepdfs-edu",
+            repo_id="HuggingFaceFW/finepdfs-edu",
+            weight=15,
+            yarn_fmt_fn="finepdfs",
+        ),
+        DatasetEntry(
+            name="wikipedia-en",
+            repo_id="wikimedia/wikipedia",
+            weight=2,
+            yarn_fmt_fn="wikipedia",
+            config_name="20231101.en",
+        ),
+    ]
+)
 
 config = ModelConfig()
 
