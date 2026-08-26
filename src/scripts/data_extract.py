@@ -23,6 +23,7 @@ Known accepted behaviour:
     overshoot) — deliberate, per pipeline owner.
 """
 
+import gc
 import json
 import os
 import re
@@ -446,6 +447,10 @@ class SEQEXTRACTER:
                             path_in_repo="data",
                             allow_patterns=f"{ds_entry.name}-ctx{ctx}-*.parquet",
                         )
+
+                # ── free memory before next dataset ──
+                del data_stream, bucket_buffers, pending
+                gc.collect()
         finally:
             if owned_temp:
                 shutil.rmtree(temp_dir, ignore_errors=True)
