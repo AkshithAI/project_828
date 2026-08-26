@@ -471,14 +471,6 @@ PHASE_3_CONFIG = PhaseConfig(
             yarn_fmt_fn="starcoder_rust",
             data_dir="rust",
         ),
-        # ── Educational Code (9%) — Teach code reasoning ─────
-        DatasetEntry(
-            name="tiny-codes",
-            repo_id="nampdn-ai/tiny-codes",
-            weight=3,
-            yarn_fmt_fn="tiny_codes",
-            max_epochs=2,
-        ),
         # ── CS Knowledge (17%) ────────────────────────────────
         DatasetEntry(
             name="stackexchange-programming-cs",

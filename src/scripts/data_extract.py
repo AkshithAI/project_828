@@ -64,13 +64,12 @@ CTX_BUCKETS = (2048, 4096, 6144, 8192)
 
 # ── Tokenization / bucketing ──────────────────────────────────────────
 
-# Bucket ranges: a doc must fill >= 75% of its bucket to count
-# (1536/2048, 3072/4096, 4608/6144, 6144/8192). Gaps in between are
-# intentionally dropped.
+# Bucket ranges: contiguous so no documents are dropped between buckets.
+# A doc must reach >= 1536 tokens to enter the smallest bucket.
 _BUCKET_RANGES: Tuple[Tuple[int, int, int], ...] = (
     (2048, 1536, 2048),
-    (4096, 3072, 4096),
-    (6144, 4608, 6144),
+    (4096, 2049, 4096),
+    (6144, 4097, 6144),
     (8192, 6145, 8192),
 )
 
@@ -177,13 +176,13 @@ def _fmt_tiny_codes(row: Dict[str, Any]) -> Optional[str]:
 
 
 def _fmt_dclm_edu(row: Dict[str, Any]) -> Optional[str]:
-    score = row.get("int_score", row.get("score", 0))
+    score = row.get("edu_int_score", row.get("edu_score", 0))
     if isinstance(score, float):
         score = int(score)
     if score < 3:
         return None
     text = row.get("text") or ""
-    cleaned = _clean_stackexchange_text(text)
+    cleaned = _clean_html_text(text)
     return _prose_quality_gate(cleaned)
 
 
@@ -370,6 +369,10 @@ class SEQEXTRACTER:
                     split=resolved_split,
                     streaming=ds_entry.streaming,
                 )
+                # Shuffle streaming datasets to avoid site-clustering effects
+                # (e.g. stackexchange sorted alphabetically by site).
+                if ds_entry.streaming and hasattr(data_stream, 'shuffle'):
+                    data_stream = data_stream.shuffle(seed=42, buffer_size=10_000)
 
                 print(f"[extract] {ds_entry.name} (fmt={ds_entry.yarn_fmt_fn}, "
                       f"budgets={ {k: f'{v/1e6:.0f}M' for k, v in token_budget.items()} })")

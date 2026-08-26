@@ -40,9 +40,9 @@ requires_ts = pytest.mark.skipif(not HAS_TS, reason="tree-sitter grammars missin
 
 class TestBucketing:
     @pytest.mark.parametrize("count,expected", [
-        (1535, None), (1536, 2048), (2048, 2048), (2049, None),
-        (3071, None), (3072, 4096), (4096, 4096), (4097, None),
-        (4607, None), (4608, 6144), (6144, 6144), (6145, 8192),
+        (1535, None), (1536, 2048), (2048, 2048), (2049, 4096),
+        (3071, 4096), (3072, 4096), (4096, 4096), (4097, 6144),
+        (4607, 6144), (4608, 6144), (6144, 6144), (6145, 8192),
         (8192, 8192), (8193, None),
     ])
     def test_bucket_boundaries(self, count, expected):
@@ -91,7 +91,7 @@ class TestFormatFns:
 
     def test_dclm_score_gate(self):
         fn = FORMAT_FNS["dclm_edu"]
-        assert fn({"text": "a", "int_score": 2}) is None
+        assert fn({"text": "a", "edu_int_score": 2}) is None
 
     def test_wikipedia_disambiguation_rejected(self):
         fn = FORMAT_FNS["wikipedia"]
@@ -105,16 +105,12 @@ class TestFormatFns:
         fn = FORMAT_FNS["finepdfs"]
         assert fn({"text": "\x01\x02\x03" * 50}) is None
 
-    def test_tiny_codes_fences_stripped(self):
-        # Fence stripping itself:
+    def test_code_fences_stripped(self):
+        # Fence stripping utility:
         raw = "```python\nx = 1\ny = 2\nz = 3\n```"
         stripped = _strip_code_fences(raw)
         assert "```" not in stripped
-        # The 3-line snippet is correctly REJECTED by the format fn:
-        # it has <2 top-level defs and could never reach the 1536-token
-        # floor of the smallest bucket.
-        fn = FORMAT_FNS["tiny_codes"]
-        assert fn({"response": raw, "language": "python"}) is None
+        assert "x = 1" in stripped
 
 
 # ── code AST validator ───────────────────────────────────────────────
