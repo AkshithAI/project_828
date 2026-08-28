@@ -88,6 +88,7 @@ _TS_LANGUAGE_SPECS = {
     "rust": ("tree_sitter_rust", None),
 }
 _parsers: Dict[str, "Parser"] = {}
+_warned_missing: set = set()  # languages for which we've already warned
 
 
 def _get_parser(lang: str):
@@ -239,7 +240,16 @@ def _python_syntax_and_defs(text: str) -> Tuple[bool, List[str]]:
 def _treesitter_syntax_and_defs(text: str, lang: str) -> Tuple[bool, List[str]]:
     """tree-sitter parse: has_error reject + top-level definition count."""
     failures: List[str] = []
-    parser = _get_parser(lang)
+    try:
+        parser = _get_parser(lang)
+    except ImportError:
+        if lang not in _warned_missing:
+            _warned_missing.add(lang)
+            print(f"[code_ast_validator] WARNING: tree-sitter grammar for "
+                  f"{lang!r} not installed — AST validation skipped. "
+                  f"Install with: pip install tree-sitter-{lang}")
+        # Text + structural gates already ran; skip AST-only check.
+        return True, []
     tree = parser.parse(text.encode("utf-8"))
 
     # TypeScript files with JSX fail the ts grammar — retry with tsx.

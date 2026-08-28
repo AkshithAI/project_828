@@ -29,6 +29,8 @@ import re
 import shutil
 import sys
 import tempfile
+import time
+import traceback
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -177,17 +179,23 @@ def _fmt_tiny_codes(row: Dict[str, Any]) -> Optional[str]:
 
 def _fmt_dclm_edu(row: Dict[str, Any]) -> Optional[str]:
     score = row.get("edu_int_score", row.get("edu_score", 0))
-    if isinstance(score, float):
+    try:
         score = int(score)
+    except (TypeError, ValueError):
+        return None
     if score < 3:
         return None
     text = row.get("text") or ""
+    if not isinstance(text, str):
+        return None
     cleaned = _clean_html_text(text)
     return _prose_quality_gate(cleaned)
 
 
 def _fmt_wikipedia(row: Dict[str, Any]) -> Optional[str]:
     text = row.get("text") or ""
+    if not isinstance(text, str):
+        return None
     title = row.get("title") or ""
     if len(text) < 500 or "may refer to:" in text[:200]:
         return None
@@ -197,14 +205,14 @@ def _fmt_wikipedia(row: Dict[str, Any]) -> Optional[str]:
 
 def _fmt_fineweb(row: Dict[str, Any]) -> Optional[str]:
     text = row.get("text") or ""
-    if not text:
+    if not text or not isinstance(text, str):
         return None
     return _prose_quality_gate(_clean_html_text(text))
 
 
 def _fmt_finepdfs(row: Dict[str, Any]) -> Optional[str]:
     text = row.get("text") or ""
-    if not text:
+    if not text or not isinstance(text, str):
         return None
     return _pdf_quality_gate(_clean_html_text(text))
 
@@ -212,12 +220,15 @@ def _fmt_finepdfs(row: Dict[str, Any]) -> Optional[str]:
 def _fmt_stackexchange(row: Dict[str, Any]) -> Optional[str]:
     """Adapter: dataloader's cleaner already enforces site whitelist,
     chrome stripping, latex density, min length."""
+    text = row.get("text", "")
+    if not isinstance(text, str):
+        return None
     return _fmt_stackexchange_programming_cs(row)
 
 
 def _fmt_default(row: Dict[str, Any]) -> Optional[str]:
     text = row.get("text") or row.get("content") or ""
-    if not text:
+    if not text or not isinstance(text, str):
         return None
     return _prose_quality_gate(_clean_html_text(text))
 
@@ -300,6 +311,19 @@ class SEQEXTRACTER:
                         max_rows: Optional[int], upload: bool,
                         hf_namespace: str) -> None:
         """Extract one dataset. Runs in a subprocess for memory isolation."""
+        try:
+            self._extract_single_impl(
+                ds_entry, total_weight, temp_dir, source_split,
+                max_rows, upload, hf_namespace)
+        except Exception:
+            traceback.print_exc()
+            sys.exit(1)
+
+    def _extract_single_impl(self, ds_entry, total_weight: float,
+                             temp_dir: str, source_split: Optional[str],
+                             max_rows: Optional[int], upload: bool,
+                             hf_namespace: str) -> None:
+        """Inner implementation — separated so _extract_single can catch all errors."""
         fmt_fn = FORMAT_FNS.get(ds_entry.yarn_fmt_fn or "default")
         if fmt_fn is None:
             raise KeyError(
@@ -335,13 +359,23 @@ class SEQEXTRACTER:
             shard_idx_per_bucket[ctx] += 1
 
         resolved_split = (source_split or ds_entry.split or "train").lower()
-        data_stream = load_dataset(
-            ds_entry.repo_id,
-            name=ds_entry.config_name,
-            data_dir=ds_entry.data_dir,
-            split=resolved_split,
-            streaming=ds_entry.streaming,
-        )
+        for _attempt in range(3):
+            try:
+                data_stream = load_dataset(
+                    ds_entry.repo_id,
+                    name=ds_entry.config_name,
+                    data_dir=ds_entry.data_dir,
+                    split=resolved_split,
+                    streaming=ds_entry.streaming,
+                )
+                break
+            except Exception as e:
+                if _attempt < 2:
+                    wait = 2 ** (_attempt + 1)
+                    print(f"[retry] {ds_entry.name}: {e} — retrying in {wait}s")
+                    time.sleep(wait)
+                else:
+                    raise
         # Shuffle only for datasets with known ordering issues
         # (e.g. stackexchange is sorted alphabetically by site).
         # DO NOT shuffle large-row datasets like dclm-edu — the shuffle
@@ -433,6 +467,7 @@ class SEQEXTRACTER:
                   source_split: Optional[str] = None,
                   max_rows: Optional[int] = None,
                   upload: bool = True,
+                  dataset_filter: Optional[List[str]] = None,
         ):
         """Run extraction for every dataset in the phase config.
 
@@ -448,6 +483,8 @@ class SEQEXTRACTER:
             upload:     set False for dry runs (shards stay on disk).
         """
         import multiprocessing as mp
+        # Prevent HF tokenizers Rust thread pool deadlock after fork()
+        os.environ["TOKENIZERS_PARALLELISM"] = "false"
         ctx = mp.get_context("fork")
 
         api = HfApi()
@@ -459,6 +496,10 @@ class SEQEXTRACTER:
         try:
             total_weight = sum(ds.weight for ds in self.phase_config.datasets)
             for ds_entry in self.phase_config.datasets:
+                # ── dataset filter: skip datasets not in the selection ──
+                if dataset_filter and ds_entry.name not in dataset_filter:
+                    continue
+
                 # ── resume: skip fully completed datasets ──
                 state = self._load_state(ds_entry.name) or {}
                 if state.get("done"):
@@ -479,8 +520,12 @@ class SEQEXTRACTER:
                           f"{p.exitcode} — skipping")
                     continue
         finally:
-            if owned_temp:
+            # Only auto-delete temp shards if they were uploaded.
+            # For --no-upload runs, keep shards on disk for inspection.
+            if owned_temp and upload:
                 shutil.rmtree(temp_dir, ignore_errors=True)
+            elif owned_temp:
+                print(f"[info] shards kept at {temp_dir}")
 
 
 if __name__ == "__main__":
@@ -491,10 +536,33 @@ if __name__ == "__main__":
                         help="DEBUG row cap per dataset (dry-run)")
     parser.add_argument("--no-upload", action="store_true")
     parser.add_argument("--temp-dir", type=str, default=None)
+    parser.add_argument("--dataset", type=str, default=None,
+                        help="Comma-separated dataset names to extract "
+                             "(default: all). Use --list-datasets to see names.")
+    parser.add_argument("--list-datasets", action="store_true",
+                        help="Print available dataset names and exit.")
     args = parser.parse_args()
+
+    if args.list_datasets:
+        print("Available datasets in PHASE_3_CONFIG:")
+        total_weight = sum(ds.weight for ds in PHASE_3_CONFIG.datasets)
+        for ds in PHASE_3_CONFIG.datasets:
+            pct = ds.weight / total_weight * 100
+            print(f"  {ds.name:40s}  weight={ds.weight}  ({pct:.1f}%)")
+        sys.exit(0)
+
+    ds_filter = None
+    if args.dataset:
+        ds_filter = [n.strip() for n in args.dataset.split(",")]
+        known = {ds.name for ds in PHASE_3_CONFIG.datasets}
+        unknown = set(ds_filter) - known
+        if unknown:
+            print(f"ERROR: unknown dataset(s): {unknown}")
+            print(f"Available: {sorted(known)}")
+            sys.exit(1)
 
     extractor = SEQEXTRACTER(token_fractions, PHASE_3_CONFIG)
     extractor.extractor(temp_dir=args.temp_dir,
                         max_rows=args.max_rows,
-                        upload=not args.no_upload)
-
+                        upload=not args.no_upload,
+                        dataset_filter=ds_filter)
